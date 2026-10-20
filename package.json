@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbench",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 测试 / 新闻（SQLite 本地库）",
   "type": "module",
   "main": "lib/index.js",

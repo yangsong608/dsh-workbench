@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   descr TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   space_id TEXT NOT NULL,
+  project_path TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
   priority TEXT NOT NULL DEFAULT 'normal',
   date TEXT,
@@ -372,6 +373,8 @@ class SqliteStore {
     this.db = new DatabaseSync(file)
     this.db.exec(SCHEMA)
     this.migrateNews()
+    this.migrateTasks()
+    this.migrateProductMaps()
     this.ensureNotebooks()
     this.ensureProducts()
     this.ensureTests()
@@ -391,6 +394,49 @@ class SqliteStore {
     const columns = (table: string): string[] => (this.db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => String(c.name))
     if (!columns('news_topics').includes('count')) this.db.exec('ALTER TABLE news_topics ADD COLUMN count INTEGER NOT NULL DEFAULT 6')
     if (!columns('news_items').includes('ai_summary')) this.db.exec("ALTER TABLE news_items ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''")
+    if (!columns('notes').includes('map_id')) this.db.exec("ALTER TABLE notes ADD COLUMN map_id TEXT NOT NULL DEFAULT ''")
+  }
+
+  /**
+   * 旧库升级：一个产品可拥有多张导图。
+   * - 新建 product_maps 表；每个产品的旧 products.mindmap 迁成一张「主导图」。
+   * - modules / product_demos / product_inspirations 增加 map_id，并回填到产品的第一张导图。
+   * products.mindmap 保留为第一张导图的镜像（旧版本仍能读到导图）。
+   */
+  private migrateProductMaps(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS product_maps (
+      id TEXT PRIMARY KEY, product_id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '主导图',
+      description TEXT NOT NULL DEFAULT '', mindmap TEXT NOT NULL DEFAULT '{"nodes":[]}',
+      sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`)
+    const columns = (table: string): string[] => (this.db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => String(c.name))
+    for (const table of ['modules', 'product_demos', 'product_inspirations']) {
+      if (!columns(table).includes('map_id')) this.db.exec(`ALTER TABLE ${table} ADD COLUMN map_id TEXT NOT NULL DEFAULT ''`)
+    }
+    const now = isoDateTimeSeconds()
+    const products = this.db.prepare('SELECT id, name, mindmap, created_at FROM products').all() as any[]
+    for (const product of products) {
+      const existing = this.db.prepare('SELECT id FROM product_maps WHERE product_id = ? ORDER BY sort_order, created_at LIMIT 1').get(product.id) as any
+      let mapId = existing?.id as string | undefined
+      if (mapId === undefined) {
+        mapId = `map-${randomUUID().slice(0, 12)}`
+        this.db.prepare('INSERT INTO product_maps(id, product_id, name, description, mindmap, sort_order, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)')
+          .run(mapId, product.id, '主导图', '', String(product.mindmap ?? '{"nodes":[]}'), 0, product.created_at ?? now, now)
+      }
+      for (const table of ['modules', 'product_demos', 'product_inspirations']) {
+        this.db.prepare(`UPDATE ${table} SET map_id = ? WHERE product_id = ? AND map_id = ''`).run(mapId, product.id)
+      }
+      if (existing === undefined) {
+        const saved = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(mapId) as any
+        this.writeMapFile(product.id, saved)
+      }
+    }
+  }
+
+  /** 旧库升级：任务补 project_path（项目 / 工作区绝对路径；空串表示未归属）。 */
+  private migrateTasks(): void {
+    const cols = (this.db.prepare('PRAGMA table_info(tasks)').all() as any[]).map(c => String(c.name))
+    if (!cols.includes('project_path')) this.db.exec("ALTER TABLE tasks ADD COLUMN project_path TEXT NOT NULL DEFAULT ''")
   }
 
   private readMeta(key: string): string | null {
@@ -426,6 +472,7 @@ class SqliteStore {
         desc: t.descr ?? '',
         note: t.note ?? '',
         space: t.space_id,
+        projectPath: t.project_path ?? '',
         status: t.status,
         priority: t.priority ?? 'normal',
         tags: safeJson(t.tags, []),
@@ -468,8 +515,8 @@ class SqliteStore {
         insSpace.run(id, str(space.name, id), str(space.color, '#5b5bd6'), index, now, now)
       })
 
-      const insTask = this.db.prepare(`INSERT INTO tasks(id, title, descr, note, space_id, status, priority, date, start, end, duration, tags, grp, sort, created_at, updated_at, completed_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      const insTask = this.db.prepare(`INSERT INTO tasks(id, title, descr, note, space_id, project_path, status, priority, date, start, end, duration, tags, grp, sort, created_at, updated_at, completed_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       const insSub = this.db.prepare('INSERT INTO subtasks(id, task_id, title, done, planned_start, planned_end, note, sort) VALUES(?,?,?,?,?,?,?,?)')
       const insAtt = this.db.prepare('INSERT INTO attachments(id, task_id, name, kind, size, path) VALUES(?,?,?,?,?,?)')
       const insLog = this.db.prepare('INSERT INTO logs(id, task_id, at, type, text) VALUES(?,?,?,?,?)')
@@ -483,6 +530,7 @@ class SqliteStore {
           str(task.desc),
           str(task.note),
           str(task.space, 'life'),
+          str(task.projectPath),
           str(task.status, 'next'),
           str(task.priority, 'normal'),
           task.date ? str(task.date) : null,
@@ -986,6 +1034,7 @@ CREATE TABLE IF NOT EXISTS products (
     const notebook = this.db.prepare('SELECT id, name, workspace_path FROM notebooks WHERE id = ?').get(wanted) as any
     const notebookId = notebook?.id ? String(notebook.id) : this.defaultNotebookId()
     const nb = notebook?.id ? notebook : this.db.prepare('SELECT id, name, workspace_path FROM notebooks WHERE id = ?').get(notebookId) as any
+    const mapId = str(input?.mapId)
     const existing = this.db.prepare('SELECT id, created_at, file_path FROM notes WHERE id = ?').get(id) as any
     const createdAt = existing?.created_at ?? now
     let filePath = ''
@@ -995,12 +1044,12 @@ CREATE TABLE IF NOT EXISTS products (
       console.warn(`[dsh-workbench] 笔记文件写入失败：${String(cause)}`)
     }
     if (existing) {
-      this.db.prepare('UPDATE notes SET notebook_id=?, title=?, content=?, tags=?, pinned=?, file_path=?, updated_at=? WHERE id=?')
-        .run(notebookId, title, content, JSON.stringify(tags), pinned, filePath, now, id)
+      this.db.prepare('UPDATE notes SET notebook_id=?, title=?, content=?, tags=?, pinned=?, file_path=?, map_id=?, updated_at=? WHERE id=?')
+        .run(notebookId, title, content, JSON.stringify(tags), pinned, filePath, mapId, now, id)
       if (existing.file_path && existing.file_path !== filePath) removeFile(existing.file_path)
     } else {
-      this.db.prepare('INSERT INTO notes(id, notebook_id, title, content, tags, pinned, file_path, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
-        .run(id, notebookId, title, content, JSON.stringify(tags), pinned, filePath, createdAt, now)
+      this.db.prepare('INSERT INTO notes(id, notebook_id, title, content, tags, pinned, file_path, map_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(id, notebookId, title, content, JSON.stringify(tags), pinned, filePath, mapId, createdAt, now)
     }
     return toNote(this.db.prepare('SELECT * FROM notes WHERE id = ?').get(id))
   }
@@ -1068,6 +1117,8 @@ CREATE TABLE IF NOT EXISTS products (
       const dir = join(workspace, '.dsh-workbench', 'products', product.id)
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'mindmap.json'), String(product.mindmap ?? '{"nodes":[]}'), 'utf8')
+      // 多导图：每张导图各自一份 maps/<mapId>.json
+      for (const map of this.listProductMaps(product.id)) this.writeMapFile(product.id, map)
     } catch (cause) {
       console.warn(`[dsh-workbench] 导图文件写入失败：${String(cause)}`)
     }
@@ -1083,6 +1134,73 @@ CREATE TABLE IF NOT EXISTS products (
     return toProduct(next)
   }
 
+  /* ---------- 多导图（一个产品可有多张导图） ---------- */
+  listProductMaps(productId: string): any[] {
+    return (this.db.prepare('SELECT * FROM product_maps WHERE product_id = ? ORDER BY sort_order, created_at').all(productId) as any[]).map(toProductMap)
+  }
+  getProductMap(mapId: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(mapId) as any
+    return row === undefined ? undefined : toProductMap(row)
+  }
+  /** 产品的默认导图（第一张），供未指定 mapId 的旧调用使用。 */
+  defaultMapId(productId: string): string {
+    const row = this.db.prepare('SELECT id FROM product_maps WHERE product_id = ? ORDER BY sort_order, created_at LIMIT 1').get(productId) as any
+    return String(row?.id ?? '')
+  }
+  saveProductMap(input: any): any {
+    const now = isoDateTimeSeconds()
+    const productId = str(input?.productId)
+    const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(productId) as any
+    if (!product) throw new Error('产品不存在')
+    const name = str(input?.name).trim().slice(0, 80) || '未命名导图'
+    const description = str(input?.description).slice(0, 2000)
+    let id = str(input?.id)
+    const existing = id === '' ? undefined : this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(id) as any
+    if (existing === undefined) {
+      id = `map-${randomUUID().slice(0, 12)}`
+      const order = Number((this.db.prepare('SELECT COUNT(*) AS n FROM product_maps WHERE product_id = ?').get(productId) as any)?.n ?? 0)
+      const mindmap = normalizeMindmap(input?.mindmap, name)
+      this.db.prepare('INSERT INTO product_maps(id, product_id, name, description, mindmap, sort_order, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run(id, productId, name, description, mindmap, order, now, now)
+    } else {
+      const mindmap = typeof input?.mindmap === 'string' ? normalizeMindmap(input.mindmap, name) : existing.mindmap
+      this.db.prepare('UPDATE product_maps SET name=?, description=?, mindmap=?, updated_at=? WHERE id=?').run(name, description, mindmap, now, id)
+    }
+    this.syncFirstMapMirror(productId)
+    const saved = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(id) as any
+    this.writeMapFile(productId, saved)
+    return toProductMap(saved)
+  }
+  /** 每张导图镜像到工作区 maps/<mapId>.json（与旧的 mindmap.json 并存）。 */
+  private writeMapFile(productId: string, map: any): void {
+    try {
+      const product = this.db.prepare('SELECT workspace_path FROM products WHERE id = ?').get(productId) as any
+      const workspace = str(product?.workspace_path).trim()
+      if (workspace === '' || !map) return
+      const dir = join(workspace, '.dsh-workbench', 'products', productId, 'maps')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, `${map.id}.json`), String(map.mindmap ?? '{"nodes":[]}'), 'utf8')
+    } catch (cause) { console.warn(`[dsh-workbench] 导图文件写入失败：${String(cause)}`) }
+  }
+  deleteProductMap(mapId: string): void {
+    const row = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(mapId) as any
+    if (!row) return
+    const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM product_maps WHERE product_id = ?').get(row.product_id) as any)?.n ?? 0)
+    if (count <= 1) throw new Error('至少保留一张导图')
+    this.db.prepare('DELETE FROM product_maps WHERE id = ?').run(mapId)
+    this.syncFirstMapMirror(row.product_id)
+    try {
+      const product = this.db.prepare('SELECT workspace_path FROM products WHERE id = ?').get(row.product_id) as any
+      const workspace = str(product?.workspace_path).trim()
+      if (workspace !== '') removeFile(join(workspace, '.dsh-workbench', 'products', row.product_id, 'maps', `${mapId}.json`))
+    } catch { /* 文件删除失败不影响库 */ }
+  }
+  /** products.mindmap 作为第一张导图的镜像，旧版本读取时仍能拿到导图。 */
+  private syncFirstMapMirror(productId: string): void {
+    const first = this.db.prepare('SELECT mindmap FROM product_maps WHERE product_id = ? ORDER BY sort_order, created_at LIMIT 1').get(productId) as any
+    if (first) this.db.prepare('UPDATE products SET mindmap = ? WHERE id = ?').run(first.mindmap, productId)
+  }
+
   deleteProduct(id: string): void {
     const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as any
     if (product?.workspace_path) {
@@ -1091,12 +1209,16 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM product_demos WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM product_inspirations WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM product_demo_progress WHERE product_id = ?').run(id)
+    this.db.prepare('DELETE FROM product_maps WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM products WHERE id = ?').run(id)
   }
 
-  listProductDemos(productId?: string): any[] {
+  listProductDemos(productId?: string, mapId?: string): any[] {
+    const map = str(mapId)
     const rows = productId
-      ? this.db.prepare('SELECT * FROM product_demos WHERE product_id = ? ORDER BY created_at DESC').all(productId)
+      ? (map === '' || map === 'all'
+        ? this.db.prepare('SELECT * FROM product_demos WHERE product_id = ? ORDER BY created_at DESC').all(productId)
+        : this.db.prepare('SELECT * FROM product_demos WHERE product_id = ? AND map_id = ? ORDER BY created_at DESC').all(productId, map))
       : this.db.prepare('SELECT * FROM product_demos ORDER BY created_at DESC').all()
     return rows.map(toProductDemo)
   }
@@ -1109,6 +1231,7 @@ CREATE TABLE IF NOT EXISTS products (
   saveProductDemo(input: any): any {
     const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(str(input?.productId)) as any
     if (!product) throw new Error('产品不存在')
+    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
     const workspace = str(product.workspace_path).trim()
     if (workspace === '') throw new Error('产品未关联工作区')
     const style = str(input?.style).replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'clean'
@@ -1124,15 +1247,18 @@ CREATE TABLE IF NOT EXISTS products (
     const path = join(dir, `${scope === 'feature' ? featureId : 'all'}-${id.slice(-6)}.html`)
     writeFileSync(path, html.slice(0, 2_000_000), 'utf8')
     const now = isoDateTimeSeconds()
-    this.db.prepare('INSERT INTO product_demos(id, product_id, style, scope, feature_id, title, file_path, created_at, platform, kind, status) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, product.id, style, scope, featureId, str(input?.title) || `${product.name} · ${style} · ${scope}`, path, now, platform, kind, 'ready')
+    this.db.prepare('INSERT INTO product_demos(id, product_id, style, scope, feature_id, title, file_path, created_at, platform, kind, status, map_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, product.id, style, scope, featureId, str(input?.title) || `${product.name} · ${style} · ${scope}`, path, now, platform, kind, 'ready', mapId)
     return toProductDemo(this.db.prepare('SELECT * FROM product_demos WHERE id = ?').get(id))
   }
 
   /* ---------- 产品灵感 / Demo 进度 ---------- */
-  listProductInspirations(productId?: string): any[] {
+  listProductInspirations(productId?: string, mapId?: string): any[] {
+    const map = str(mapId)
     const rows = productId
-      ? this.db.prepare('SELECT * FROM product_inspirations WHERE product_id = ? ORDER BY created_at DESC').all(productId)
+      ? (map === '' || map === 'all'
+        ? this.db.prepare('SELECT * FROM product_inspirations WHERE product_id = ? ORDER BY created_at DESC').all(productId)
+        : this.db.prepare('SELECT * FROM product_inspirations WHERE product_id = ? AND map_id = ? ORDER BY created_at DESC').all(productId, map))
       : this.db.prepare('SELECT * FROM product_inspirations ORDER BY created_at DESC').all()
     return rows.map(toInspiration)
   }
@@ -1140,6 +1266,7 @@ CREATE TABLE IF NOT EXISTS products (
   saveProductInspiration(input: any): any {
     const product = this.db.prepare('SELECT id FROM products WHERE id = ?').get(str(input?.productId)) as any
     if (!product) throw new Error('产品不存在')
+    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
     const title = str(input?.title).trim().slice(0, 200)
     if (title === '') throw new Error('灵感标题不能为空')
     const url = normalizeHttpUrl(input?.url)
@@ -1148,10 +1275,10 @@ CREATE TABLE IF NOT EXISTS products (
     const now = isoDateTimeSeconds()
     const takeaways = JSON.stringify(list(input?.takeaways).map(x => str(x).slice(0, 300)).slice(0, 12))
     const tags = JSON.stringify(list(input?.tags).map(x => str(x).slice(0, 40)).slice(0, 10))
-    this.db.prepare('INSERT INTO product_inspirations(id, product_id, feature_id, kind, title, url, source, summary, takeaways, tags, stars, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+    this.db.prepare('INSERT INTO product_inspirations(id, product_id, feature_id, kind, title, url, source, summary, takeaways, tags, stars, created_at, map_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(id, str(input?.productId), str(input?.featureId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60), kind, title, url,
         str(input?.source).slice(0, 120), str(input?.summary).slice(0, 2000), takeaways, tags,
-        Math.max(0, Math.round(Number(input?.stars ?? 0)) || 0), now)
+        Math.max(0, Math.round(Number(input?.stars ?? 0)) || 0), now, mapId)
     return toInspiration(this.db.prepare('SELECT * FROM product_inspirations WHERE id = ?').get(id))
   }
 
@@ -1195,7 +1322,7 @@ CREATE TABLE IF NOT EXISTS products (
     if (!product) throw new Error('产品不存在')
     const featureId = str(input?.featureId)
     const tags = cleanTags([...(list(input?.tags)), '产品', product.name, ...(featureId ? [featureId] : []), ...(str(input?.moduleId) ? [str(input.moduleId)] : []), ...(str(input?.platform) ? [`platform:${str(input.platform)}`] : [])])
-    const note = this.saveNote({ notebookId: product.notebook_id, title: str(input?.title) || '产品设计笔记', content: str(input?.content), tags })
+    const note = this.saveNote({ notebookId: product.notebook_id, title: str(input?.title) || '产品设计笔记', content: str(input?.content), tags, mapId: str(input?.mapId) || this.defaultMapId(product.id) })
     if (str(input?.moduleId)) {
       this.db.prepare('UPDATE modules SET note_id=?, status=?, updated_at=? WHERE id=? AND product_id=?')
         .run(note.id, 'designed', isoDateTimeSeconds(), str(input?.moduleId), product.id)
@@ -1204,9 +1331,12 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /* ---------- 统一模块 / 业务 / 端 ---------- */
-  listModules(productId?: string): any[] {
+  listModules(productId?: string, mapId?: string): any[] {
+    const map = str(mapId)
     const rows = productId
-      ? this.db.prepare('SELECT * FROM modules WHERE product_id = ? ORDER BY created_at, id').all(productId)
+      ? (map === '' || map === 'all'
+        ? this.db.prepare('SELECT * FROM modules WHERE product_id = ? ORDER BY created_at, id').all(productId)
+        : this.db.prepare('SELECT * FROM modules WHERE product_id = ? AND map_id = ? ORDER BY created_at, id').all(productId, map))
       : this.db.prepare('SELECT * FROM modules ORDER BY created_at, id').all()
     return rows.map(toModule)
   }
@@ -1219,19 +1349,20 @@ CREATE TABLE IF NOT EXISTS products (
     if (name === '') throw new Error('模块名称不能为空')
     const kind = ['module', 'business', 'feature', 'requirement'].includes(str(input?.kind)) ? str(input?.kind) : 'module'
     const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input?.platform) : 'all'
-    // 幂等：未显式给 id 时按 (product_id, name, kind) upsert，AI 重跑不产生重复模块
+    const mapId = str(input?.mapId) || this.defaultMapId(productId)
+    // 幂等：未显式给 id 时按 (product_id, map_id, name, kind) upsert，AI 重跑不产生重复模块；同名模块可分属不同导图
     let id = str(input?.id)
     if (id === '') {
-      const dup = this.db.prepare('SELECT id FROM modules WHERE product_id=? AND name=? AND kind=?').get(productId, name, kind) as any
+      const dup = this.db.prepare('SELECT id FROM modules WHERE product_id=? AND map_id=? AND name=? AND kind=?').get(productId, mapId, name, kind) as any
       id = dup?.id ?? `mod-${randomUUID().slice(0, 12)}`
     }
     const existing = this.db.prepare('SELECT id, created_at FROM modules WHERE id = ?').get(id) as any
     if (existing) {
-      this.db.prepare('UPDATE modules SET product_id=?, parent_id=?, name=?, kind=?, platform=?, description=?, note_id=?, status=?, updated_at=? WHERE id=?')
-        .run(productId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', now, id)
+      this.db.prepare('UPDATE modules SET product_id=?, map_id=?, parent_id=?, name=?, kind=?, platform=?, description=?, note_id=?, status=?, updated_at=? WHERE id=?')
+        .run(productId, mapId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', now, id)
     } else {
-      this.db.prepare('INSERT INTO modules(id, product_id, parent_id, name, kind, platform, description, note_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, productId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', existing?.created_at ?? now, now)
+      this.db.prepare('INSERT INTO modules(id, product_id, map_id, parent_id, name, kind, platform, description, note_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, productId, mapId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', existing?.created_at ?? now, now)
     }
     return toModule(this.db.prepare('SELECT * FROM modules WHERE id = ?').get(id))
   }
@@ -1493,6 +1624,7 @@ class JsonStore {
   private products: any[] = []
   private productDemos: any[] = []
   private productInspirations: any[] = []
+  private productMaps: any[] = []
   private demoProgress: any[] = []
   private modules: any[] = []
   private testProjects: any[] = []
@@ -1518,12 +1650,14 @@ class JsonStore {
         this.products = list(parsed.products)
         this.productDemos = list(parsed.productDemos)
         this.productInspirations = list(parsed.productInspirations)
+        this.productMaps = list(parsed.productMaps)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
         this.testProjects = list(parsed.testProjects)
         this.testCases = list(parsed.testCases)
         this.testRuns = list(parsed.testRuns)
         this.revision = Number(parsed.revision ?? 0)
+        this.backfillProductMaps()
         this.seedNotebooks()
         this.seedNotes()
       } catch {
@@ -1565,7 +1699,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -1635,7 +1769,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
@@ -1757,6 +1891,65 @@ class JsonStore {
     } catch (cause) { console.warn(`[dsh-workbench] 导图文件写入失败：${String(cause)}`) }
   }
 
+  /** 旧 JSON 数据升级：每个产品的 mindmap 迁成「主导图」，artefact 回填 mapId。 */
+  private backfillProductMaps(): void {
+    const now = isoDateTimeSeconds()
+    for (const product of this.products) {
+      let first = this.productMaps.find(m => m.productId === product.id)
+      if (first === undefined) {
+        first = { id: `map-${randomUUID().slice(0, 12)}`, productId: product.id, name: '主导图', description: '', mindmap: String(product.mindmap ?? '{"nodes":[]}'), sortOrder: 0, createdAt: product.createdAt ?? now, updatedAt: now }
+        this.productMaps.push(first)
+      }
+      for (const item of [...this.modules, ...this.productDemos, ...this.productInspirations]) {
+        if (item.productId === product.id && !item.mapId) item.mapId = first.id
+      }
+    }
+  }
+  listProductMaps(productId: string): any[] {
+    return this.productMaps.filter(m => m.productId === productId).sort((a, b) => a.sortOrder - b.sortOrder)
+  }
+  getProductMap(mapId: string): any | undefined {
+    return this.productMaps.find(m => m.id === mapId)
+  }
+  defaultMapId(productId: string): string {
+    return this.listProductMaps(productId)[0]?.id ?? ''
+  }
+  saveProductMap(input: any): any {
+    const productId = str(input?.productId)
+    if (!this.products.some(p => p.id === productId)) throw new Error('产品不存在')
+    const now = isoDateTimeSeconds()
+    const name = str(input?.name).trim().slice(0, 80) || '未命名导图'
+    const description = str(input?.description).slice(0, 2000)
+    let id = str(input?.id)
+    let map = id === '' ? undefined : this.productMaps.find(m => m.id === id)
+    if (map === undefined) {
+      id = `map-${randomUUID().slice(0, 12)}`
+      map = { id, productId, name, description, mindmap: normalizeMindmap(input?.mindmap, name), sortOrder: this.listProductMaps(productId).length, createdAt: now, updatedAt: now }
+      this.productMaps.push(map)
+    } else {
+      map.name = name
+      map.description = description
+      if (typeof input?.mindmap === 'string') map.mindmap = normalizeMindmap(input.mindmap, name)
+      map.updatedAt = now
+    }
+    this.syncFirstMapMirror(productId)
+    this.persistNews()
+    return map
+  }
+  deleteProductMap(mapId: string): void {
+    const map = this.productMaps.find(m => m.id === mapId)
+    if (!map) return
+    if (this.listProductMaps(map.productId).length <= 1) throw new Error('至少保留一张导图')
+    this.productMaps = this.productMaps.filter(m => m.id !== mapId)
+    this.syncFirstMapMirror(map.productId)
+    this.persistNews()
+  }
+  private syncFirstMapMirror(productId: string): void {
+    const product = this.products.find(p => p.id === productId)
+    const first = this.listProductMaps(productId)[0]
+    if (product && first) product.mindmap = first.mindmap
+  }
+
   saveProductMindmap(productId: string, mindmap: string): any {
     const product = this.products.find(p => p.id === productId)
     if (!product) throw new Error('产品不存在')
@@ -1774,12 +1967,14 @@ class JsonStore {
     }
     this.productDemos = this.productDemos.filter(d => d.productId !== id)
     this.productInspirations = this.productInspirations.filter(i => i.productId !== id)
+    this.productMaps = this.productMaps.filter(m => m.productId !== id)
     this.demoProgress = this.demoProgress.filter(p => p.productId !== id)
     this.products = this.products.filter(p => p.id !== id)
     this.persistNews()
   }
 
-  listProductDemos(productId?: string): any[] {
+  listProductDemos(productId?: string, mapId?: string): any[] {
+    if (productId && mapId && mapId !== 'all') return this.productDemos.filter(d => d.productId === productId && d.mapId === mapId)
     return this.productDemos.filter(d => productId === undefined || d.productId === productId).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
   }
 
@@ -1790,6 +1985,7 @@ class JsonStore {
   saveProductDemo(input: any): any {
     const product = this.products.find(p => p.id === str(input?.productId))
     if (!product) throw new Error('产品不存在')
+    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
     if (!product.workspacePath) throw new Error('产品未关联工作区')
     const style = str(input?.style).replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'clean'
     const scope = str(input?.scope) === 'feature' ? 'feature' : 'all'
@@ -1803,14 +1999,15 @@ class JsonStore {
     mkdirSync(dir, { recursive: true })
     const path = join(dir, `${scope === 'feature' ? featureId : 'all'}-${id.slice(-6)}.html`)
     writeFileSync(path, html.slice(0, 2_000_000), 'utf8')
-    const demo = { id, productId: product.id, style, scope, featureId, title: str(input?.title) || `${product.name} · ${style} · ${scope}`, filePath: path, createdAt: isoDateTimeSeconds(), platform, kind, status: 'ready' }
+    const demo = { id, productId: product.id, mapId, style, scope, featureId, title: str(input?.title) || `${product.name} · ${style} · ${scope}`, filePath: path, createdAt: isoDateTimeSeconds(), platform, kind, status: 'ready' }
     this.productDemos.push(demo)
     this.persistNews()
     return demo
   }
 
   /* ---------- 产品灵感 / Demo 进度 ---------- */
-  listProductInspirations(productId?: string): any[] {
+  listProductInspirations(productId?: string, mapId?: string): any[] {
+    if (productId && mapId && mapId !== 'all') return this.productInspirations.filter(i => i.productId === productId && i.mapId === mapId)
     return this.productInspirations.filter(i => productId === undefined || i.productId === productId)
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
   }
@@ -1818,6 +2015,7 @@ class JsonStore {
   saveProductInspiration(input: any): any {
     const product = this.products.find(p => p.id === str(input?.productId))
     if (!product) throw new Error('产品不存在')
+    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
     const title = str(input?.title).trim().slice(0, 200)
     if (title === '') throw new Error('灵感标题不能为空')
     const url = normalizeHttpUrl(input?.url)
@@ -1825,6 +2023,7 @@ class JsonStore {
     const insp = {
       id: `insp-${randomUUID().slice(0, 12)}`,
       productId: product.id,
+      mapId,
       featureId: str(input?.featureId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60),
       kind, title, url,
       source: str(input?.source).slice(0, 120),
@@ -1891,7 +2090,8 @@ class JsonStore {
     return note
   }
 
-  listModules(productId?: string): any[] {
+  listModules(productId?: string, mapId?: string): any[] {
+    if (productId && mapId && mapId !== 'all') return this.modules.filter(m => m.productId === productId && m.mapId === mapId)
     return this.modules.filter(m => productId === undefined || m.productId === productId)
   }
 
@@ -1903,15 +2103,16 @@ class JsonStore {
     if (name === '') throw new Error('模块名称不能为空')
     const kind = ['module', 'business', 'feature', 'requirement'].includes(str(input?.kind)) ? str(input?.kind) : 'module'
     const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input?.platform) : 'all'
-    // 幂等：未显式给 id 时按 (productId, name, kind) upsert
+    const mapId = str(input?.mapId) || this.defaultMapId(productId)
+    // 幂等：未显式给 id 时按 (productId, mapId, name, kind) upsert；同名模块可分属不同导图
     let id = str(input?.id)
     if (id === '') {
-      const dup = this.modules.find(m => m.productId === productId && m.name === name && m.kind === kind)
+      const dup = this.modules.find(m => m.productId === productId && m.mapId === mapId && m.name === name && m.kind === kind)
       id = dup?.id ?? `mod-${randomUUID().slice(0, 12)}`
     }
     const existing = this.modules.find(m => m.id === id)
     const module = {
-      id, productId, parentId: str(input?.parentId), name, kind, platform,
+      id, productId, mapId, parentId: str(input?.parentId), name, kind, platform,
       description: str(input?.description).slice(0, 8000), noteId: str(input?.noteId),
       status: str(input?.status) || 'designing', createdAt: existing?.createdAt ?? now, updatedAt: now,
     }
@@ -2554,7 +2755,7 @@ function toTestRun(row: any): any {
 
 function toModule(row: any): any {
   return {
-    id: row.id, productId: row.product_id, parentId: row.parent_id ?? '', name: row.name,
+    id: row.id, productId: row.product_id, mapId: row.map_id ?? '', parentId: row.parent_id ?? '', name: row.name,
     kind: row.kind ?? 'module', platform: row.platform ?? 'all', description: row.description ?? '',
     noteId: row.note_id ?? '', status: row.status ?? 'designing', createdAt: row.created_at, updatedAt: row.updated_at,
   }
@@ -2574,10 +2775,33 @@ function toProduct(row: any): any {
   }
 }
 
+function toProductMap(row: any): any {
+  return {
+    id: row.id,
+    productId: row.product_id,
+    name: row.name,
+    description: row.description ?? '',
+    mindmap: row.mindmap ?? '{"nodes":[]}',
+    sortOrder: Number(row.sort_order ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+/** 导图 JSON 规范化：保证有 nodes 数组且至少有一个根节点。 */
+function normalizeMindmap(raw: unknown, fallbackName: string): string {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) as any : raw as any
+    if (parsed && Array.isArray(parsed.nodes) && parsed.nodes.length > 0) return JSON.stringify(parsed)
+  } catch { /* 回退到默认根节点 */ }
+  return JSON.stringify({ nodes: [{ id: 'root', label: fallbackName, type: 'root', parentId: null, note: '' }] })
+}
+
 function toProductDemo(row: any): any {
   return {
     id: row.id,
     productId: row.product_id,
+    mapId: row.map_id ?? '',
     style: row.style,
     scope: row.scope,
     featureId: row.feature_id ?? '',
@@ -2594,6 +2818,7 @@ function toInspiration(row: any): any {
   return {
     id: row.id,
     productId: row.product_id,
+    mapId: row.map_id ?? '',
     featureId: row.feature_id ?? '',
     kind: row.kind ?? 'web',
     title: row.title,
@@ -2640,6 +2865,7 @@ function toNote(row: any): any {
     tags: safeJson(row.tags, []),
     pinned: Number(row.pinned) === 1,
     filePath: row.file_path ?? '',
+    mapId: row.map_id ?? '',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -2933,7 +3159,7 @@ function registerModuleTool(ctx: any, store: SqliteStore | JsonStore): void {
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
-        productId: { type: 'string' }, parentId: { type: 'string' }, name: { type: 'string' },
+        productId: { type: 'string' }, mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' }, parentId: { type: 'string' }, name: { type: 'string' },
         kind: { type: 'string', enum: ['module', 'business', 'feature', 'requirement'] },
         platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'] },
         description: { type: 'string' }, noteId: { type: 'string' }, status: { type: 'string' },
@@ -3165,6 +3391,7 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
       type: 'object', additionalProperties: false,
       properties: {
         productId: { type: 'string', description: '产品 id。' },
+        mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
         featureId: { type: 'string', description: '导图节点 id（功能/需求）。' },
         moduleId: { type: 'string', description: '模块/业务节点 id。' },
         platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'], description: '端。' },
@@ -3189,6 +3416,7 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
       type: 'object', additionalProperties: false,
       properties: {
         productId: { type: 'string' },
+        mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
         scope: { type: 'string', enum: ['feature', 'all'] },
         kind: { type: 'string', enum: ['page', 'system'], description: 'page=单页面原型；system=带导航的多页产品系统。' },
         platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'], description: '目标端，影响布局与主题。' },
@@ -3214,6 +3442,7 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
       type: 'object', additionalProperties: false,
       properties: {
         productId: { type: 'string', description: '产品 id。' },
+        mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
         featureId: { type: 'string', description: '关联的导图节点 id（可空）。' },
         kind: { type: 'string', enum: ['github', 'web', 'article', 'design', 'tool', 'paper'], description: '资料类型。' },
         title: { type: 'string', description: '资料标题（仓库名/文章标题）。' },
@@ -3425,7 +3654,7 @@ export function apply(ctx: any): void {
           return
         }
         if (method === 'GET' && path === '/modules') {
-          send(res, 200, { modules: store.listModules(str(url.searchParams.get('productId'))) })
+          send(res, 200, { modules: store.listModules(str(url.searchParams.get('productId')), str(url.searchParams.get('mapId'))) })
           return
         }
         if (method === 'POST' && path === '/modules') {
@@ -3452,6 +3681,21 @@ export function apply(ctx: any): void {
         if (method === 'DELETE' && path.startsWith('/products/inspirations/')) {
           const id = decodeURIComponent(path.slice('/products/inspirations/'.length))
           await serialized(() => store.deleteProductInspiration(id))
+          send(res, 200, { ok: true })
+          return
+        }
+        if (method === 'GET' && path === '/products/maps') {
+          send(res, 200, { maps: store.listProductMaps(str(url.searchParams.get('productId'))) })
+          return
+        }
+        if (method === 'POST' && path === '/products/maps') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, map: await serialized(() => store.saveProductMap(body?.map ?? body)) })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/products/maps/')) {
+          const id = decodeURIComponent(path.slice('/products/maps/'.length))
+          await serialized(() => store.deleteProductMap(id))
           send(res, 200, { ok: true })
           return
         }
@@ -3486,7 +3730,7 @@ export function apply(ctx: any): void {
           return
         }
         if (method === 'GET' && path === '/products/inspirations') {
-          send(res, 200, { inspirations: store.listProductInspirations(str(url.searchParams.get('productId') ?? '')) })
+          send(res, 200, { inspirations: store.listProductInspirations(str(url.searchParams.get('productId') ?? ''), str(url.searchParams.get('mapId') ?? '')) })
           return
         }
         if (method === 'POST' && path === '/products/inspirations') {

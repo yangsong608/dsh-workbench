@@ -19,6 +19,8 @@ interface Attachment { id: string; name: string; kind: string; size?: number | n
 interface LogEntry { at: string; type: string; text: string }
 interface Task {
   id: string; title: string; desc: string; note: string; space: string; status: Status; priority: Priority
+  /** 所属项目（= DSH 工作区绝对路径；空串表示未归属）。 */
+  projectPath: string
   tags: string[]; date: string | null; start: string; end: string; duration: number; group: string
   createdAt: string; updatedAt: string; completedAt: string | null
   subtasks: Subtask[]; attachments: Attachment[]; logs: LogEntry[]
@@ -71,17 +73,27 @@ interface Product {
   id: string; name: string; description: string; workspacePath: string; notebookId: string
   mindmap: string; styles: string[]; createdAt: string; updatedAt: string
 }
+/** 一张导图：一个产品可有多张（按业务线 / 版本 / 端拆），设计笔记、模块、灵感、Demo 都挂在导图下。 */
+interface ProductMap {
+  id: string; productId: string; name: string; description: string
+  mindmap: string; sortOrder?: number; createdAt: string; updatedAt: string
+}
+/** 门户「项目」：以 DSH 工作区为聚合法，把产品 / Bug 项目 / 测试项目收在同一张卡上。 */
+interface ProjectCard {
+  path: string; name: string
+  product?: Product; bugProject?: BugProject; tests: TestProject[]
+}
 interface Module {
-  id: string; productId: string; parentId: string; name: string; kind: 'module' | 'business' | 'feature' | 'requirement'
+  id: string; productId: string; mapId?: string; parentId: string; name: string; kind: 'module' | 'business' | 'feature' | 'requirement'
   platform: 'pc' | 'mobile' | 'tablet' | 'all'; description: string; noteId: string; status: string
 }
 interface ProductDemo {
-  id: string; productId: string; style: string; scope: 'feature' | 'all'
+  id: string; productId: string; mapId?: string; style: string; scope: 'feature' | 'all'
   featureId: string; title: string; filePath: string; createdAt: string
   platform?: string; kind?: 'page' | 'system'; status?: string
 }
 interface ProductInspiration {
-  id: string; productId: string; featureId: string
+  id: string; productId: string; mapId?: string; featureId: string
   kind: 'github' | 'web' | 'article' | 'design' | 'tool' | 'paper'
   title: string; url: string; source: string; summary: string
   takeaways: string[]; tags: string[]; stars: number; createdAt: string
@@ -96,7 +108,7 @@ interface GithubHit {
   stars: number; language: string; topics: string[]; updatedAt: string
 }
 interface Note {
-  id: string; notebookId: string; title: string; content: string; tags: string[]; pinned: boolean
+  id: string; notebookId: string; mapId?: string; title: string; content: string; tags: string[]; pinned: boolean
   createdAt: string; updatedAt: string; filePath?: string
 }
 interface CronTask {
@@ -109,7 +121,9 @@ interface DB { spaces: Space[]; tasks: Task[]; focus: FocusSession[]; settings: 
 interface Health { ok: boolean; engine: string; file: string; sqlite?: string; revision: number; tasks: number; spaces: number; focus: number }
 
 interface Ui {
-  view: 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'test'
+  view: 'portal' | 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'test'
+  /** 当前项目范围：'all' 全部 / 'none' 未归属 / 其余为 DSH 工作区绝对路径。 */
+  project: string
   scope: 'today' | 'all'
   space: string
   q: string
@@ -302,10 +316,18 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productDemos: ProductDemo[] = []
   let productModules: Module[] = []
   let productSelected: string | null = null
+  /** 当前产品下的导图清单与选中导图；'' 表示「全部导图」聚合视图。 */
+  let productMaps: ProductMap[] = []
+  let productMapSelected = ''
+  /** 其他页签是否聚合「全部导图」（地图页签永远只看选中导图）。 */
+  let productMapScopeAll = false
+  /** 宿主是否提供多导图接口（旧宿主 404 时退回单导图 + products.mindmap）。 */
+  let productMapsReady = false
   let productTab: 'map' | 'notes' | 'modules' | 'demo' | 'inspiration' = 'map'
   let productNodeSelected: string | null = null
   const productNodeCollapsed = new Set<string>()
   let productMapZoom = 1
+  let ctxMenuOpen = false
   let productPicked = new Set<string>()
   let productStyle = 'clean'
   let productPlatform: 'pc' | 'mobile' | 'tablet' | 'all' = 'all'
@@ -354,7 +376,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let noteSaveState: 'saved' | 'saving' | 'error' = 'saved'
 
   const ui: Ui = {
-    view: 'board', scope: 'today', space: 'all', q: '', selected: null, detailTab: 'detail',
+    view: 'portal', project: 'all', scope: 'today', space: 'all', q: '', selected: null, detailTab: 'detail',
     collapsed: hostEl.clientWidth > 0 ? hostEl.clientWidth < 1250 : window.innerWidth < 1450,
     calendarMode: 'week', calendarAnchor: todayKey(),
     filter: 'all', sort: 'time', compact: false, queueQ: '', statsPeriod: 'week', focusExpand: false, subNoteId: null,
@@ -383,7 +405,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       default: return true
     }
   }
-  const visible = (t: Task): boolean => matchQ(t) && matchSpace(t) && matchFilter(t)
+  const visible = (t: Task): boolean => matchQ(t) && matchSpace(t) && matchFilter(t) && matchProject(t)
   const sortTasks = (items: Task[], mode = ui.sort): Task[] => {
     const copy = items.slice()
     if (mode === 'priority') {
@@ -399,7 +421,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return copy
   }
   const todayStats = (): { done: number; total: number; pending: number } => {
-    const list = db.tasks.filter(t => t.date === todayKey())
+    const list = db.tasks.filter(t => t.date === todayKey() && matchProject(t))
     return {
       done: list.filter(t => t.status === 'done').length,
       total: list.length,
@@ -412,6 +434,129 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   }
   const doneOf = (t: Task): boolean => t.status === 'done'
   const doneAt = (t: Task): string => (t.completedAt ?? '').slice(0, 10) || (t.date ?? '')
+
+  /* ---------- 项目（= DSH 工作区；产品 / Bug / 测试是同一项目下的三个域） ---------- */
+  function projectCards(): ProjectCard[] {
+    const map = new Map<string, ProjectCard>()
+    const ensure = (path: string): ProjectCard => {
+      const found = map.get(path)
+      if (found !== undefined) return found
+      const card: ProjectCard = { path, name: '', tests: [] }
+      map.set(path, card)
+      return card
+    }
+    for (const product of products) {
+      if (!product.workspacePath) continue
+      const card = ensure(product.workspacePath)
+      card.product = product
+      if (card.name === '') card.name = product.name
+    }
+    for (const project of bugProjects) {
+      if (!project.workspacePath) continue
+      const card = ensure(project.workspacePath)
+      card.bugProject = project
+      if (card.name === '') card.name = project.name
+    }
+    for (const project of testProjects) {
+      if (!project.workspacePath) continue
+      const card = ensure(project.workspacePath)
+      card.tests.push(project)
+      if (card.name === '') card.name = project.name
+    }
+    for (const task of db.tasks) if (task.projectPath) ensure(task.projectPath)
+    const cards: ProjectCard[] = []
+    for (const card of map.values()) cards.push({ ...card, name: card.name || bugWorkspaceName(card.path) })
+    return cards.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+  }
+  function projectByPath(path: string): ProjectCard | undefined {
+    return projectCards().find(card => card.path === path)
+  }
+  function projectLabel(path: string): string {
+    if (path === 'all') return '全部项目'
+    if (path === 'none' || path === '') return '未归属'
+    return projectByPath(path)?.name ?? bugWorkspaceName(path)
+  }
+  function projectLabelOfTask(task: Task): string {
+    return task.projectPath ? projectLabel(task.projectPath) : '未归属'
+  }
+  const matchProject = (t: Task): boolean => {
+    if (ui.project === 'all') return true
+    if (ui.project === 'none') return t.projectPath === ''
+    return t.projectPath === ui.project
+  }
+  function projectTaskCount(path: string): number {
+    return path === 'none' ? db.tasks.filter(t => t.projectPath === '').length : db.tasks.filter(t => t.projectPath === path).length
+  }
+  function projectBugCount(path: string): number {
+    return path === 'none' ? 0 : bugs.filter(bug => bugProjectOf(bug.projectId)?.workspacePath === path).length
+  }
+  function projectTestCount(path: string): number {
+    return path === 'none' ? 0 : testProjects.filter(project => project.workspacePath === path).length
+  }
+  function projectNoteCount(path: string): number {
+    if (path === 'none') return 0
+    const ids = new Set(notebooks.filter(book => book.workspacePath === path).map(book => book.id))
+    return notes.filter(note => ids.has(note.notebookId)).length
+  }
+  /** 切换项目范围：同时把产品 / Bug / 测试三个域的当前选择切到该项目，门户点卡片即完成对齐。 */
+  function setProject(path: string, render = true): void {
+    ui.project = path
+    const card = projectByPath(path)
+    if (card?.product !== undefined) {
+      productSelected = card.product.id
+      productPicked = productDefaultPicked(card.product)
+    }
+    if (card?.bugProject !== undefined) bugProjectFilter = card.bugProject.id
+    const targetTest = card?.tests[0]
+    if (targetTest !== undefined) testProjectSelected = targetTest.id
+    db.settings.project = path === 'none' ? '' : path
+    scheduleSave()
+    if (render) renderAll()
+  }
+  /** 会话内恢复上次选中的项目（产品列表加载完成后再调用，避免误判为失效）。 */
+  function restoreProject(): void {
+    const saved = db.settings.project
+    if (typeof saved !== 'string') return
+    const next = saved === '' ? 'none' : saved
+    if (next === 'all' || next === 'none' || projectByPath(next) !== undefined) ui.project = next
+  }
+  function projectSelect(): string {
+    const cards = projectCards()
+    const options = [
+      `<option value="all" ${ui.project === 'all' ? 'selected' : ''}>全部项目</option>`,
+      ...cards.map(card => `<option value="${esc(card.path)}" ${ui.project === card.path ? 'selected' : ''}>${esc(card.name)}</option>`),
+      `<option value="none" ${ui.project === 'none' ? 'selected' : ''}>未归属</option>`,
+    ]
+    return `<select id="wb-project" class="wb-project-select" title="按项目筛选">${options.join('')}</select>`
+  }
+  async function refreshPortal(): Promise<void> {
+    await Promise.all([loadProducts(true), loadBugs(true), loadTests(true)])
+    restoreProject()
+    if (ui.view === 'portal' || ui.view === 'bugs' || ui.view === 'test') renderAll()
+  }
+  function openFeature(view: Ui['view']): void {
+    const card = projectByPath(ui.project)
+    if (view === 'product' && card?.product !== undefined) productSelected = card.product.id
+    if (view === 'test' && card?.tests[0] !== undefined) testProjectSelected = card.tests[0].id
+    if (view === 'bugs') bugProjectFilter = card?.bugProject?.id ?? 'all'
+    if (view === 'notes') {
+      const book = card?.product !== undefined ? notebooks.find(b => b.id === card.product?.notebookId) : undefined
+      noteNotebookFilter = book?.id ?? 'all'
+    }
+    if (ui.view === 'notes' && view !== 'notes') void flushNoteSave()
+    ui.view = view
+    renderAll()
+    if (view === 'news') void loadNews()
+    if (view === 'notes') void loadNotes()
+    if (view === 'bugs' && bugs.length === 0) void loadBugs()
+    if (view === 'product' && products.length === 0) void loadProducts()
+    if (view === 'test' && testProjects.length === 0) void loadTests()
+  }
+  function openPortal(): void {
+    ui.view = 'portal'
+    renderAll()
+    void refreshPortal()
+  }
 
   /* ---------- 主题 ---------- */
   function resolvedTheme(): 'light' | 'dark' {
@@ -505,12 +650,13 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /* ---------- 渲染：骨架 ---------- */
   function renderAll(): void {
     applyTheme()
+    if (loaded && ui.project !== 'all' && ui.project !== 'none' && projectByPath(ui.project) === undefined) ui.project = 'all'
     const app = $id('wb-app')
     if (app) {
       app.classList.toggle('collapsed', ui.collapsed)
       app.classList.toggle('compact', ui.compact)
       app.classList.toggle('focus-expand', ui.view === 'focus' && ui.focusExpand)
-      app.classList.toggle('no-detail', ['calendar', 'focus', 'stats', 'news', 'notes', 'bugs', 'product', 'test'].includes(ui.view))
+      app.classList.toggle('no-detail', ['portal', 'calendar', 'focus', 'stats', 'news', 'notes', 'bugs', 'product', 'test'].includes(ui.view))
     }
     renderSidebar()
     renderTopbar()
@@ -522,7 +668,16 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     const ts = todayStats()
     const pct = ts.total > 0 ? Math.round((ts.done / ts.total) * 100) : 0
     let context = ''
-    if (ui.view === 'calendar') {
+    if (ui.view === 'portal') {
+      const cards = projectCards()
+      const items = cards.map(card => sideItem(`${esc(card.name)}`, { icon: 'product', act: 'portal-project', id: esc(card.path), n: projectTaskCount(card.path), active: ui.project === card.path })).join('')
+      context = sideGroup('项目 / 产品', null,
+        '<div class="side-sub" style="padding:3px 8px 6px">先选项目，再进入对应功能</div>' +
+        sideItem('全部项目', { icon: 'layers', act: 'portal-project', id: 'all', n: db.tasks.length, active: ui.project === 'all' }) +
+        items +
+        sideItem('未归属', { icon: 'inbox', act: 'portal-project', id: 'none', n: projectTaskCount('none'), active: ui.project === 'none' }) +
+        sideItem('新建项目 / 产品', { icon: 'plus', act: 'portal-new' }))
+    } else if (ui.view === 'calendar') {
       context = sideGroup('计划', null,
         '<div class="side-sub" style="padding:3px 8px 6px">安排时间与节奏</div>' +
         '<div class="side-sub" style="padding:2px 8px 4px;color:var(--text-3);font-size:10.5px">计划视图</div>' +
@@ -540,7 +695,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         items +
         sideItem('新建测试项目', { icon: 'plus', act: 'test-new' }))
     } else if (ui.view === 'product') {
-      const items = products.map(p => sideItem(`${esc(p.name)}`, { icon: 'product', act: 'product-pick', id: p.id, active: productSelected === p.id })).join('')
+      const items = products.map(p => sideItem(`${esc(p.name)}`, { icon: 'product', act: 'product-select', id: p.id, active: productSelected === p.id })).join('')
       context = sideGroup('产品设计', null,
         '<div class="side-sub" style="padding:3px 8px 6px">导图 → 设计笔记 → 多风格 Demo</div>' +
         items +
@@ -589,8 +744,11 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         <div><div class="brand-t">个人工作台</div><div class="brand-s">本地工作台 · SQLite</div></div>
         <button class="brand-collapse" data-act="collapse" title="收起侧栏">${ic('panel', 15)}</button>
       </div>
+      <div class="side-home${ui.view === 'portal' ? ' active' : ''}">
+        <div class="side-item${ui.view === 'portal' ? ' active' : ''}" data-act="portal-home">${ic('home', 15)}<span>门户</span></div>
+      </div>
       <div class="side-scroll">${context}
-        <div class="side-sec"><div class="side-head">空间<button class="add" data-act="space-add" title="新建空间">${ic('plus', 13)}</button></div>${spaces}</div>
+        ${ui.view === 'portal' ? '' : `<div class="side-sec"><div class="side-head">空间<button class="add" data-act="space-add" title="新建空间">${ic('plus', 13)}</button></div>${spaces}</div>`}
       </div>
       <div class="side-foot">
         <div class="foot-ring" style="--p:${pct}"><i></i></div>
@@ -608,6 +766,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
 
   function openCommandPalette(): void {
     const commands = [
+      { id: 'portal', label: '项目门户', hint: '选项目 / 进功能', icon: 'home', view: 'portal' },
       { id: 'board', label: '看板', hint: '任务视图', icon: 'board', view: 'board' },
       { id: 'list', label: '行动清单', hint: '任务视图', icon: 'list', view: 'list' },
       { id: 'timeline', label: '时间轴', hint: '计划视图', icon: 'clock', view: 'timeline' },
@@ -673,8 +832,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /* ---------- 内容 ---------- */
   const FILTER_LABEL: Record<Ui['filter'], string> = { all: '筛选', high: '高优先级', sub: '有子待办', attach: '有附件', unscheduled: '未排时间' }
   const SORT_LABEL: Record<Ui['sort'], string> = { time: '按时间', priority: '按优先级', created: '按创建', title: '按标题' }
-  const MODULE_OF: Record<Ui['view'], string> = { board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', test: '测试' }
-  const NAME_OF: Record<Ui['view'], string> = { board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试' }
+  const MODULE_OF: Record<Ui['view'], string> = { portal: '工作台', board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', test: '测试' }
+  const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试' }
 
   function renderContent(): void {
     const el = content()
@@ -686,7 +845,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       return
     }
     let html = ''
-    if (ui.view === 'board') html = renderBoard()
+    if (ui.view === 'portal') html = renderPortal()
+    else if (ui.view === 'board') html = renderBoard()
     else if (ui.view === 'list') html = renderList()
     else if (ui.view === 'timeline') html = renderTimeline()
     else if (ui.view === 'matrix') html = renderMatrix()
@@ -700,6 +860,16 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     else html = renderStats()
     el.innerHTML = html
     bindContentInputs()
+    const projectPicker = $id<HTMLSelectElement>('wb-project')
+    projectPicker?.addEventListener('change', () => {
+      ui.project = projectPicker.value
+      const card = projectByPath(ui.project)
+      if (card?.product !== undefined) productSelected = card.product.id
+      if (card?.bugProject !== undefined) bugProjectFilter = card.bugProject.id
+      db.settings.project = ui.project === 'none' ? '' : ui.project
+      scheduleSave()
+      renderAll()
+    })
     if (ui.view === 'notes') bindNotes()
     if (ui.view === 'bugs') bindBugs()
     if (ui.view === 'product') bindProduct()
@@ -744,15 +914,17 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
 
   function viewHead(): string {
     const ts = todayStats()
+    const scoped = db.tasks.filter(matchProject)
     const all = ui.scope === 'all'
-    const total = all ? db.tasks.length : ts.total
-    const done = all ? db.tasks.filter(t => doneOf(t)).length : ts.done
-    const pending = all ? db.tasks.filter(t => !doneOf(t)).length : ts.pending
+    const total = all ? scoped.length : ts.total
+    const done = all ? scoped.filter(t => doneOf(t)).length : ts.done
+    const pending = all ? scoped.filter(t => !doneOf(t)).length : ts.pending
     const pct = total > 0 ? Math.round((done / total) * 100) : 0
     const today = todayKey()
+    const scopeText = ui.project === 'all' ? '' : ` · 项目：${esc(projectLabel(ui.project))}`
     return `<div class="view-head">
       <div><div class="eyebrow">${all ? '全部任务' : '今日任务'}</div><h1 class="page-title">${all ? '全部任务' : '今天'}</h1>
-      <div class="page-sub">${all ? `共 ${total} 项任务 · 待处理 ${pending} 项` : `${fmtDay(today)} ${weekdayName(today)} · 待处理 ${pending} 项`}</div></div>
+      <div class="page-sub">${all ? `共 ${total} 项任务 · 待处理 ${pending} 项${scopeText}` : `${fmtDay(today)} ${weekdayName(today)} · 待处理 ${pending} 项${scopeText}`}</div></div>
       <div class="progress-card"><div class="p-ring" style="--p:${pct}"><i>${pct}%</i></div>
         <div><div class="p-num">${done} / ${total}</div><div class="p-lab">${all ? '已完成' : '今日完成'}</div></div></div>
     </div>`
@@ -763,11 +935,82 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return `<div class="viewbar"><div class="seg">${tabs.map(([v, label, icon]) => `<button data-view="${v}" class="${ui.view === v ? 'active' : ''}">${ic(icon, 13)}${label}</button>`).join('')}</div>
       <div class="mini-seg" style="margin-left:2px"><button data-scope="today" class="${ui.scope === 'today' ? 'active' : ''}">今天</button><button data-scope="all" class="${ui.scope === 'all' ? 'active' : ''}">全部</button></div>
       <div class="filters">
-        <button class="chip ${ui.space === 'all' ? 'active' : ''}" data-space="all">全部</button>
+        ${projectSelect()}
+        <button class="chip ${ui.space === 'all' ? 'active' : ''}" data-space="all">空间：全部</button>
         ${db.spaces.map(s => `<button class="chip ${ui.space === s.id ? 'active' : ''}" data-space="${s.id}"><span class="dot" style="background:${s.color}"></span>${esc(s.name)}</button>`).join('')}
         <button class="chip ghost${ui.filter !== 'all' ? ' active' : ''}" data-act="filter">${ic('filter', 13)}${ui.filter === 'all' ? '筛选' : FILTER_LABEL[ui.filter]}</button>
         <button class="chip ghost" data-act="sort">${ic('sort', 13)}${SORT_LABEL[ui.sort]}</button>
       </div></div>`
+  }
+
+  /* ---------- 门户（项目 / 产品 + 功能入口，兼项目管理） ---------- */
+  function renderPortal(): string {
+    const cards = projectCards()
+    const all = ui.project === 'all'
+    const none = ui.project === 'none'
+    const scopeTasks = all ? db.tasks.length : none ? projectTaskCount('none') : projectTaskCount(ui.project)
+    const scopeBugs = all ? bugs.length : none ? 0 : projectBugCount(ui.project)
+    const scopeTests = all ? testProjects.length : none ? 0 : projectTestCount(ui.project)
+    const scopeNotes = all ? notes.length : none ? 0 : projectNoteCount(ui.project)
+    const openBugs = bugs.filter(bug => bug.status !== 'resolved').length
+    const today = todayStats()
+    const scopedTasks = db.tasks.filter(matchProject)
+    const openCount = scopedTasks.filter(task => task.status !== 'done').length
+    const datedCount = scopedTasks.filter(task => task.date !== null).length
+    const tile = (path: string, name: string, counts: { tasks: number; bugs: number; tests: number; notes: number }, opts: { all?: boolean; none?: boolean; product?: Product; bugProject?: BugProject; tests?: TestProject[] }): string => {
+      const keyPath = opts.all === true ? 'all' : opts.none === true ? 'none' : path
+      const active = ui.project === keyPath
+      const foot = opts.all === true || opts.none === true
+        ? '<span class="portal-hint">点卡片切换范围</span>'
+        : opts.product !== undefined
+          ? `<button class="btn tiny" data-act="portal-edit" data-id="${opts.product.id}">${ic('edit', 11)}编辑</button><button class="btn tiny" data-act="portal-delete" data-id="${opts.product.id}">${ic('trash', 11)}删除</button>`
+          : `<button class="btn tiny" data-act="portal-new" data-path="${esc(path)}">${ic('plus', 11)}为它建产品</button>`
+      return `<article class="portal-card${active ? ' active' : ''}" data-act="portal-project" data-id="${esc(keyPath)}">
+        <div class="portal-card-h">
+          <span class="portal-ico${opts.all === true ? ' accent' : ''}">${opts.all === true ? ic('layers', 15) : opts.none === true ? ic('inbox', 15) : ic('product', 15)}</span>
+          <div class="portal-card-t"><b>${esc(name)}</b><small>${opts.all === true ? '跨项目汇总' : opts.none === true ? '还没有归属项目的任务' : esc(bugWorkspaceName(path))}</small></div>
+          ${active ? `<span class="portal-check">${ic('check', 11)}</span>` : ''}
+        </div>
+        ${opts.all === true || opts.none === true ? '' : `<div class="portal-path" title="${esc(path)}">${esc(path)}</div>`}
+        <div class="portal-metrics"><span><b>${counts.tasks}</b> 任务</span><span><b>${counts.bugs}</b> Bug</span><span><b>${counts.tests}</b> 测试</span><span><b>${counts.notes}</b> 笔记</span></div>
+        ${opts.all === true || opts.none === true ? '' : `<div class="portal-card-tags">${opts.product !== undefined ? '<span>产品</span>' : ''}${opts.bugProject !== undefined ? '<span class="green">Bug 项目</span>' : ''}${opts.tests !== undefined && opts.tests.length > 0 ? '<span class="cyan">测试项目</span>' : ''}</div>`}
+        <div class="portal-card-foot">${foot}<button class="btn tiny portal-enter" data-act="portal-enter" data-id="${esc(keyPath)}" data-view="list">进入${ic('arrowR', 11)}</button></div>
+      </article>`
+    }
+    const features: Array<{ view: Ui['view']; title: string; desc: string; icon: string; count: number | null; tile: string }> = [
+      { view: 'list', title: '任务清单', desc: '今天 / 全部 · 按项目筛选', icon: 'list', count: scopeTasks, tile: '#2563eb' },
+      { view: 'board', title: '看板', desc: '下一步 / 进行中 / 等待中', icon: 'board', count: openCount, tile: '#0f9f6e' },
+      { view: 'calendar', title: '日历', desc: '周 / 月 / 年安排', icon: 'calendar', count: datedCount, tile: '#d97706' },
+      { view: 'stats', title: '统计', desc: '完成趋势与项目复盘', icon: 'chart', count: null, tile: '#7c3aed' },
+      { view: 'focus', title: '专注', desc: '番茄计时与待专注队列', icon: 'target', count: null, tile: '#db2777' },
+      { view: 'bugs', title: 'Bug 管理', desc: '缺陷看板与 AI 修复', icon: 'bug', count: scopeBugs, tile: '#d83b3b' },
+      { view: 'test', title: '测试', desc: '用例 / 执行 / 回归', icon: 'test', count: scopeTests, tile: '#0891b2' },
+      { view: 'product', title: '产品设计', desc: '导图 / 设计笔记 / Demo', icon: 'product', count: null, tile: '#5b5bd6' },
+      { view: 'notes', title: '记事本', desc: '笔记与 PDF 导出', icon: 'notebook', count: scopeNotes, tile: '#c27c0e' },
+      { view: 'news', title: '新闻', desc: '定时检索与 AI 摘要', icon: 'news', count: null, tile: '#0f766e' },
+    ]
+    const cardAll = tile('all', '全部项目', { tasks: db.tasks.length, bugs: bugs.length, tests: testProjects.length, notes: notes.length }, { all: true })
+    const cardNone = tile('none', '未归属', { tasks: projectTaskCount('none'), bugs: 0, tests: 0, notes: 0 }, { none: true })
+    const cardProjects = cards.map(card => tile(card.path, card.name, {
+      tasks: projectTaskCount(card.path), bugs: projectBugCount(card.path), tests: projectTestCount(card.path), notes: projectNoteCount(card.path),
+    }, { product: card.product, bugProject: card.bugProject, tests: card.tests })).join('')
+    return `<div class="view-head portal-head">
+      <div><div class="eyebrow">门户</div><h1 class="page-title">工作台</h1>
+        <div class="page-sub">先选项目 / 产品，再进入对应功能；项目在这里直接管理</div>
+        <div class="head-pills"><span><b>${cards.length}</b> 项目</span><span><b>${db.tasks.length}</b> 任务</span><span><b>${openBugs}</b> 未关闭 Bug</span><span><b>${testProjects.length}</b> 测试项目</span><span><b>${today.done}</b> 今日完成</span></div></div>
+      <div class="portal-actions"><span class="portal-scope">当前：<b>${esc(projectLabel(ui.project))}</b></span>
+        <button class="btn" data-act="portal-load" title="重新读取项目 / Bug / 测试">${ic('refresh', 13)}刷新</button>
+        <button class="btn-primary" data-act="portal-new">${ic('plus', 14)}新建项目 / 产品</button></div>
+    </div>
+    <div class="portal-sec-head"><h2>项目 / 产品</h2><span>${cards.length} 个项目 · 卡片内可编辑、删除</span></div>
+    <div class="portal-projects">${cardAll}${cardProjects}${cardNone}</div>
+    ${cards.length === 0 ? `<div class="portal-empty">${ic('layers', 16)}<div><b>还没有项目</b><span>新建一个项目 / 产品并关联 DSH 工作区，任务、Bug、测试、笔记就会按项目归拢。</span></div><button class="btn" data-act="portal-new">${ic('plus', 12)}新建</button></div>` : ''}
+    <div class="portal-sec-head"><h2>功能</h2><span>${esc(projectLabel(ui.project))} · 点卡片进入</span></div>
+    <div class="portal-features">${features.map(item => `<button class="portal-feature" style="--tile:${item.tile}" data-act="portal-open" data-view="${item.view}">
+        <span class="portal-feature-ico">${ic(item.icon, 19)}</span>
+        <span class="portal-feature-main"><b>${item.title}</b><small>${esc(item.desc)}</small></span>
+        ${item.count !== null ? `<span class="portal-feature-n">${item.count}</span>` : `<span class="portal-feature-go">${ic('arrowR', 13)}</span>`}
+      </button>`).join('')}</div>`
   }
 
   function renderBoard(): string {
@@ -875,12 +1118,12 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       ? `${startOfWeek(ui.calendarAnchor)} — ${addDays(startOfWeek(ui.calendarAnchor), 6)}`
       : ui.calendarMode === 'month' ? `${ui.calendarAnchor.slice(0, 7)}` : `${ui.calendarAnchor.slice(0, 4)} 年`
     const head = `<div class="view-head"><div><div class="eyebrow">计划</div><h1 class="page-title">日历</h1>
-      <div class="page-sub">按周、月或年查看任务安排</div></div>${modeSeg}</div>`
+      <div class="page-sub">按周、月或年查看任务安排${ui.project === 'all' ? '' : ` · 项目：${esc(projectLabel(ui.project))}`}</div></div><div class="head-tools">${projectSelect()}${modeSeg}</div></div>`
     let body = ''
     if (ui.calendarMode === 'week') body = calendarWeek()
     else if (ui.calendarMode === 'month') body = calendarMonth()
     else body = calendarYear()
-    return head + body + `<div class="listbar" style="margin-top:10px;justify-content:space-between"><span>${range}</span><span>${ic('calendar', 12)} 共 ${db.tasks.filter(t => t.date !== null).length} 项有日期任务</span></div>`
+    return head + body + `<div class="listbar" style="margin-top:10px;justify-content:space-between"><span>${range}</span><span>${ic('calendar', 12)} 共 ${db.tasks.filter(t => t.date !== null && matchProject(t)).length} 项有日期任务</span></div>`
   }
   function calendarWeek(): string {
     const start = startOfWeek(ui.calendarAnchor)
@@ -945,10 +1188,10 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       const marks = Array.from({ length: lead + daysInMonth }, (_, i) => {
         if (i < lead) return '<i></i>'
         const d = `${year}-${pad(m + 1)}-${pad(i - lead + 1)}`
-        const n = db.tasks.filter(t => t.date === d).length
+        const n = db.tasks.filter(t => t.date === d && matchProject(t)).length
         return `<i class="${n > 0 ? 'has' : ''}" title="${d} · ${n} 项"></i>`
       }).join('')
-      const count = db.tasks.filter(t => t.date?.startsWith(`${year}-${pad(m + 1)}`)).length
+      const count = db.tasks.filter(t => t.date?.startsWith(`${year}-${pad(m + 1)}`) && matchProject(t)).length
       return `<div class="year-card" data-act="cal-month" data-month="${year}-${pad(m + 1)}-01"><h5>${m + 1} 月<span>${count} 项</span></h5><div class="year-mini">${marks}</div></div>`
     }).join('')
     return `<div class="year-grid">${months}</div>`
@@ -961,7 +1204,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     const seconds = timer.remaining % 60
     const total = timer.preset * 60
     const pct = Math.max(0, Math.min(100, Math.round((1 - timer.remaining / total) * 100)))
-    const queueAll = db.tasks.filter(t => t.status !== 'done').sort((a, b) => {
+    const queueAll = db.tasks.filter(t => t.status !== 'done' && matchProject(t)).sort((a, b) => {
       if (a.id === timer.taskId) return -1
       if (b.id === timer.taskId) return 1
       return `${a.date ?? ''} ${a.start || '99:99'}`.localeCompare(`${b.date ?? ''} ${b.start || '99:99'}`)
@@ -972,7 +1215,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     const custom = !presets.includes(timer.preset)
     const focus = todayFocus()
     return `<div class="view-head"><div><div class="eyebrow">专注计时</div><h1 class="page-title">专注</h1>
-      <div class="page-sub">管理当前任务、计时长度和待专注队列</div></div></div>
+      <div class="page-sub">管理当前任务、计时长度和待专注队列${ui.project === 'all' ? '' : ` · 项目：${esc(projectLabel(ui.project))}`}</div></div><div class="head-tools">${projectSelect()}</div></div>
       <div class="focus-wrap">
         <div class="focus-card"><div class="focus-card-top">${ic('target', 14)} 专注空间<button class="icon-btn" data-act="focus-expand" title="${ui.focusExpand ? '退出沉浸' : '沉浸模式'}">${ic('expand', 14)}</button></div>
           <div class="presets">${presets.map(n => `<button data-act="preset" data-n="${n}" class="${timer.preset === n ? 'active' : ''}">${n} 分钟</button>`).join('')}<button data-act="custom-timer" class="${custom ? 'active' : ''}">${custom ? timer.preset + ' 分钟' : '自定义'}</button></div>
@@ -1011,7 +1254,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   }
   function stampDate(value: string | null): string { return (value ?? '').slice(0, 10) }
   function doneIn(start: string, end: string): Task[] {
-    return db.tasks.filter(t => doneOf(t) && inRange(stampDate(doneAt(t)), start, end))
+    return db.tasks.filter(t => doneOf(t) && matchProject(t) && inRange(stampDate(doneAt(t)), start, end))
   }
   function trendBuckets(range: { start: string; end: string }): Array<{ label: string; start: string; end: string; count: number; title: string }> {
     if (ui.statsPeriod === 'year') {
@@ -1046,7 +1289,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     }))
   }
   function streak(): number {
-    const dates = new Set(db.tasks.filter(t => doneOf(t)).map(t => stampDate(doneAt(t))).filter(Boolean))
+    const dates = new Set(db.tasks.filter(t => doneOf(t) && matchProject(t)).map(t => stampDate(doneAt(t))).filter(Boolean))
     let n = 0
     let cursor = todayKey()
     while (dates.has(cursor)) { n += 1; cursor = addDays(cursor, -1) }
@@ -1056,20 +1299,20 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     const range = statsRange()
     const buckets = trendBuckets(range)
     const weekDone = doneIn(range.start, range.end)
-    const planned = db.tasks.filter(t => inRange(t.date, range.start, range.end))
+    const planned = db.tasks.filter(t => matchProject(t) && inRange(t.date, range.start, range.end))
     const rate = planned.length > 0 ? Math.round((planned.filter(t => doneOf(t)).length / planned.length) * 100) : 0
     const max = Math.max(1, ...buckets.map(s => s.count))
     const focus = todayFocus()
     const bySpace = db.spaces.map(sp => ({ sp, n: weekDone.filter(t => t.space === sp.id).length })).filter(x => x.n > 0).sort((a, b) => b.n - a.n)
     const topSpace = bySpace[0]
     const busiest = buckets.reduce((a, b) => (b.count > a.count ? b : a), buckets[0])
-    const withSubs = db.tasks.filter(t => t.subtasks.length > 0).length
-    const waiting = db.tasks.filter(t => t.status === 'waiting').length
+    const withSubs = db.tasks.filter(t => t.subtasks.length > 0 && matchProject(t)).length
+    const waiting = db.tasks.filter(t => t.status === 'waiting' && matchProject(t)).length
     const streakDays = streak()
     const period = ui.statsPeriod
     return `<div class="view-head"><div><div class="eyebrow">数据复盘</div><h1 class="page-title">统计</h1>
-      <div class="page-sub">用同一套任务数据复盘每天、每周、每月与全年</div></div>
-      <div class="mini-seg">${(['week', 'month', 'year'] as const).map(p => `<button data-act="stats-period" data-period="${p}" class="${period === p ? 'active' : ''}">${p === 'week' ? '本周' : p === 'month' ? '本月' : '本年'}</button>`).join('')}</div></div>
+      <div class="page-sub">用同一套任务数据复盘每天、每周、每月与全年${ui.project === 'all' ? '' : ` · 项目：${esc(projectLabel(ui.project))}`}</div></div>
+      <div class="head-tools">${projectSelect()}<div class="mini-seg">${(['week', 'month', 'year'] as const).map(p => `<button data-act="stats-period" data-period="${p}" class="${period === p ? 'active' : ''}">${p === 'week' ? '本周' : p === 'month' ? '本月' : '本年'}</button>`).join('')}</div></div></div>
       <div class="kpis">
         <div class="kpi"><div class="k-top">${ic('check', 12)}${range.label}实际完成</div><div class="k-num">${weekDone.length}<span class="k-unit"> 次</span></div><div class="k-sub">涉及 ${new Set(weekDone.map(t => t.id)).size} 项任务</div></div>
         <div class="kpi"><div class="k-top">${ic('target', 12)}今日专注</div><div class="k-num">${focus.minutes}<span class="k-unit"> 分钟</span></div><div class="k-sub">${focus.rounds} 轮 · 会话累计</div></div>
@@ -2023,7 +2266,6 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     }
     return header + `<div class="notes-wrap">${side}${editor}</div>`
   }
-  const PENDING_NOTE_KEY = 'dsh-workbench:pending-note'
   function noteImprovePrompt(note: Note, requirement: string): string {
     const notebook = notebooks.find(nb => nb.id === note.notebookId)
     const extra = requirement.trim() === '' ? '无额外要求；按通用编辑标准：结构清晰、信息完整、语言准确。' : requirement.trim()
@@ -2052,17 +2294,10 @@ ${extra}
 【当前正文】${note.content.length > 20_000 ? '（正文过长已截断至 2 万字，回写时请保留你未见到的尾部）' : ''}
 ${note.content.slice(0, 20_000)}`
   }
-  function queueNoteImprove(prompt: string): void {
-    const previousSessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session') ?? ''
-    sessionStorage.setItem(PENDING_NOTE_KEY, JSON.stringify({ prompt, previousSessionId, at: Date.now() }))
+  async function queueNoteImprove(prompt: string): Promise<void> {
     const note = noteById(noteSelected)
     const nb = note ? notebookOf(note.notebookId) : undefined
-    if (nb?.workspacePath && !clickWorkspaceRow(nb.workspacePath)) toast('未找到工作区入口，将在当前工作区新建会话')
-    const newButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.offsetParent !== null && (btn.getAttribute('aria-label') === '新建会话' || (btn.textContent ?? '').includes('新建会话')))
-    if (!newButton) throw new Error('找不到 DSH 新建会话按钮')
-    newButton.click()
-    window.setTimeout(() => location.reload(), 350)
+    await dispatchToNewSession(nb?.workspacePath ?? '', prompt)
   }
   async function improveSelectedNote(requirement: string): Promise<void> {
     const note = noteById(noteSelected)
@@ -2072,7 +2307,7 @@ ${note.content.slice(0, 20_000)}`
     const prompt = noteImprovePrompt(note, requirement)
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     toast('正在新建 AI 编辑会话…')
-    try { queueNoteImprove(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    try { await queueNoteImprove(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
   }
   function openNoteRequirements(): void {
     const note = noteById(noteSelected)
@@ -2147,50 +2382,12 @@ ${note.content.slice(0, 20_000)}`
     } catch { /* 插件/服务不可用 */ }
     return []
   }
-  function wait(ms: number): Promise<void> {
-    return new Promise(resolve => window.setTimeout(resolve, ms))
-  }
-  function sessionIdFromDom(): string | undefined {
-    for (const el of document.querySelectorAll('[data-row-key^="session:"],[data-session-id],[data-sidebar-right-session]')) {
-      const raw = el.getAttribute('data-row-key') ?? el.getAttribute('data-session-id') ?? el.getAttribute('data-sidebar-right-session') ?? ''
-      const match = raw.match(/session-[0-9a-f-]{20,}/i)
-      if (match) return match[0]
-    }
-    return undefined
-  }
   /**
    * 在本项目关联工作区新建一个普通 DSH 会话，并写入修复提示词后发送。
-   * 不依赖 Better Sidebar 的侧边对话 UI：新会话拥有完整工具与工作区 cwd，
-   * AI 直接在工作区里修复、验证，完成后调用 workbench_bug_update。
+   * 走 sessions 服务（workspaceId / cwd）新建 → 发送 → 回写 → 切到会话，不刷新页面。
    */
-  const PENDING_REPAIR_KEY = 'dsh-workbench:pending-repair'
-
-  /**
-   * 在本项目关联工作区新建会话：先创建会话，再把优化后的修复提示词存到
-   * sessionStorage，刷新一次（DSH 自定义 main 面板下新会话壳需要重载才出现），
-   * 由 index.ts 的 consumePendingRepair 在会话输入框出现后自动写入并发送。
-   */
-  /** 在 DSH 侧边栏定位并点击工作区行：先按完整路径匹配 data-row-key，再退化为 basename 文本。 */
-  function clickWorkspaceRow(workspacePath: string): boolean {
-    if (!workspacePath) return false
-    const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-row-key^="workspace:"]'))
-    const byPath = rows.find(row => (row.getAttribute('data-row-key') ?? '').includes(workspacePath))
-    if (byPath !== undefined) { byPath.click(); return true }
-    const name = bugWorkspaceName(workspacePath)
-    const byName = rows.find(row => (row.textContent ?? '').includes(name))
-    if (byName !== undefined) { byName.click(); return true }
-    return false
-  }
-  function queueRepairSession(project: BugProject, prompt: string, bugIds: string[]): void {
-    const found = clickWorkspaceRow(project.workspacePath)
-    if (!found && project.workspacePath) toast('未找到工作区入口，将在当前工作区新建会话')
-    const newButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.offsetParent !== null && (btn.getAttribute('aria-label') === '新建会话' || (btn.textContent ?? '').includes('新建会话')))
-    if (newButton === undefined) throw new Error('找不到 DSH 新建会话按钮')
-    const previousSessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session') ?? ''
-    sessionStorage.setItem(PENDING_REPAIR_KEY, JSON.stringify({ prompt, bugIds, project: project.name, previousSessionId, at: Date.now() }))
-    newButton.click()
-    window.setTimeout(() => location.reload(), 350)
+  async function queueRepairSession(project: BugProject, prompt: string, bugIds: string[], options: { focus?: boolean } = {}): Promise<string> {
+    return await dispatchToNewSession(project.workspacePath, prompt, async sessionId => { await markBugsDispatched(bugIds, sessionId) }, options)
   }
   function bugFiltered(): Bug[] {
     const q = bugSearch.trim().toLowerCase()
@@ -2452,7 +2649,7 @@ ${note.content.slice(0, 20_000)}`
       <div class="mrow"><div class="mfield"><label>严重 / 优先级</label><div class="bug-detail-text">${BUG_SEVERITY_LABEL[bug.severity]} · ${bug.priority}</div></div><div class="mfield"><label>计划 / 指派</label><div class="bug-detail-text">${esc(bug.plannedDate || '未排期')} · ${esc(bug.assignee)}</div></div></div>
       ${bug.verification !== '' ? `<div class="mfield"><label>验证记录</label><div class="bug-detail-text">${esc(bug.verification)}</div></div>` : ''}
       ${bug.aiThreadId !== '' ? `<div class="mfield"><label>AI 修复会话</label><div class="bug-detail-text mono">${esc(bug.aiThreadId)}<button class="btn" data-act="bug-goto-session" data-id="${bug.aiThreadId}" style="margin-left:6px">跳转会话</button></div></div>` : ''}
-      <div class="modal-foot"><button class="btn" data-act="bug-delete" data-id="${bug.id}">${ic('trash', 12)}删除</button><button class="btn" data-act="bug-edit" data-id="${bug.id}">编辑</button>${bug.status === 'verify' || bug.status === 'resolved' ? `<button class="btn" data-act="bug-regression">${ic('refresh', 12)}去回归</button>` : ''}<button class="btn" data-act="bug-ai-dispatch" data-id="${bug.id}">${ic('spark', 12)}AI 协同</button><button class="btn solid" data-act="bug-ai-submit" data-id="${bug.id}">${ic('spark', 12)}提交 AI 修复</button></div>`)
+      <div class="modal-foot bug-foot"><button class="btn" data-act="bug-delete" data-id="${bug.id}">${ic('trash', 12)}删除</button><button class="btn" data-act="bug-edit" data-id="${bug.id}">编辑</button>${bug.status === 'verify' || bug.status === 'resolved' ? `<button class="btn" data-act="bug-regression">${ic('refresh', 12)}去回归</button>` : ''}<button class="btn" data-act="bug-ai-dispatch" data-id="${bug.id}">${ic('spark', 12)}AI 协同</button><button class="btn solid" data-act="bug-ai-submit" data-id="${bug.id}">${ic('spark', 12)}提交 AI 修复</button></div>`)
   }
   async function deleteBug(id: string): Promise<void> {
     const bug = bugOf(id)
@@ -2578,20 +2775,24 @@ ${lines}
       const ok = typeof window.confirm === 'function' ? window.confirm(`选中的 Bug 来自 ${groupList.length} 个项目（${summary}）。\n将按项目分组、每组各建一个工作区会话提交。继续？`) : true
       if (!ok) return
     }
+    let firstSession = ''
+    let submitted = 0
     for (const [projectId, items] of groupList) {
       const project = bugProjectOf(projectId)
       if (!project?.workspacePath) { toast(`项目「${project?.name ?? projectId}」还没关联工作区，跳过 ${items.length} 条`); continue }
       const prompt = bugPrompt(items)
       try { await navigator.clipboard.writeText(prompt) } catch { /* 剪贴板不可用时忽略 */ }
       try {
-        queueRepairSession(project, prompt, items.map(b => b.id))
-        if (groupList.length > 1) toast(`已提交「${project.name}」${items.length} 条；其余项目请刷新后再提交`)
-        return // queueRepairSession 会 reload，每轮只提交一组；其余保留勾选
+        const sessionId = await queueRepairSession(project, prompt, items.map(b => b.id), { focus: false })
+        submitted += items.length
+        if (firstSession === '') firstSession = sessionId
       } catch (cause) {
-        toast(`自动新建会话失败，修复提示词已复制，可手动新建会话粘贴：${String((cause as Error).message ?? cause)}`)
-        return
+        toast(`「${project.name}」提交失败：${String((cause as Error).message ?? cause)}`)
       }
     }
+    if (submitted === 0) return
+    if (firstSession !== '') focusSession(firstSession)
+    toast(groupList.length > 1 ? `已为 ${groupList.length} 个项目各建一个会话，共 ${submitted} 条` : `已提交 ${submitted} 条 Bug`)
   }
   async function submitPlannedBugs(): Promise<void> {
     const list = bugFiltered().filter(bug => bug.plannedDate !== '' && bug.plannedDate <= todayKey() && bug.status !== 'resolved')
@@ -2643,7 +2844,7 @@ ${lines}
   function productNodes(product: Product | undefined): ProductNode[] {
     if (!product) return []
     try {
-      const parsed = JSON.parse(product.mindmap || '{"nodes":[]}') as { nodes?: ProductNode[] }
+      const parsed = JSON.parse(mapMindmap() || '{"nodes":[]}') as { nodes?: ProductNode[] }
       return Array.isArray(parsed.nodes) ? parsed.nodes : []
     } catch { return [] }
   }
@@ -2659,14 +2860,43 @@ ${lines}
   function productSelectedFeatures(product: Product | undefined): ProductNode[] {
     return productFeatureNodes(product).filter(n => productPicked.has(n.id))
   }
+  /** 当前作用域内（选中导图 / 全部导图）的笔记。 */
   function productNoteList(product: Product | undefined): Note[] {
     if (!product) return []
-    return notes.filter(n => n.notebookId === product.notebookId)
+    const list = notes.filter(n => n.notebookId === product.notebookId)
+    if (productMapScopeAll || productMapSelected === '') return list
+    return list.filter(note => note.mapId === undefined || note.mapId === '' || note.mapId === productMapSelected)
   }
   function productDemoList(product: Product | undefined): ProductDemo[] {
-    return product ? productDemos.filter(d => d.productId === product.id) : []
+    if (!product) return []
+    const list = productDemos.filter(d => d.productId === product.id)
+    if (productMapScopeAll || productMapSelected === '') return list
+    return list.filter(demo => demo.mapId === undefined || demo.mapId === '' || demo.mapId === productMapSelected)
   }
-  function productLayout(nodes: ProductNode[]): { positions: Map<string, { x: number; y: number }>; width: number; height: number } {
+  function productModuleList(product: Product | undefined): Module[] {
+    if (!product) return []
+    const list = productModules.filter(m => m.productId === product.id)
+    if (productMapScopeAll || productMapSelected === '') return list
+    return list.filter(m => m.mapId === undefined || m.mapId === '' || m.mapId === productMapSelected)
+  }
+  function scopedLabel(): string {
+    if (productMapScopeAll || productMapSelected === '') return '全部导图'
+    return activeMap()?.name ?? '当前导图'
+  }
+  const MAP_W = 174
+  const MAP_H = 42
+  type MapLayout = 'right' | 'bilateral' | 'down' | 'radial'
+  const MAP_LAYOUTS: Array<{ id: MapLayout; label: string; hint: string }> = [
+    { id: 'right', label: '右向', hint: '右向树：从左往右逐层展开' },
+    { id: 'bilateral', label: '双翼', hint: '左右双翼：根节点居中，分支分列两侧' },
+    { id: 'down', label: '纵向', hint: '组织架构：自上而下分层' },
+    { id: 'radial', label: '环形', hint: '环形导图：各分支按叶子数分角度' },
+  ]
+  function mapLayoutMode(): MapLayout {
+    const value = db.settings.mapLayout
+    return value === 'bilateral' || value === 'down' || value === 'radial' ? value : 'right'
+  }
+  function productChildrenMap(nodes: ProductNode[]): Map<string, ProductNode[]> {
     const children = new Map<string, ProductNode[]>()
     for (const node of nodes) {
       const key = node.parentId ?? ''
@@ -2674,37 +2904,167 @@ ${lines}
       list.push(node)
       children.set(key, list)
     }
-    const root = nodes.find(n => n.type === 'root' || n.parentId === null) ?? nodes[0]
-    const positions = new Map<string, { x: number; y: number }>()
-    const gapY = 58
-    const gapX = 220
-    let cursor = 24
-    const place = (node: ProductNode, depth: number): { y: number; height: number } => {
-      // 折叠的节点不再下沉其子树（XMind 行为）
-      const kids = productNodeCollapsed.has(node.id) ? [] : (children.get(node.id) ?? [])
-      if (kids.length === 0) {
-        const y = cursor
-        cursor += gapY
-        positions.set(node.id, { x: 20 + depth * gapX, y })
-        return { y, height: 1 }
-      }
-      const start = cursor
-      for (const kid of kids) place(kid, depth + 1)
-      const end = cursor - gapY
-      const y = (start + end) / 2
-      positions.set(node.id, { x: 20 + depth * gapX, y })
-      return { y, height: Math.max(1, end - start) }
+    return children
+  }
+  function productRootOf(nodes: ProductNode[]): ProductNode | undefined {
+    return nodes.find(n => n.type === 'root') ?? nodes.find(n => n.parentId === null) ?? nodes[0]
+  }
+  interface MapGeometry {
+    width: number
+    height: number
+    places: Map<string, { x: number; y: number }>
+    edges: Array<{ from: string; to: string; d: string }>
+  }
+  /** 四种布局共用一套「父子边 + 节点左上角」几何，支持折叠。 */
+  function productMapGeometry(nodes: ProductNode[], mode: MapLayout): MapGeometry {
+    const children = productChildrenMap(nodes)
+    const root = productRootOf(nodes)
+    const places = new Map<string, { x: number; y: number }>()
+    const edges: Array<{ from: string; to: string; d: string }> = []
+    if (root === undefined) return { width: 560, height: 220, places, edges }
+    const kidsOf = (node: ProductNode): ProductNode[] => productNodeCollapsed.has(node.id) ? [] : (children.get(node.id) ?? [])
+    const leafCount = (node: ProductNode): number => {
+      const kids = kidsOf(node)
+      return kids.length === 0 ? 1 : kids.reduce((sum, kid) => sum + leafCount(kid), 0)
     }
-    if (root) place(root, 0)
-    const ys = Array.from(positions.values()).map(p => p.y)
-    const maxY = Math.max(60, ...ys)
-    const width = 20 + Math.max(1, ...Array.from(positions.keys()).map(id => {
-      let depth = 0
-      let cur = nodes.find(n => n.id === id)
-      while (cur?.parentId) { depth += 1; cur = nodes.find(n => n.id === cur?.parentId) }
-      return depth
-    })) * gapX + 210
-    return { positions, width: Math.max(520, width), height: maxY + 64 }
+    if (mode === 'right') {
+      let cursor = 24
+      const place = (node: ProductNode, depth: number): void => {
+        const kids = kidsOf(node)
+        const x = 24 + depth * 220
+        if (kids.length === 0) {
+          places.set(node.id, { x, y: cursor })
+          cursor += MAP_H + 16
+          return
+        }
+        for (const kid of kids) place(kid, depth + 1)
+        const ys = kids.map(kid => places.get(kid.id)?.y ?? 0)
+        places.set(node.id, { x, y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) })
+      }
+      place(root, 0)
+    } else if (mode === 'down') {
+      let cursor = 24
+      const place = (node: ProductNode, depth: number): { min: number; max: number } => {
+        const kids = kidsOf(node)
+        const y = 24 + depth * 96
+        if (kids.length === 0) {
+          const x = cursor
+          cursor += MAP_W + 22
+          places.set(node.id, { x, y })
+          return { min: x, max: x }
+        }
+        const spans = kids.map(kid => place(kid, depth + 1))
+        const min = Math.min(...spans.map(span => span.min))
+        const max = Math.max(...spans.map(span => span.max))
+        places.set(node.id, { x: Math.round((min + max) / 2), y })
+        return { min, max }
+      }
+      place(root, 0)
+    } else if (mode === 'bilateral') {
+      const branches = kidsOf(root)
+      const cut = Math.ceil(branches.length / 2)
+      const gap = 56
+      const step = 220
+      const placeSide = (side: 1 | -1, list: ProductNode[]): void => {
+        let cursor = 24
+        const xOf = (depth: number): number => {
+          const distance = MAP_W / 2 + gap + (depth - 1) * step
+          return side === 1 ? Math.round(distance) : Math.round(-distance - MAP_W)
+        }
+        const place = (node: ProductNode, depth: number): void => {
+          const kids = kidsOf(node)
+          const x = xOf(depth)
+          if (kids.length === 0) {
+            places.set(node.id, { x, y: cursor })
+            cursor += MAP_H + 16
+            return
+          }
+          for (const kid of kids) place(kid, depth + 1)
+          const ys = kids.map(kid => places.get(kid.id)?.y ?? 0)
+          places.set(node.id, { x, y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) })
+        }
+        for (const branch of list) place(branch, 1)
+      }
+      placeSide(1, branches.slice(0, cut))
+      placeSide(-1, branches.slice(cut))
+      const ys = Array.from(places.values()).map(point => point.y)
+      const top = ys.length > 0 ? Math.min(...ys) : 24
+      const bottom = ys.length > 0 ? Math.max(...ys) + MAP_H : 24 + MAP_H
+      places.set(root.id, { x: Math.round(-MAP_W / 2), y: Math.round((top + bottom) / 2 - MAP_H / 2) })
+    } else {
+      const branches = kidsOf(root)
+      const total = Math.max(1, branches.reduce((sum, branch) => sum + leafCount(branch), 0))
+      places.set(root.id, { x: Math.round(-MAP_W / 2), y: Math.round(-MAP_H / 2) })
+      let angle = -Math.PI / 2
+      const placeAngular = (node: ProductNode, depth: number, start: number, span: number): void => {
+        const radius = depth * 236
+        const theta = start + span / 2
+        places.set(node.id, { x: Math.round(Math.cos(theta) * radius - MAP_W / 2), y: Math.round(Math.sin(theta) * radius - MAP_H / 2) })
+        const kids = kidsOf(node)
+        if (kids.length === 0) return
+        const weight = Math.max(1, kids.reduce((sum, kid) => sum + leafCount(kid), 0))
+        let cursor = start
+        for (const kid of kids) {
+          const share = span * (leafCount(kid) / weight)
+          placeAngular(kid, depth + 1, cursor, share)
+          cursor += share
+        }
+      }
+      for (const branch of branches) {
+        const span = 2 * Math.PI * (leafCount(branch) / total)
+        placeAngular(branch, 1, angle, span)
+        angle += span
+      }
+    }
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const point of places.values()) {
+      minX = Math.min(minX, point.x); minY = Math.min(minY, point.y)
+      maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y)
+    }
+    if (!Number.isFinite(minX)) return { width: 560, height: 220, places, edges }
+    const dx = 24 - minX
+    const dy = 24 - minY
+    for (const [id, point] of places) places.set(id, { x: point.x + dx, y: point.y + dy })
+    for (const node of nodes) {
+      for (const kid of kidsOf(node)) {
+        const from = places.get(node.id)
+        const to = places.get(kid.id)
+        if (from === undefined || to === undefined) continue
+        let d = ''
+        if (mode === 'down') {
+          const x1 = from.x + MAP_W / 2
+          const y1 = from.y + MAP_H
+          const x2 = to.x + MAP_W / 2
+          const y2 = to.y
+          const mid = (y1 + y2) / 2
+          d = `M${x1} ${y1} C${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
+        } else if (mode === 'radial') {
+          const x1 = from.x + MAP_W / 2
+          const y1 = from.y + MAP_H / 2
+          const x2 = to.x + MAP_W / 2
+          const y2 = to.y + MAP_H / 2
+          d = `M${x1} ${y1} Q${(x1 + x2) / 2} ${(y1 + y2) / 2} ${x2} ${y2}`
+        } else {
+          const rightward = to.x + MAP_W / 2 >= from.x + MAP_W / 2
+          const x1 = rightward ? from.x + MAP_W : from.x
+          const y1 = from.y + MAP_H / 2
+          const x2 = rightward ? to.x : to.x + MAP_W
+          const y2 = to.y + MAP_H / 2
+          const mid = (x1 + x2) / 2
+          d = `M${x1} ${y1} C${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
+        }
+        edges.push({ from: node.id, to: kid.id, d })
+      }
+    }
+    return {
+      width: Math.max(560, maxX + dx + MAP_W + 24),
+      height: Math.max(240, maxY + dy + MAP_H + 24),
+      places,
+      edges,
+    }
   }
   /** 按根分支取色（XMind 彩色分支效果）。 */
   function productBranchColor(product: Product | undefined, node: ProductNode): string {
@@ -2719,35 +3079,20 @@ ${lines}
     }))
     return ['#2563eb', '#0f9f6e', '#d97706', '#7c3aed', '#db2777', '#0891b2'][index % 6]
   }
+  function escapeAttr(value: string): string { return esc(value) }
   function renderProductMap(product: Product): string {
     const nodes = productNodes(product)
-    if (nodes.length === 0) return '<div class="notes-empty small">导图为空，点「新增功能」开始。快捷键：Tab 加子节点、Enter 加同级、F2 重命名、Delete 删除。</div>'
-    const layout = productLayout(nodes)
-    const children = new Map<string, ProductNode[]>()
-    for (const node of nodes) {
-      const key = node.parentId ?? ''
-      const list = children.get(key) ?? []
-      list.push(node)
-      children.set(key, list)
-    }
-    const edges: string[] = []
-    for (const node of nodes) {
-      const from = layout.positions.get(node.id)
-      if (!from) continue
-      for (const kid of children.get(node.id) ?? []) {
-        const to = layout.positions.get(kid.id)
-        if (!to) continue
-        const x1 = from.x + 174
-        const y1 = from.y + 21
-        const x2 = to.x
-        const y2 = to.y + 21
-        const mid = (x1 + x2) / 2
-        edges.push(`<path d="M${x1} ${y1} C${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" class="pm-edge" style="stroke:${productBranchColor(product, kid)}"/>`)
-      }
-    }
+    if (nodes.length === 0) return '<div class="notes-empty small">导图为空，点「新增功能」开始。快捷键：Tab 加子节点、Enter 加同级、F2 重命名、Delete 删除；节点上右键有完整菜单。</div>'
+    const mode = mapLayoutMode()
+    const layout = productMapGeometry(nodes, mode)
+    const children = productChildrenMap(nodes)
+    const edges = layout.edges.map(edge => {
+      const child = productNodeById(product, edge.to)
+      return `<path d="${edge.d}" class="pm-edge" style="stroke:${child === undefined ? 'var(--line-strong)' : productBranchColor(product, child)}"/>`
+    }).join('')
     const cards = nodes.map(node => {
-      const pos = layout.positions.get(node.id)
-      if (!pos) return ''
+      const pos = layout.places.get(node.id)
+      if (pos === undefined) return ''
       const active = productNodeSelected === node.id
       const typeLabel = node.type === 'root' ? '产品' : node.type === 'feature' ? '功能' : '需求'
       const kids = children.get(node.id) ?? []
@@ -2763,7 +3108,9 @@ ${lines}
         ${toggle}
       </g>`
     }).join('')
-    return `<div class="pm-canvas" data-pm-canvas><svg viewBox="0 0 ${layout.width} ${layout.height}" width="${Math.round(layout.width * productMapZoom)}" height="${Math.round(layout.height * productMapZoom)}" style="width:${Math.round(layout.width * productMapZoom)}px;height:${Math.round(layout.height * productMapZoom)}px">${edges.join('')}${cards}</svg></div>`
+    const width = Math.round(layout.width * productMapZoom)
+    const height = Math.round(layout.height * productMapZoom)
+    return `<div class="pm-canvas pm-layout-${mode}" data-pm-canvas><svg viewBox="0 0 ${layout.width} ${layout.height}" width="${width}" height="${height}" style="width:${width}px;height:${height}px">${edges}${cards}</svg></div>`
   }
   function renderProduct(): string {
     const product = productOf(productSelected)
@@ -2783,18 +3130,32 @@ ${lines}
       <span class="product-ws">${ic('folder', 12)}${esc(product.workspacePath || '未关联工作区')}</span>
       <button class="icon-btn" data-act="product-refresh" title="刷新">${ic('refresh', 14)}</button>
     </div>`
+    const scopeSelect = productTab === 'map' || productMaps.length <= 1 ? '' : `<select id="wb-map-scope" class="bug-project-select" title="导图范围">
+        <option value="all"${productMapScopeAll ? ' selected' : ''}>全部导图（${productMaps.length}）</option>
+        ${productMaps.map(map => `<option value="${map.id}"${!productMapScopeAll && map.id === productMapSelected ? ' selected' : ''}>${esc(map.name)}</option>`).join('')}
+      </select>`
     const tabs = `<div class="product-tabs">
-      ${(['map', 'notes', 'modules', 'inspiration', 'demo'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? '思维导图' : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModules.filter(m => m.productId === product.id).length}）` : tab === 'inspiration' ? `灵感（${productInspirations.filter(i => i.productId === product.id).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
+      ${(['map', 'notes', 'modules', 'inspiration', 'demo'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : tab === 'inspiration' ? `灵感（${productInspirationList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
+      ${scopeSelect}
     </div>`
     let body = ''
     if (productTab === 'map') {
-      body = `<div class="product-map-toolbar">
+      const rail = `<aside class="pm-maps">
+        <div class="pm-maps-head"><b>导图</b><span>${productMaps.length}</span><button class="icon-btn" data-act="pm-map-new" title="新建导图">${ic('plus', 13)}</button></div>
+        ${productMaps.length === 0 ? `<div class="pm-maps-empty">${productMapsReady ? '还没有导图，点 + 新建' : '多导图不可用（宿主未更新）'}</div>` : productMaps.map(map => `<div class="pm-map${map.id === productMapSelected ? ' active' : ''}" data-act="pm-map-select" data-id="${map.id}" title="${esc(map.description || map.name)}">
+          <b>${esc(map.name)}</b><small>${mapNodeCount(map)} 节点 · ${productNoteListOfMap(map.id).length} 笔记</small>
+          <span class="pm-map-ops"><button class="icon-btn" data-act="pm-map-rename" data-id="${map.id}" title="重命名">${ic('edit', 11)}</button><button class="icon-btn" data-act="pm-map-delete" data-id="${map.id}" title="删除导图">${ic('trash', 11)}</button></span>
+        </div>`).join('')}
+      </aside>`
+      body = `<div class="pm-map-wrap">${rail}<div class="pm-map-main"><div class="product-map-toolbar">
         <button class="btn" data-act="product-node-new" data-type="feature">${ic('plus', 12)}新增功能</button>
         <button class="btn" data-act="product-node-new" data-type="requirement">${ic('plus', 12)}新增需求</button>
         <button class="btn" data-act="product-node-child">${ic('corner', 12)}加子节点</button>
         <button class="btn" data-act="product-node-sibling">${ic('plus', 12)}加同级</button>
         <button class="btn" data-act="product-node-edit">${ic('edit', 12)}编辑节点</button>
         <button class="icon-btn" data-act="product-node-delete" title="删除节点（Delete）">${ic('trash', 13)}</button>
+        <span class="pm-sep"></span>
+        <div class="mini-seg pm-layout-seg" title="导图布局">${MAP_LAYOUTS.map(layout => `<button data-act="pm-layout" data-mode="${layout.id}" class="${mapLayoutMode() === layout.id ? 'active' : ''}" title="${escapeAttr(layout.hint)}">${layout.label}</button>`).join('')}</div>
         <span class="pm-sep"></span>
         <button class="btn" data-act="pm-collapse-all">全部折叠</button>
         <button class="btn" data-act="pm-expand-all">全部展开</button>
@@ -2806,16 +3167,16 @@ ${lines}
         <span class="pm-sep"></span>
         <button class="btn" data-act="pm-export-outline">${ic('download', 12)}导出大纲</button>
         <button class="btn" data-act="pm-import-outline">${ic('upload', 12)}导入大纲</button>
-        <span class="product-hint">${ic('folder', 11)} mindmap.json → ${esc(product.workspacePath ? product.workspacePath + '/.dsh-workbench/products/' + product.id + '/mindmap.json' : '未关联工作区')}</span>
-      </div>${renderProductMap(product)}`
+        <span class="product-hint">${ic('folder', 11)} ${esc(productMapSelected !== '' ? `.dsh-workbench/products/${product.id}/maps/${productMapSelected}.json` : 'mindmap.json → ' + (product.workspacePath || '未关联工作区'))}</span>
+      </div>${renderProductMap(product)}</div></div>`
     } else if (productTab === 'notes') {
       const featureNodes = productFeatureNodes(product)
       const picked = featureNodes.filter(n => productPicked.has(n.id))
-      body = `<div class="product-panel-head"><div><b>设计笔记</b><span>${picked.length > 0 ? `已勾选 ${picked.length} 个功能/需求，生成将覆盖勾选项` : `未勾选，生成将覆盖全部 ${featureNodes.length} 个`}</span></div><div class="product-actions"><button class="btn" data-act="flow-gen-tests">${ic('arrowR', 12)}生成测试用例</button><button class="btn-primary" data-act="product-gen-notes">${ic('spark', 12)}AI 生成设计笔记</button></div></div>
+      body = `<div class="product-panel-head"><div><b>设计笔记</b><span>${esc(scopedLabel())} · ${picked.length > 0 ? `已勾选 ${picked.length} 个功能/需求，生成将覆盖勾选项` : `未勾选，生成将覆盖全部 ${featureNodes.length} 个`}</span></div><div class="product-actions"><button class="btn" data-act="flow-gen-tests">${ic('arrowR', 12)}生成测试用例</button><button class="btn-primary" data-act="product-gen-notes">${ic('spark', 12)}AI 生成设计笔记</button></div></div>
         <div class="product-pick-list">${featureNodes.map(n => `<label><input type="checkbox" data-act="product-pick" data-id="${n.id}" ${productPicked.has(n.id) ? 'checked' : ''}> ${esc(n.label)}</label>`).join('') || '<span class="muted">先添加功能节点</span>'}</div>
         <div class="product-note-list">${productNoteList(product).map(note => `<div class="product-note" data-product-note="${note.id}"><b>${esc(note.title)}</b><span>${esc(note.content.replace(/[#>*\n]/g, ' ').slice(0, 100))}</span><i>${note.filePath ? '已写入工作区' : '仅本地库'}</i></div>`).join('') || '<div class="notes-empty small">还没有设计笔记，点右上角 AI 生成。</div>'}</div>`
     } else if (productTab === 'modules') {
-      const mods = productModules.filter(m => m.productId === product.id)
+      const mods = productModuleList(product)
       const kindName = (k: Module['kind']): string => k === 'module' ? '模块' : k === 'business' ? '业务' : k === 'feature' ? '功能' : '需求'
       body = `<div class="product-panel-head"><div><b>模块 / 业务 / 功能 / 需求</b><span>产品 → 模块 → 业务 → 功能 / 需求；端：PC / 移动 / 平板 / 全部</span></div><button class="btn-primary" data-act="product-gen-modules">${ic('spark', 12)}AI 生成模块与详细设计</button></div>
         <div class="module-coverage"><b>${mods.length}</b> 节点${['all','pc','mobile','tablet'].map(p => `<span>${platformLabel(p)} ${mods.filter(m => m.platform === p).length}</span>`).join('')}<span class="bar">${['all','pc','mobile','tablet'].map((p, i) => `<i style="width:${mods.length ? Math.round(mods.filter(m => m.platform === p).length / mods.length * 100) : 0}%;background:${['var(--accent)','var(--green)','var(--orange)','var(--amber)'][i]}"></i>`).join('')}</span></div>
@@ -2842,6 +3203,53 @@ ${lines}
     }
     return header + toolbar + tabs + body
   }
+  async function loadProductMaps(): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) { productMaps = []; productMapSelected = ''; return }
+    try {
+      const res = await fetch(`${API}/products/maps?productId=${encodeURIComponent(product.id)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { maps?: ProductMap[] }
+      productMaps = Array.isArray(data.maps) ? data.maps : []
+      productMapsReady = true
+    } catch (cause) {
+      productMaps = []
+      productMapsReady = false
+      console.warn('[dsh-workbench] 导图清单读取失败：', cause)
+    }
+    if (productMaps.length > 0 && !productMaps.some(map => map.id === productMapSelected)) {
+      productMapSelected = productMaps[0].id
+    }
+    if (productMaps.length === 0) productMapSelected = ''
+  }
+  /** 当前导图；'' 表示「全部导图」。 */
+  function activeMap(): ProductMap | undefined {
+    return productMapSelected === '' ? undefined : productMaps.find(map => map.id === productMapSelected)
+  }
+  /** 导图 JSON 的来源：选中导图，否则回退产品镜像（兼容旧数据）。 */
+  function mapMindmap(): string {
+    const map = activeMap()
+    if (map !== undefined) return map.mindmap
+    return productOf(productSelected)?.mindmap ?? '{"nodes":[]}'
+  }
+  function mapScopeId(): string { return productMapSelected }
+  function mapScoped<T extends { mapId?: string }>(items: T[]): T[] {
+    if (productMapSelected === '') return items
+    return items.filter(item => item.mapId === undefined || item.mapId === '' || item.mapId === productMapSelected)
+  }
+  /** 某张导图下的产品笔记数（用于导图清单副标题）。 */
+  function productNoteListOfMap(mapId: string): Note[] {
+    const product = productOf(productSelected)
+    if (product === undefined) return []
+    return notes.filter(n => n.notebookId === product.notebookId && n.mapId === mapId)
+  }
+  function mapNodeCount(map: ProductMap): number {
+    try {
+      const parsed = JSON.parse(map.mindmap || '{"nodes":[]}') as { nodes?: unknown[] }
+      return Array.isArray(parsed.nodes) ? parsed.nodes.length : 0
+    } catch { return 0 }
+  }
+
   async function loadProducts(silent = false): Promise<void> {
     if (productLoading) return
     productLoading = true
@@ -2857,6 +3265,7 @@ ${lines}
       notes = Array.isArray(nData.notes) ? nData.notes : notes
       notebooks = Array.isArray(nData.notebooks) ? nData.notebooks : notebooks
       if (productSelected === null || productOf(productSelected) === undefined) productSelected = products[0]?.id ?? null
+      await loadProductMaps()
       const product = productOf(productSelected)
       if (product && productPicked.size === 0) productPicked = productDefaultPicked(product)
       // 灵感库与 Demo 进度（失败不阻塞主数据）
@@ -2894,7 +3303,9 @@ ${lines}
   const INSP_KIND_LABEL: Record<string, string> = { github: 'GitHub', web: '网页', article: '文章', design: '设计参考', tool: '工具', paper: '论文' }
   function productInspirationList(product: Product | undefined): ProductInspiration[] {
     if (!product) return []
-    return productInspirations.filter(i => i.productId === product.id)
+    const list = productInspirations.filter(i => i.productId === product.id)
+    if (productMapScopeAll || productMapSelected === '') return list
+    return list.filter(i => i.mapId === undefined || i.mapId === '' || i.mapId === productMapSelected)
   }
   function renderInspirationTab(product: Product): string {
     const all = productInspirationList(product)
@@ -2968,7 +3379,11 @@ ${lines}
     const nodes = productFeatureNodes(product)
     const features = nodes.slice(0, 20).map(n => `- ${n.id} [${n.type === 'feature' ? '功能' : '需求'}] ${n.label}`).join('\n')
     const existing = productInspirationList(product).slice(0, 10).map(i => `- ${i.title}（${i.source}）${i.url}`).join('\n')
+    const map = activeMap()
+    const mapLine = map === undefined ? '' : `本次针对导图：${map.name}（mapId: ${map.id}）\n`
     return `产品调研任务：${product.name}
+
+${mapLine}
 
 你是资深产品调研员。请围绕下面的产品，检索 GitHub 与公开网络资料（竞品、开源实现、设计参考、行业文章），提炼对本产品真正有用的借鉴点，逐条写入灵感库。
 
@@ -3009,12 +3424,18 @@ ${existing || '- （无）'}
     const theme = themeOf(productStyle)
     const kind = opts?.kind ?? 'page'
     const platform = opts?.platform ?? 'all'
-    const common = `产品：${product.name}\n简介：${product.description || '未填写'}\n工作区绝对路径：${product.workspacePath}\n产品 ID：${product.id}\n产品笔记本 ID：${product.notebookId}\n\n导图 JSON：\n${product.mindmap}\n\n本次覆盖节点：\n${features || '- （整个产品）'}`
+    const map = activeMap()
+    const mapId = productMapSelected
+    const mapLine = map === undefined
+      ? '导图：整产品（旧版单导图）'
+      : `导图：${map.name}（mapId: ${map.id}）${map.description ? ` — ${map.description}` : ''}\n同一产品可有多张导图，本次只处理这一张，写入时必须带 mapId:"${map.id}"。`
+    const mapArg = mapId === '' ? '' : `, mapId:"${mapId}"`
+    const common = `产品：${product.name}\n简介：${product.description || '未填写'}\n工作区绝对路径：${product.workspacePath}\n产品 ID：${product.id}\n产品笔记本 ID：${product.notebookId}\n${mapLine}\n\n导图 JSON：\n${mapMindmap()}\n\n本次覆盖节点：\n${features || '- （整个产品）'}`
     if (mode === 'modules') {
-      return `产品模块化与详细设计任务：${product.name}\n\n你是资深产品架构师。请把产品拆成「产品 → 模块 → 业务 → 功能 / 需求」，并为每个模块生成详细设计笔记。\n\n${common}\n\n要求：\n1. 先调用 workbench_module_publish 写模块/业务/功能/需求，参数 { productId:"${product.id}", parentId:"父节点 id（模块为空）", name, kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all", description }。\n2. 每个模块调用 workbench_product_note_publish 生成详细设计笔记，参数包含 productId、moduleId、platform、title、content。\n3. 笔记结构：模块背景 / 范围 / 平台差异 / 信息架构 / 核心流程 / 状态 / 数据与接口 / 权限 / 边界 / 验收。\n4. 模块划分按业务能力，不按页面；平台差异明确写出 PC / 移动 / 平板分别的交互。\n5. 不要只回复正文；必须调用工具；完成后汇总模块清单。`
+      return `产品模块化与详细设计任务：${product.name}\n\n你是资深产品架构师。请把产品拆成「产品 → 模块 → 业务 → 功能 / 需求」，并为每个模块生成详细设计笔记。\n\n${common}\n\n要求：\n1. 先调用 workbench_module_publish 写模块/业务/功能/需求，参数 { productId:"${product.id}"${mapArg}, parentId:"父节点 id（模块为空）", name, kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all", description }。\n2. 每个模块调用 workbench_product_note_publish 生成详细设计笔记，参数包含 productId${mapArg}、moduleId、platform、title、content。\n3. 笔记结构：模块背景 / 范围 / 平台差异 / 信息架构 / 核心流程 / 状态 / 数据与接口 / 权限 / 边界 / 验收。\n4. 模块划分按业务能力，不按页面；平台差异明确写出 PC / 移动 / 平板分别的交互。\n5. 不要只回复正文；必须调用工具；完成后汇总模块清单。`
     }
     if (mode === 'notes') {
-      return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}", featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
+      return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}"${mapArg}, featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
     }
     const inspirations = productInspirationList(product)
     const inspContext = inspirations.length > 0
@@ -3039,28 +3460,32 @@ ${common}${inspContext}
 之后每完成一个里程碑调用一次（step 1..4：设计信息架构 → 搭建框架与主题 → 实现页面与交互 → 自检与收尾），最后 status:"done"。
 
 【交付要求】
-1. **唯一交付方式**：调用 workbench_product_demo_publish，参数 { productId:"${product.id}", scope:"${scope}", kind:"${kind}", platform:"${platform}", style:"${theme.id}", featureId:"功能 id（scope=feature 时）", title:"Demo 标题", html:"完整 HTML" }。
+1. **唯一交付方式**：调用 workbench_product_demo_publish，参数 { productId:"${product.id}"${mapArg}, scope:"${scope}", kind:"${kind}", platform:"${platform}", style:"${theme.id}", featureId:"功能 id（scope=feature 时）", title:"Demo 标题", html:"完整 HTML" }。
 2. **禁止**用 write/edit/bash 直接写 HTML 文件；**禁止**委派子智能体；**禁止**只把 HTML 贴在回复里。若工具不可用，停止并说明原因。
 3. HTML 必须是单文件、内联 CSS/JS、无外部依赖；真实文案（不要 Lorem）；可点击交互（Tab 切换、弹窗、表单态、筛选等至少 3 类）。
 4. 严格使用所选主题的设计令牌与风格；${kind === 'system' ? '系统形态要有统一壳层（顶栏+侧栏+内容区）与至少 3 个页面。' : '单页要有清晰的信息层级与首屏重点。'}
 5. 设计笔记描述的核心流程必须能在 Demo 里走通；灵感库的借鉴点选择性融入。
 6. 不要修改工作区其他文件。`
   }
-  function queueProductPrompt(prompt: string): void {
-    const previousSessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session') ?? ''
-    sessionStorage.setItem('dsh-workbench:pending-product', JSON.stringify({ prompt, previousSessionId, at: Date.now() }))
+  async function queueProductPrompt(prompt: string): Promise<void> {
     const product = productOf(productSelected)
-    if (product?.workspacePath && !clickWorkspaceRow(product.workspacePath)) toast('未找到工作区入口，将在当前工作区新建会话')
-    const newButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(btn => btn.offsetParent !== null && (btn.getAttribute('aria-label') === '新建会话' || (btn.textContent ?? '').includes('新建会话')))
-    if (!newButton) throw new Error('找不到 DSH 新建会话按钮')
-    newButton.click()
-    window.setTimeout(() => location.reload(), 350)
+    await dispatchToNewSession(product?.workspacePath ?? '', prompt)
   }
   async function saveProductMindmapFile(nodes: ProductNode[]): Promise<void> {
     const product = productOf(productSelected)
     if (!product) return
+    const mindmap = JSON.stringify({ nodes })
+    const map = activeMap()
     try {
-      const res = await fetch(`${API}/products/mindmap`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ productId: product.id, mindmap: JSON.stringify({ nodes }) }) })
+      if (map !== undefined) {
+        // 多导图：只改这一张，产品镜像由宿主同步
+        const res = await fetch(`${API}/products/maps`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map: { id: map.id, productId: product.id, name: map.name, description: map.description, mindmap } }) })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json() as { map?: ProductMap }
+        if (data.map) Object.assign(map, data.map)
+        return
+      }
+      const res = await fetch(`${API}/products/mindmap`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ productId: product.id, mindmap }) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { product?: Product }
       if (data.product) Object.assign(product, data.product)
@@ -3110,6 +3535,80 @@ ${common}${inspContext}
   function setMapZoom(next: number): void {
     productMapZoom = Math.min(2, Math.max(0.4, Math.round(next * 100) / 100))
     renderContent()
+  }
+
+  async function changeNodeKind(id: string, type: 'feature' | 'requirement'): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const nodes = productNodes(product)
+    const node = nodes.find(n => n.id === id)
+    if (node === undefined || node.type === 'root') return
+    node.type = type
+    await saveProductMindmapFile(nodes)
+    productNodeSelected = id
+    renderContent()
+    toast(`已改为${type === 'feature' ? '功能' : '需求'}`)
+  }
+  interface MapMenuItem { label: string; act: string; icon?: string; id?: string; type?: string; key?: string; danger?: boolean }
+  function mapMenuItems(node: ProductNode | undefined): MapMenuItem[] {
+    if (node === undefined) {
+      return [
+        { label: '新增功能', act: 'product-node-new', type: 'feature', icon: 'plus' },
+        { label: '新增需求', act: 'product-node-new', type: 'requirement', icon: 'plus' },
+        { label: '全部展开', act: 'pm-expand-all', icon: 'expand' },
+        { label: '全部折叠', act: 'pm-collapse-all', icon: 'panel' },
+      ]
+    }
+    const product = productOf(productSelected)
+    const hasKids = productNodes(product).some(n => n.parentId === node.id)
+    const items: MapMenuItem[] = [{ label: '添加子节点', act: 'product-node-child', icon: 'corner', key: 'Tab' }]
+    if (node.type !== 'root') items.push({ label: '添加同级', act: 'product-node-sibling', icon: 'plus', key: 'Enter' })
+    items.push({ label: '重命名 / 编辑', act: 'product-node-edit', icon: 'edit', key: 'F2' })
+    if (node.type !== 'root') {
+      items.push({ label: node.type === 'feature' ? '改为需求' : '改为功能', act: 'pm-node-kind', icon: 'tag', id: node.id, type: node.type === 'feature' ? 'requirement' : 'feature' })
+    }
+    if (hasKids) items.push({ label: productNodeCollapsed.has(node.id) ? '展开子树' : '折叠子树', act: 'pm-toggle-fold', icon: 'chevD', id: node.id })
+    if (node.type !== 'root') items.push({ label: '删除节点', act: 'product-node-delete', icon: 'trash', key: 'Del', danger: true })
+    return items
+  }
+  function closeContextMenu(): void {
+    const menu = $id('wb-ctxmenu')
+    if (menu === null) return
+    menu.classList.remove('open')
+    menu.innerHTML = ''
+    ctxMenuOpen = false
+  }
+  function openContextMenu(nodeId: string | null, x: number, y: number): void {
+    const menu = $id('wb-ctxmenu')
+    if (menu === null) return
+    const node = nodeId === null ? undefined : productNodeById(productOf(productSelected), nodeId)
+    const items = mapMenuItems(node)
+    const head = node === undefined ? '画布' : `${node.type === 'root' ? '产品' : node.type === 'feature' ? '功能' : '需求'} · ${esc(node.label.slice(0, 24))}`
+    menu.innerHTML = `<div class="ctx-head">${head}</div>${items.map(item => `<button class="ctx-item${item.danger === true ? ' danger' : ''}" data-act="${item.act}"${item.id === undefined ? '' : ` data-id="${item.id}"`}${item.type === undefined ? '' : ` data-type="${item.type}"`}>${ic(item.icon ?? 'plus', 13)}<span>${item.label}</span>${item.key === undefined ? '' : `<kbd>${item.key}</kbd>`}</button>`).join('')}`
+    menu.classList.add('open')
+    menu.querySelectorAll<HTMLElement>('.ctx-item').forEach(item => {
+      item.addEventListener('click', () => { window.setTimeout(closeContextMenu, 0) })
+    })
+    const width = 214
+    const height = 30 * (items.length + 1) + 14
+    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, x))}px`
+    menu.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, y))}px`
+    ctxMenuOpen = true
+  }
+  function onContextMenu(event: MouseEvent): void {
+    const target = event.target as Element | null
+    if (target === null) return
+    if (ui.view !== 'product' || productTab !== 'map') return
+    const nodeEl = target.closest('[data-product-node]')
+    const canvas = target.closest('[data-pm-canvas]')
+    if (nodeEl === null && canvas === null) return
+    event.preventDefault()
+    const nodeId = nodeEl === null ? null : nodeEl.getAttribute('data-product-node') ?? null
+    if (nodeId !== null) {
+      productNodeSelected = nodeId
+      renderContent()
+    }
+    openContextMenu(nodeId, event.clientX, event.clientY)
   }
   function productOutline(product: Product): string {
     const nodes = productNodes(product)
@@ -3189,6 +3688,64 @@ ${common}${inspContext}
     renderContent()
     toast(`已导入 ${parsed.length} 个节点`)
   }
+  /* ------------------------------- 多导图 ------------------------------- */
+  function openMapEditor(id?: string): void {
+    const product = productOf(productSelected)
+    if (product === undefined) { toast('先选择产品'); return }
+    if (!productMapsReady) { toast('多导图需要宿主更新，请重启 DSH'); return }
+    const map = id === undefined ? undefined : productMaps.find(item => item.id === id)
+    openModal(`<h3>${map === undefined ? '新建导图' : '编辑导图'}</h3>
+      <div class="mfield"><label>名称</label><input id="wb-map-name" value="${esc(map?.name ?? '')}" placeholder="例如：收银主链路 / 移动端 / V2 改版"></div>
+      <div class="mfield"><label>说明（可选）</label><input id="wb-map-desc" value="${esc(map?.description ?? '')}" placeholder="这张导图负责的范围"></div>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">每张导图独立保存 mindmap 到工作区 <code>.dsh-workbench/products/&lt;id&gt;/maps/&lt;mapId&gt;.json</code>；设计笔记 / 模块 / 灵感 / Demo 都会挂到当前导图下。</div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-map-save" data-id="${map?.id ?? ''}">${map === undefined ? '创建' : '保存'}</button></div>`)
+  }
+  async function saveMapFromModal(id: string): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const name = $id<HTMLInputElement>('wb-map-name')?.value.trim() ?? ''
+    if (name === '') { toast('先填名称'); return }
+    const description = $id<HTMLInputElement>('wb-map-desc')?.value.trim() ?? ''
+    try {
+      const res = await fetch(`${API}/products/maps`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map: { id, productId: product.id, name, description } }) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { map?: ProductMap }
+      closeModal()
+      await loadProductMaps()
+      if (data.map !== undefined && id === '') productMapSelected = data.map.id
+      productMapScopeAll = false
+      toast(id === '' ? '已新建导图' : '已保存导图')
+      renderContent()
+    } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  async function deleteMapById(id: string): Promise<void> {
+    const map = productMaps.find(item => item.id === id)
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除导图「${map?.name ?? id}」？
+该导图下的模块 / 笔记 / Demo 不会被删除，会失去导图归属。`) : true
+    if (!ok) return
+    try {
+      const res = await fetch(`${API}/products/maps/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(data.error ?? `HTTP ${res.status}`)
+      }
+      await loadProductMaps()
+      productNodeSelected = null
+      productPicked = productDefaultPicked(productOf(productSelected))
+      toast('已删除导图')
+      renderContent()
+    } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  function selectMap(id: string): void {
+    if (id === productMapSelected) return
+    productMapSelected = id
+    productMapScopeAll = false
+    productNodeSelected = null
+    productNodeCollapsed.clear()
+    productPicked = productDefaultPicked(productOf(productSelected))
+    renderContent()
+  }
+
   function openProductNodeEditor(type: 'feature' | 'requirement'): void {
     const product = productOf(productSelected)
     if (!product) return
@@ -3213,12 +3770,12 @@ ${common}${inspContext}
     closeModal()
     renderContent()
   }
-  function openProductEdit(id?: string): void {
+  function openProductEdit(id?: string, presetPath?: string): void {
     const product = productOf(id)
     const workspaces = bugWorkspaceItems()
-    const current = product?.workspacePath ?? workspaces[0]?.path ?? ''
-    openModal(`<h3>${product ? '编辑产品' : '新建产品'}</h3>
-      <div class="mfield"><label>产品名称</label><input id="wb-prod-name" value="${esc(product?.name ?? '')}" placeholder="例如：工作台 / 电商后台"></div>
+    const current = product?.workspacePath ?? (presetPath && presetPath !== '' ? presetPath : workspaces[0]?.path ?? '')
+    openModal(`<h3>${product ? '编辑项目 / 产品' : '新建项目 / 产品'}</h3>
+      <div class="mfield"><label>项目 / 产品名称</label><input id="wb-prod-name" value="${esc(product?.name ?? '')}" placeholder="例如：时序工作台 / 安捷邻"></div>
       <div class="mfield"><label>简介</label><textarea id="wb-prod-desc" rows="3" placeholder="目标用户、核心价值">${esc(product?.description ?? '')}</textarea></div>
       <div class="mfield"><label>关联 DSH 工作区</label>${workspaces.length > 0 ? `<select id="wb-prod-ws">${workspaces.map(ws => `<option value="${esc(ws.path)}" ${ws.path === current ? 'selected' : ''}>${esc(bugWorkspaceName(ws.path))} · ${esc(ws.path)}</option>`).join('')}</select>` : '<div class="muted" style="font-size:10.5px">未读取到工作区，可直接填路径。</div>'}</div>
       <div class="mfield"><label>工作区路径</label><input id="wb-prod-path" value="${esc(current)}" placeholder="/Users/you/project"></div>
@@ -3292,7 +3849,7 @@ ${common}${inspContext}
     const prompt = productPrompt(product, 'modules', 'all')
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     toast('正在新建设计会话…')
-    try { queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    try { await queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
   }
   async function generateProductNotes(): Promise<void> {
     const product = productOf(productSelected)
@@ -3307,7 +3864,7 @@ ${common}${inspContext}
     const prompt = productPrompt(product, 'notes', scope)
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     toast('正在新建产品设计会话…')
-    try { queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    try { await queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
   }
   function productDemoCss(style: string): string {
     const base = `*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;background:var(--bg);color:var(--text)}a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}.top{display:flex;align-items:center;gap:12px;padding:16px 28px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:3}.brand{font-weight:800;font-size:18px;letter-spacing:-.3px}.badge{font-size:10px;border:1px solid var(--line);border-radius:99px;padding:2px 8px;color:var(--muted)}.layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0}.nav{border-right:1px solid var(--line);padding:18px 14px;position:sticky;top:57px;height:calc(100vh - 57px);overflow:auto;background:var(--surface)}.nav b{display:block;font-size:10px;letter-spacing:.12em;color:var(--muted);margin-bottom:9px;text-transform:uppercase}.nav a{display:block;padding:7px 9px;border-radius:7px;text-decoration:none;font-size:13px;color:var(--muted);margin-bottom:2px}.nav a:hover{background:var(--hover);color:var(--text)}.main{padding:42px 48px 72px;max-width:1000px;width:100%;margin:0 auto}.hero{padding:20px 0 26px;border-bottom:1px solid var(--line);margin-bottom:26px}.hero .kicker{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}.hero h1{font-size:34px;line-height:1.2;margin:8px 0 7px;letter-spacing:-.6px}.hero p{color:var(--muted);font-size:14px;margin:0;max-width:680px}.feature{padding:24px 0 30px;border-bottom:1px solid var(--line)}.feature:last-child{border-bottom:0}.feature h2{font-size:23px;margin:0 0 12px;letter-spacing:-.3px}.feature .tag{font-size:10px;color:var(--accent);font-weight:700;letter-spacing:.1em;text-transform:uppercase}.doc h1,.doc h2,.doc h3{margin:16px 0 6px;line-height:1.3}.doc h1{font-size:20px}.doc h2{font-size:16px}.doc h3{font-size:14px}.doc p,.doc li{font-size:13.5px;color:var(--muted)}.doc ul,.doc ol{padding-left:20px}.doc blockquote{border-left:3px solid var(--accent);margin:10px 0;padding:6px 12px;background:var(--hover);color:var(--muted)}.doc code{background:var(--hover);padding:1px 4px;border-radius:4px;font-size:12px}.doc pre{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow:auto}.doc a{color:var(--accent)}.doc table{border-collapse:collapse;width:100%}.doc td,.doc th{border:1px solid var(--line);padding:5px 7px;font-size:12px}.empty{border:1px dashed var(--line);border-radius:10px;padding:16px;color:var(--muted);font-size:13px}.foot{padding:16px 28px;border-top:1px solid var(--line);color:var(--muted);font-size:10px;display:flex;justify-content:space-between}.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none;font-size:12px;font-weight:600}`
@@ -3423,9 +3980,18 @@ ${common}${inspContext}
         })
         await loadDemoProgress(product.id)
       } catch { /* 进度上报失败不阻塞会话提交 */ }
-      queueProductPrompt(prompt)
+      await queueProductPrompt(prompt)
       toast('已新建 Demo 生成会话，回到 Demo 页可看进度')
-    } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    } catch (cause) {
+      try {
+        await fetch(`${API}/products/demo-progress`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ progress: { productId: product.id, step: 0, total: 4, status: 'failed', message: `提交失败：${String((cause as Error).message ?? cause)}` } }),
+        })
+        await loadDemoProgress(product.id)
+      } catch { /* 进度失败上报不影响主流程 */ }
+      toast(`提交失败：${String((cause as Error).message ?? cause)}`)
+    }
   }
   async function deleteProductDemo(id: string): Promise<void> {
     const ok = typeof window.confirm === 'function' ? window.confirm('删除这个 Demo？工作区里的 HTML 文件会一并删除。') : true
@@ -3460,7 +4026,7 @@ ${common}${inspContext}
 
   async function deleteProduct(id: string): Promise<void> {
     const product = productOf(id)
-    const ok = typeof window.confirm === 'function' ? window.confirm(`删除产品「${product?.name ?? ''}」及其 Demo？产品笔记本/笔记会保留。`) : true
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除项目 / 产品「${product?.name ?? ''}」及其 Demo？对应笔记本与笔记会保留，任务的归属会清空。`) : true
     if (!ok) return
     try {
       const res = await fetch(`${API}/products/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -3468,63 +4034,210 @@ ${common}${inspContext}
       products = products.filter(p => p.id !== id)
       productDemos = productDemos.filter(d => d.productId !== id)
       productSelected = products[0]?.id ?? null
+      if (product?.workspacePath !== undefined && ui.project === product.workspacePath) ui.project = 'all'
+      else if (ui.project !== 'all' && ui.project !== 'none' && projectByPath(ui.project) === undefined) ui.project = 'all'
       closeModal()
-      renderContent()
-      toast('产品已删除')
+      renderAll()
+      toast('项目 / 产品已删除')
     } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
   }
-  interface DshSessionRow { id: string; title?: string; running?: boolean }
+  interface DshSessionRow { id: string; title?: string; running?: boolean; cwd?: string }
   function dshSessionRows(): DshSessionRow[] {
     try {
       const sessions = dshCtx?.get?.<any>('sessions')
       const snapshot = sessions?.list?.getSnapshot?.()
       if (!snapshot?.ids || !snapshot?.byId) return []
-      return snapshot.ids.map((id: string) => ({ id, title: snapshot.byId[id]?.title ?? '', running: snapshot.byId[id]?.running === true })).slice(0, 40)
+      return snapshot.ids.map((id: string) => ({
+        id,
+        title: snapshot.byId[id]?.title ?? '',
+        running: snapshot.byId[id]?.running === true,
+        cwd: typeof snapshot.byId[id]?.cwd === 'string' ? snapshot.byId[id].cwd : '',
+      })).slice(0, 40)
     } catch { return [] }
   }
-  async function appendToExistingSession(sessionId: string, text: string): Promise<void> {
-    const sessions = dshCtx?.get?.<any>('sessions')
-    if (!sessions || typeof sessions.retainAgentScope !== 'function') throw new Error('当前 DSH 不支持追加已有会话')
+  /* ---------- DSH 会话通道：新建 / 追加都走 sessions 服务，不刷新页面 ---------- */
+  function dshSessions(): any {
+    try {
+      const sessions = dshCtx?.get?.<any>('sessions')
+      return sessions !== undefined && typeof sessions.create === 'function' ? sessions : undefined
+    } catch { return undefined }
+  }
+  function dshWorkspaceItems(): Array<{ workspaceId?: string; path?: string }> {
+    try {
+      const service = dshCtx?.get?.<any>('workspaces')
+      const snap = service?.list?.getSnapshot?.()
+      if (snap?.phase === 'ready' && Array.isArray(snap.items)) return snap.items
+    } catch { /* 服务不可用 */ }
+    return []
+  }
+  function pathKey(path: string): string {
+    return path.replace(/[\\/]+$/, '').toLowerCase()
+  }
+  function workspaceIdOfPath(path: string): string | undefined {
+    if (path === '') return undefined
+    const key = pathKey(path)
+    return dshWorkspaceItems().find(item => typeof item.path === 'string' && pathKey(item.path) === key)?.workspaceId
+  }
+  function sessionCwd(sessionId: string): string {
+    try {
+      const snap = dshSessions()?.list?.getSnapshot?.()
+      const cwd = (snap?.byId?.[sessionId] as { cwd?: unknown } | undefined)?.cwd
+      return typeof cwd === 'string' ? cwd : ''
+    } catch { return '' }
+  }
+  /** 未显式给项目时，回落到门户里选中的项目（避免新会话落到 DSH 默认 cwd）。 */
+  function resolveProjectPath(path: string): string {
+    if (path !== '') return path
+    return ui.project !== 'all' && ui.project !== 'none' ? ui.project : ''
+  }
+  /** 在项目工作区创建会话：优先 workspaceId（会话会挂进侧栏工作区分组），否则退回 cwd。 */
+  async function createSessionIn(projectPath: string): Promise<string> {
+    const sessions = dshSessions()
+    if (sessions === undefined) throw new Error('当前 DSH 不支持创建会话（缺少 sessions 服务）')
+    const target = resolveProjectPath(projectPath)
+    const workspaceId = workspaceIdOfPath(target)
+    if (workspaceId !== undefined) {
+      try { return String(await sessions.create({ workspaceId })) }
+      catch (cause) { console.warn('[dsh-workbench] 按 workspaceId 建会话失败，改用 cwd：', cause) }
+    }
+    return String(await sessions.create(target !== '' ? { cwd: target } : {}))
+  }
+  /**
+   * 向会话追加一轮。三条路：
+   * 1) 会话已绑定（正开着）→ 直接 prompt；
+   * 2) 未绑定 → 公开的 sessions.retain()（它会启动 opening，ready 才会 resolve）；
+   * 3) 老版本没有 retain → retainAgentScope 只借 binding，绝不等 ready。
+   * 注意：retainAgentScope 不调用 attachOpening，它的 ready 永远不会 resolve，不能 await。
+   */
+  async function sendToSession(sessionId: string, text: string): Promise<void> {
+    const sessions = dshSessions()
+    if (sessions === undefined) throw new Error('当前 DSH 不支持会话发送（缺少 sessions 服务）')
+    const send = async (session: any): Promise<void> => {
+      if (session === undefined || typeof session.prompt !== 'function') throw new Error('会话服务不可用')
+      const result = await session.prompt([{ type: 'text', text }], 'queue')
+      if (result && result.ok === false) throw new Error(result.error?.message ?? '发送失败')
+    }
     let direct: any
     try { direct = sessions.binding?.(sessionId) } catch { direct = undefined }
-    if (direct?.session && typeof direct.session.prompt === 'function') {
-      const result = await direct.session.prompt([{ type: 'text', text }], 'queue')
-      if (result && result.ok === false) throw new Error(result.error?.message ?? '追加失败')
+    if (direct?.session !== undefined) {
+      await send(direct.session)
       return
     }
-    const ref = sessions.retainAgentScope(sessionId)
-    try {
-      const ready = await Promise.race([
-        ref.ready ? Promise.resolve(ref.ready) : Promise.resolve(undefined),
-        new Promise((_, reject) => window.setTimeout(() => reject(new Error('会话加载超时')), 6000)),
-      ]) as any
-      const binding = ref.binding ?? ready
-      const session = binding?.session
-      if (!session || typeof session.prompt !== 'function') throw new Error('会话服务不可用')
-      const result = await session.prompt([{ type: 'text', text }], 'queue')
-      if (result && result.ok === false) throw new Error(result.error?.message ?? '追加失败')
-    } finally {
-      try { ref.release?.() } catch { /* ignore */ }
+    if (typeof sessions.retain === 'function') {
+      let ref: any
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try { ref = sessions.retain(sessionId, { source: 'gateway' }); break }
+        catch (cause) {
+          // 新建的会话可能还没进本地目录：短暂重试一次再报错
+          if (attempt === 2) throw cause
+          await new Promise(resolve => window.setTimeout(resolve, 200))
+        }
+      }
+      try {
+        Promise.resolve(ref.ready).catch(() => undefined)
+        await Promise.race([
+          Promise.resolve(ref.ready),
+          new Promise((_, reject) => window.setTimeout(() => reject(new Error('会话打开超时')), 10_000)),
+        ])
+        await send(ref.binding?.session)
+      } finally {
+        try { ref.release?.() } catch { /* ignore */ }
+      }
+      return
     }
+    if (typeof sessions.retainAgentScope === 'function') {
+      const ref = sessions.retainAgentScope(sessionId)
+      try { await send(ref.binding?.session); return } finally { try { ref.release?.() } catch { /* ignore */ } }
+    }
+    throw new Error('当前 DSH 不支持会话发送（缺少 retain 接口）')
+  }
+  async function appendToExistingSession(sessionId: string, text: string): Promise<void> {
+    try {
+      await sendToSession(sessionId, text)
+    } catch (cause) {
+      try { await navigator.clipboard.writeText(text) } catch { /* ignore */ }
+      throw new Error(`${String((cause as Error).message ?? cause)}（提示词已复制到剪贴板）`)
+    }
+  }
+  function focusSession(sessionId: string): void {
+    try {
+      const nav = dshCtx?.get?.<any>('uiWorkspace')
+      if (nav !== undefined && typeof nav.openSession === 'function') nav.openSession(sessionId)
+    } catch { /* 打开失败不影响已发出的消息 */ }
+  }
+  /** 新建工作区会话 → 发送提示词 → 回写 → 切到该会话；失败时把提示词放进剪贴板。 */
+  async function dispatchToNewSession(projectPath: string, prompt: string, onSent?: (sessionId: string) => Promise<void> | void, options: { focus?: boolean } = {}): Promise<string> {
+    try {
+      const sessionId = await createSessionIn(projectPath)
+      await sendToSession(sessionId, prompt)
+      if (onSent !== undefined) {
+        try { await onSent(sessionId) } catch (cause) { console.warn('[dsh-workbench] 会话已发出，但回写失败：', cause) }
+      }
+      if (options.focus !== false) {
+        focusSession(sessionId)
+        toast('已在新会话发出')
+      }
+      return sessionId
+    } catch (cause) {
+      const message = String((cause as Error).message ?? cause)
+      db.settings.lastAiError = `${nowStamp()} ${message}`
+      scheduleSave()
+      try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
+      throw new Error(`${message}（提示词已复制到剪贴板，可手动粘贴到新会话）`)
+    }
+  }
+  /** Bug 提交后回写状态与 AI 会话标记（原刷新链路的 consumePendingRepair 才做这件事）。 */
+  async function markBugsDispatched(ids: string[], sessionId: string): Promise<void> {
+    let changed = false
+    for (const id of ids) {
+      const bug = bugOf(id)
+      if (bug === undefined) continue
+      const next: Bug = { ...bug, status: bug.status === 'resolved' ? 'resolved' : 'doing', aiThreadId: sessionId }
+      const index = bugs.findIndex(item => item.id === id)
+      if (index >= 0) bugs[index] = next
+      changed = true
+      try {
+        await fetch(`${API}/bugs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bug: next }) })
+      } catch (cause) { console.warn('[dsh-workbench] Bug 状态回写失败：', cause) }
+    }
+    if (changed && ui.view === 'bugs') refreshBugMain()
+  }
+  /** 本次「AI 协同 / 提交修复」会提交的 Bug 列表（与提示词同源，避免说的和做的不是一批）。 */
+  function bugDispatchList(): Bug[] {
+    const selected = bugs.filter(bug => bugSelected.has(bug.id))
+    return selected.length > 0 ? selected : bugFiltered().filter(bug => bug.status !== 'resolved').slice(0, 10)
   }
   function defaultDispatchPrompt(kind: string): string {
     const product = productOf(productSelected)
     const testProject = testProjectOf(testProjectSelected)
     if (kind === 'product' && product) {
-      const mods = productModules.filter(m => m.productId === product.id)
+      const mods = productModuleList(product)
       const noteCount = productNoteList(product).length
+      const map = activeMap()
+      const mapId = productMapSelected
+      const mapArg = mapId === '' ? '' : `, mapId:"${mapId}"`
+      const mapLine = map === undefined
+        ? `- 导图：整产品（旧版单导图）`
+        : `- 当前导图：${map.name}（mapId: ${map.id}）${map.description ? ` — ${map.description}` : ''}\n- 同产品其他导图：${productMaps.filter(m => m.id !== map.id).map(m => m.name).join('、') || '无'}\n- 本次只处理这张导图；用工具写入时必须带 ${mapArg.slice(2)}`
       return `产品续做任务：${product.name}
 
 你是资深产品经理，继续推进本产品的设计工作。
 - 产品 ID：${product.id}
 - 工作区绝对路径：${product.workspacePath || '未关联'}
+${mapLine}
 - 当前进度：${mods.length} 个模块/业务/功能节点 · ${noteCount} 篇设计笔记 · ${productDemoList(product).length} 个 Demo
-- 导图 JSON：${product.mindmap.slice(0, 4000)}
+- 导图 JSON：${mapMindmap().slice(0, 4000)}
 
 请检查模块/业务/功能/需求与 PC/移动/平板平台覆盖，找出缺口，然后：
-1. 补齐缺失的详细设计：调用 workbench_product_note_publish（含 productId、moduleId、platform、title、content）。
-2. 需要拆分结构时调用 workbench_module_publish（同名节点会更新，不要担心重复）。
+1. 补齐缺失的详细设计：调用 workbench_product_note_publish（含 productId${mapArg}、moduleId、platform、title、content）。
+2. 需要拆分结构时调用 workbench_module_publish（含 productId${mapArg}；同名节点会更新，不要担心重复）。
 3. 完成后汇报补了哪些模块/笔记。不要只回复正文。`
+    }
+    if (kind === 'product' && product === undefined) {
+      return '产品续做任务：（没有选中产品）\n\n请先在左侧选择一个产品；当前没有可提交的产品，这条提示词不会被执行。'
+    }
+    if (kind === 'test' && testProject === undefined) {
+      return '测试续做任务：（没有选中测试项目）\n\n请先在左侧选择一个测试项目；当前没有可提交的测试项目，这条提示词不会被执行。'
     }
     if (kind === 'test' && testProject) {
       const cases = testCasesOf(testProject)
@@ -3538,55 +4251,104 @@ ${common}${inspContext}
 
 请按模块/端检查用例覆盖缺口，补齐用例（调用 workbench_testcase_publish，同名标题会更新）；若已有失败/阻塞项，分析原因并把问题录入 Bug（调用 workbench_bug_publish）。完成后简短汇报。`
     }
-    const selected = bugs.filter(b => bugSelected.has(b.id))
-    if (selected.length > 0) return bugPrompt(selected)
-    const open = bugFiltered().filter(b => b.status !== 'resolved').slice(0, 10)
-    return `Bug 协同：请检查当前 Bug 的模块/平台归属，生成修复与回归步骤。${open.length > 0 ? `\n\n当前未关闭 Bug：\n${open.map((b, i) => `${i + 1}. [${b.code}] ${b.title}（${BUG_STATUS_LABEL[b.status]} · ${BUG_SEVERITY_LABEL[b.severity]} · ${bugProjectOf(b.projectId)?.workspacePath || '未关联工作区'}）`).join('\n')}` : ''}`
+    const list = bugDispatchList()
+    if (list.length === 0) return '当前没有未关闭的 Bug：请检查该工作区的构建与测试现状，列出发现的问题并给出修复建议。'
+    return bugPrompt(list)
   }
   function openAiDispatch(kind: string, presetPrompt?: string): void {
+    if (kind === 'product' && productOf(productSelected) === undefined) { toast('先在左侧选择一个产品，再开 AI 协同'); return }
+    if (kind === 'test' && testProjectOf(testProjectSelected) === undefined) { toast('先在左侧选择一个测试项目，再开 AI 协同'); return }
+    if (kind === 'note' && noteById(noteSelected) === undefined) { toast('先在左侧选择一篇笔记，再开 AI 协同'); return }
+    if (kind === 'bug' && bugDispatchList().length === 0) { toast('当前没有可提交的未关闭 Bug'); return }
     const rows = dshSessionRows()
-    const options = rows.length > 0 ? rows.map(row => `<option value="${row.id}">${esc(row.title || row.id.slice(-8))}${row.running ? ' · 运行中' : ''}</option>`).join('') : '<option value="">（无可用已有会话）</option>'
+    const options = rows.length > 0
+      ? rows.map(row => {
+        const where = row.cwd ? bugWorkspaceName(row.cwd) : '未分组'
+        return `<option value="${row.id}">${esc(row.title || row.id.slice(-8))} · ${esc(where)}${row.running ? ' · 运行中' : ''}</option>`
+      }).join('')
+      : '<option value="">（无可用已有会话）</option>'
+    const withWhere = (name: string, path: string): string => path !== '' ? `${name} · ${bugWorkspaceName(path)}` : name
+    let where = '默认工作区'
+    if (kind === 'product') {
+      const item = productOf(productSelected)
+      if (item !== undefined) where = withWhere(item.name, item.workspacePath)
+    } else if (kind === 'test') {
+      const item = testProjectOf(testProjectSelected)
+      if (item !== undefined) where = withWhere(item.name, item.workspacePath)
+    } else if (kind === 'note') {
+      const book = notebookOf(noteById(noteSelected)?.notebookId)
+      if (book !== undefined) where = withWhere(book.name, book.workspacePath ?? '')
+    } else {
+      const item = bugProjectOf(bugDispatchList()[0]?.projectId)
+      if (item !== undefined) where = withWhere(item.name, item.workspacePath)
+    }
     openModal(`<h3>AI 协同</h3>
-      <div class="mfield"><label>执行目标</label><select id="wb-dispatch-target"><option value="">新建工作区会话</option>${options}</select></div>
-      <div class="mfield"><label>下一步提示词</label><textarea id="wb-dispatch-prompt" rows="6">${esc(presetPrompt ?? defaultDispatchPrompt(kind))}</textarea></div>
-      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">选择已有会话会直接追加，不刷新；新会话会刷新后自动填入。追加失败时可复制提示词。</div>
+      <div class="mfield"><label>执行目标</label><select id="wb-dispatch-target"><option value="">新建会话（${esc(where)}）</option>${options}</select></div>
+      <div class="mfield"><label>下一步提示词</label><textarea class="dispatch-prompt" id="wb-dispatch-prompt" rows="6">${esc(presetPrompt ?? defaultDispatchPrompt(kind))}</textarea></div>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">新建会话会直接在当前项目工作区创建并发出、不刷新页面；选已有会话则追加一轮（括号里是会话所属工作区）。发送失败时提示词会留在剪贴板。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="ai-dispatch-run" data-kind="${kind}">执行下一步</button></div>`)
   }
   async function runAiDispatch(kind: string): Promise<void> {
+    if (kind === 'product' && productOf(productSelected) === undefined) { toast('没有选中产品'); return }
+    if (kind === 'test' && testProjectOf(testProjectSelected) === undefined) { toast('没有选中测试项目'); return }
+    if (kind === 'note' && noteById(noteSelected) === undefined) { toast('没有选中笔记'); return }
     const prompt = $id<HTMLTextAreaElement>('wb-dispatch-prompt')?.value.trim() ?? ''
     const target = $id<HTMLSelectElement>('wb-dispatch-target')?.value ?? ''
     if (prompt === '') return
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     if (target !== '') {
-      try { await appendToExistingSession(target, prompt); closeModal(); toast('已追加到已有会话'); return }
-      catch (cause) { toast(`追加失败，已复制提示词：${String((cause as Error).message ?? cause)}`); return }
+      closeModal()
+      try {
+        await appendToExistingSession(target, prompt)
+        if (kind === 'bug') {
+          const ids = bugDispatchList().map(bug => bug.id)
+          if (ids.length > 0) await markBugsDispatched(ids, target)
+        }
+        toast('已追加到已有会话')
+      } catch (cause) { toast(`追加失败：${String((cause as Error).message ?? cause)}`) }
+      return
     }
     closeModal()
-    // 按 kind 分派到对应的新会话通道，保留各自的回写标记（A4）
     try {
       if (kind === 'bug') {
-        const selected = bugs.filter(b => bugSelected.has(b.id))
-        let list = selected.length > 0 ? selected : bugFiltered().filter(b => b.status !== 'resolved').slice(0, 10)
+        const list = bugDispatchList()
         if (list.length === 0) { toast('没有可提交的 Bug'); return }
-        // A6 同款约束：一个会话只能绑定一个工作区，跨项目时只提交首个项目的 Bug
+        // 一个会话只能绑定一个工作区，跨项目时只提交首个项目的 Bug
         const projects = Array.from(new Set(list.map(b => b.projectId)))
         const project = bugProjectOf(projects[0])
         if (!project?.workspacePath) { toast('项目还没关联工作区，请先编辑项目'); return }
-        if (projects.length > 1) {
-          list = list.filter(b => b.projectId === projects[0])
-          toast(`选中的 Bug 跨 ${projects.length} 个项目，本次仅提交「${project.name}」的 ${list.length} 条，其余项目请分别提交`)
-        }
-        queueRepairSession(project, prompt, list.map(b => b.id))
+        const submitted = projects.length > 1 ? list.filter(b => b.projectId === projects[0]) : list
+        if (projects.length > 1) toast(`选中的 Bug 跨 ${projects.length} 个项目，本次仅提交「${project.name}」的 ${submitted.length} 条`)
+        await queueRepairSession(project, prompt, submitted.map(b => b.id))
         return
       }
-      if (kind === 'test') { queueTestPrompt(prompt); return }
-      if (kind === 'note') { queueNoteImprove(prompt); return }
-      queueProductPrompt(prompt)
-    } catch (cause) { toast(`新会话失败：${String((cause as Error).message ?? cause)}`) }
+      if (kind === 'test') { await queueTestPrompt(prompt); return }
+      if (kind === 'note') { await queueNoteImprove(prompt); return }
+      await queueProductPrompt(prompt)
+    } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
   }
 
   function bindProduct(): void {
-    $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => { productSelected = (e.currentTarget as HTMLSelectElement).value; productNodeSelected = null; productDemoSelected = ''; productPicked = productDefaultPicked(productOf(productSelected)); renderContent() })
+    $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => {
+      productSelected = (e.currentTarget as HTMLSelectElement).value
+      productNodeSelected = null
+      productDemoSelected = ''
+      productMapSelected = ''
+      productMapScopeAll = false
+      productPicked = productDefaultPicked(productOf(productSelected))
+      void loadProductMaps().then(() => {
+        productPicked = productDefaultPicked(productOf(productSelected))
+        renderContent()
+      })
+    })
+    $id<HTMLSelectElement>('wb-map-scope')?.addEventListener('change', e => {
+      const value = (e.currentTarget as HTMLSelectElement).value
+      if (value === 'all') productMapScopeAll = true
+      else { productMapScopeAll = false; productMapSelected = value }
+      productNodeSelected = null
+      productPicked = productDefaultPicked(productOf(productSelected))
+      renderContent()
+    })
     $id<HTMLSelectElement>('wb-product-style')?.addEventListener('change', e => { productStyle = (e.currentTarget as HTMLSelectElement).value; renderContent() })
     $id<HTMLSelectElement>('wb-product-platform')?.addEventListener('change', e => { productPlatform = (e.currentTarget as HTMLSelectElement).value as typeof productPlatform; renderContent() })
     $id<HTMLSelectElement>('wb-product-kind')?.addEventListener('change', e => { productDemoKind = (e.currentTarget as HTMLSelectElement).value as typeof productDemoKind; renderContent() })
@@ -3677,16 +4439,9 @@ ${existingTitles ? `\n【已有用例（勿重复生成同名/同覆盖用例）
 4. 不要只回复用例正文；不要用 write/edit 写文件；唯一交付方式是调用工具。
 5. 生成 6-12 条（每个功能 2-4 条 × 功能数，上限 12），完成后简短汇总。`
   }
-  function queueTestPrompt(prompt: string): void {
-    const previousSessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session') ?? ''
-    sessionStorage.setItem('dsh-workbench:pending-test', JSON.stringify({ prompt, previousSessionId, at: Date.now() }))
+  async function queueTestPrompt(prompt: string): Promise<void> {
     const project = testProjectOf(testProjectSelected)
-    if (project?.workspacePath && !clickWorkspaceRow(project.workspacePath)) toast('未找到工作区入口，将在当前工作区新建会话')
-    const newButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.offsetParent !== null && (btn.getAttribute('aria-label') === '新建会话' || (btn.textContent ?? '').includes('新建会话')))
-    if (!newButton) throw new Error('找不到 DSH 新建会话按钮')
-    newButton.click()
-    window.setTimeout(() => location.reload(), 350)
+    await dispatchToNewSession(project?.workspacePath ?? '', prompt)
   }
   function openTestProject(id?: string): void {
     const project = testProjectOf(id)
@@ -3748,7 +4503,7 @@ ${existingTitles ? `\n【已有用例（勿重复生成同名/同覆盖用例）
     const prompt = testPrompt(project, source, requirement)
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     closeModal(); toast('正在新建用例生成会话…')
-    try { queueTestPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    try { await queueTestPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
   }
   async function startTestRun(): Promise<void> {
     const project = testProjectOf(testProjectSelected)
@@ -3869,17 +4624,9 @@ workbench_test_result_publish
 
 ${lines}`
   }
-  function queueTestExec(project: TestProject, run: TestRun): void {
+  async function queueTestExec(project: TestProject, run: TestRun): Promise<void> {
     const prompt = testExecPrompt(project, run)
-    void navigator.clipboard.writeText(prompt).catch(() => undefined)
-    const previousSessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session') ?? ''
-    sessionStorage.setItem('dsh-workbench:pending-test', JSON.stringify({ prompt, previousSessionId, at: Date.now() }))
-    if (project.workspacePath && !clickWorkspaceRow(project.workspacePath)) toast('未找到工作区入口，将在当前工作区新建会话')
-    const newButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.offsetParent !== null && (btn.getAttribute('aria-label') === '新建会话' || (btn.textContent ?? '').includes('新建会话')))
-    if (!newButton) throw new Error('找不到 DSH 新建会话按钮')
-    newButton.click()
-    window.setTimeout(() => location.reload(), 350)
+    await dispatchToNewSession(project.workspacePath, prompt)
   }
   function openTestExecDispatch(): void {
     const project = testProjectOf(testProjectSelected)
@@ -3890,7 +4637,7 @@ ${lines}`
     const prompt = testExecPrompt(project, run)
     openModal(`<h3>AI 自动化测试</h3>
       <div class="mfield"><label>执行目标</label><select id="wb-dispatch-target"><option value="">新建工作区会话</option>${options}</select></div>
-      <div class="mfield"><label>测试执行提示词</label><textarea id="wb-dispatch-prompt" rows="6">${esc(prompt)}</textarea></div>
+      <div class="mfield"><label>测试执行提示词</label><textarea class="dispatch-prompt" id="wb-dispatch-prompt" rows="6">${esc(prompt)}</textarea></div>
       <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">AI 将逐条执行用例并通过 workbench_test_result_publish 回写结果；失败项可自动录 Bug。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="test-exec-run" data-run="${run.id}">开始执行</button></div>`)
   }
@@ -4014,7 +4761,7 @@ ${lines}`
   function renderDetail(): void {
     const el = detail()
     if (!el) return
-    const show = !['calendar', 'focus', 'stats', 'news', 'notes', 'bugs', 'product', 'test'].includes(ui.view)
+    const show = !['portal', 'calendar', 'focus', 'stats', 'news', 'notes', 'bugs', 'product', 'test'].includes(ui.view)
     el.classList.toggle('hide', !show)
     if (!show) { el.innerHTML = ''; return }
     const t = selectedTask()
@@ -4033,6 +4780,7 @@ ${lines}`
           <button class="icon-btn" data-act="delete" data-id="${t.id}" title="删除">${ic('trash', 13)}</button></span></div>
         <div class="d-title-row"><button class="check${t.status === 'done' ? ' done' : ''}" data-act="toggle" data-id="${t.id}">${t.status === 'done' ? ic('check', 11) : ''}</button>
           <div class="d-title" contenteditable="true" data-edit-title="${t.id}">${esc(t.title)}</div></div>
+        ${field('项目', 'layers', t.projectPath ? `<b>${esc(projectLabelOfTask(t))}</b>` : '<span class="muted">未归属</span>', 'project', t.id)}
         ${field('空间', 'folder', `<span class="dot" style="background:${space.color}"></span>${esc(space.name)}`, 'space', t.id)}
         ${field('日期', 'calendar', `${t.date === todayKey() ? '今天' : (t.date ? fmtDay(t.date) : '未安排')} <span class="muted">${t.date ?? ''}</span>`, 'date', t.id)}
         ${field('时间', 'clock', `${timeText(t)}${t.duration ? ` <span class="muted">· ${t.duration} 分钟</span>` : ''}`, 'time', t.id)}
@@ -4173,16 +4921,17 @@ ${lines}`
 
   /* ---------- 底部 dock ---------- */
   function renderDock(): void {
-    const items: Array<[string, string, string]> = [['list', 'list', '行动清单'], ['calendar', 'calendar', '日历'], ['board', 'board', '看板'], ['stats', 'chart', '统计'], ['focus', 'target', '专注'], ['news', 'news', '新闻'], ['notes', 'notebook', '记事本'], ['bugs', 'bug', 'Bug 管理'], ['product', 'product', '产品设计'], ['test', 'test', '测试'], ['settings', 'settings', '设置']]
+    const items: Array<[string, string, string]> = [['portal', 'home', '门户'], ['list', 'list', '行动清单'], ['calendar', 'calendar', '日历'], ['board', 'board', '看板'], ['stats', 'chart', '统计'], ['focus', 'target', '专注'], ['news', 'news', '新闻'], ['notes', 'notebook', '记事本'], ['bugs', 'bug', 'Bug 管理'], ['product', 'product', '产品设计'], ['test', 'test', '测试'], ['settings', 'settings', '设置']]
     const dock = $id('wb-dock')
     if (!dock) return
     dock.innerHTML = items.map(([view, icon, label]) => `<button ${view === 'settings' ? 'data-act="settings"' : `data-view="${view}"`} class="${ui.view === view ? 'active' : ''}" title="${label}" aria-label="${label}">${ic(icon, 17)}</button>`).join('')
   }
 
   /* ---------- 任务操作 ---------- */
-  function createTask(input: { title: string; space?: string; date?: string; start?: string; end?: string; desc?: string; priority?: Priority }): void {
+  function createTask(input: { title: string; space?: string; date?: string; start?: string; end?: string; desc?: string; priority?: Priority; projectPath?: string }): void {
     const task: Task = {
       id: uid('t'), title: input.title, desc: input.desc ?? '', note: '', space: input.space ?? (db.spaces[2]?.id ?? 'life'),
+      projectPath: input.projectPath ?? (ui.project === 'all' || ui.project === 'none' ? '' : ui.project),
       status: 'next', priority: input.priority ?? 'normal', tags: [], date: input.date ?? todayKey(),
       start: input.start ?? '', end: input.end ?? '', duration: 0, group: '',
       createdAt: nowStamp(), updatedAt: nowStamp(), completedAt: null, subtasks: [], attachments: [],
@@ -4260,15 +5009,20 @@ ${lines}`
   }
   function openNewTask(): void {
     const spaces = db.spaces.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')
+    const projectOptions = [
+      `<option value="" ${ui.project === 'all' || ui.project === 'none' ? 'selected' : ''}>未归属</option>`,
+      ...projectCards().map(card => `<option value="${esc(card.path)}" ${ui.project === card.path ? 'selected' : ''}>${esc(card.name)}</option>`),
+    ].join('')
     openModal(`<h3>新建任务</h3>
       <div class="mfield"><label>标题</label><input id="wb-m-title" placeholder="要做什么？"></div>
       <div class="mfield"><label>备注</label><textarea id="wb-m-desc" placeholder="补充一句上下文（可选）"></textarea></div>
-      <div class="mrow"><div class="mfield"><label>空间</label><select id="wb-m-space">${spaces}</select></div>
-        <div class="mfield"><label>日期</label><input id="wb-m-date" type="date" value="${todayKey()}"></div></div>
+      <div class="mrow"><div class="mfield"><label>项目</label><select id="wb-m-project">${projectOptions}</select></div>
+        <div class="mfield"><label>空间</label><select id="wb-m-space">${spaces}</select></div></div>
+      <div class="mrow"><div class="mfield"><label>日期</label><input id="wb-m-date" type="date" value="${todayKey()}"></div>
+        <div class="mfield"><label>优先级</label><select id="wb-m-priority"><option value="normal">普通</option><option value="high">高优先级</option><option value="low">低优先级</option></select></div></div>
       <div class="mrow"><div class="mfield"><label>开始</label><input id="wb-m-start" type="time"></div>
         <div class="mfield"><label>结束</label><input id="wb-m-end" type="time"></div></div>
-      <div class="mrow"><div class="mfield"><label>优先级</label><select id="wb-m-priority"><option value="normal">普通</option><option value="high">高优先级</option><option value="low">低优先级</option></select></div>
-        <div class="mfield"><label>标签</label><input id="wb-m-tags" placeholder="用逗号分隔"></div></div>
+      <div class="mfield"><label>标签</label><input id="wb-m-tags" placeholder="用逗号分隔"></div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="create">创建任务</button></div>`)
   }
   function createFromModal(): void {
@@ -4281,8 +5035,9 @@ ${lines}`
     const end = $id<HTMLInputElement>('wb-m-end')?.value ?? ''
     const desc = $id<HTMLTextAreaElement>('wb-m-desc')?.value.trim() ?? ''
     const priority = ($id<HTMLSelectElement>('wb-m-priority')?.value ?? 'normal') as Priority
+    const projectPath = $id<HTMLSelectElement>('wb-m-project')?.value ?? ''
     const task: Task = {
-      id: uid('t'), title, desc, note: '', space, status: 'next', priority, tags, date: date || null,
+      id: uid('t'), title, desc, note: '', space, projectPath, status: 'next', priority, tags, date: date || null,
       start, end, duration: 0, group: '', createdAt: nowStamp(), updatedAt: nowStamp(), completedAt: null,
       subtasks: [], attachments: [], logs: [{ at: nowStamp(), type: 'created', text: '创建任务' }],
     }
@@ -4318,7 +5073,8 @@ ${lines}`
       <div class="switch-row"><span>空间</span><button class="btn" style="height:26px;padding:0 9px" data-act="manage-spaces">管理（${db.spaces.length}）</button></div>
       <div class="switch-row"><span>数据存储</span><span class="muted" style="font-size:11px" id="wb-health">读取中…</span></div>
       <div class="switch-row"><span>条目</span><span class="muted" style="font-size:11px">${db.tasks.length} 项任务 · ${db.focus.length} 次专注</span></div>
-      <div class="switch-row"><span>版本</span><span class="muted" style="font-size:11px">dsh-workbench 1.1.0</span></div>
+      <div class="switch-row"><span>版本</span><span class="muted" style="font-size:11px">dsh-workbench 1.4.0</span></div>
+      <div class="switch-row"><span>最近 AI 提交</span><span class="muted" style="font-size:11px;max-width:320px;text-align:right;word-break:break-all">${esc(String(db.settings.lastAiError ?? '无'))}</span></div>
       <div class="mfield"><label>笔记保存目录</label>
         <input id="wb-export-dir" value="" placeholder="读取中…">
         <div class="nb-create-row" style="margin-top:6px"><button class="btn" data-act="export-dir-save">保存目录</button><button class="btn" data-act="export-dir-default">恢复默认</button></div>
@@ -4367,9 +5123,14 @@ ${lines}`
   function openField(field: string, id: string): void {
     const t = taskOf(id)
     if (!t) return
-    const labels: Record<string, string> = { space: '空间', date: '日期', time: '时间', status: '执行状态', priority: '优先级', tags: '标签', group: '分组' }
+    const labels: Record<string, string> = { project: '项目', space: '空间', date: '日期', time: '时间', status: '执行状态', priority: '优先级', tags: '标签', group: '分组' }
     let body = ''
-    if (field === 'space') {
+    if (field === 'project') {
+      const options = [`<option value="" ${t.projectPath === '' ? 'selected' : ''}>未归属</option>`,
+        ...projectCards().map(card => `<option value="${esc(card.path)}" ${t.projectPath === card.path ? 'selected' : ''}>${esc(card.name)}</option>`)].join('')
+      body = `<div class="mfield"><label>项目（= DSH 工作区）</label><select id="wb-f-project">${options}</select></div>
+        <div class="mfield" style="color:var(--text-3);font-size:10.5px">选择项目后，任务会出现在该项目的日历、统计与门户计数里。</div>`
+    } else if (field === 'space') {
       body = `<div class="mfield"><label>空间</label><select id="wb-f-space">${db.spaces.map(sp => `<option value="${sp.id}" ${sp.id === t.space ? 'selected' : ''}>${esc(sp.name)}</option>`).join('')}</select></div>`
     } else if (field === 'date') {
       body = `<div class="mfield"><label>日期（留空表示不安排）</label><input id="wb-f-date" type="date" value="${t.date ?? ''}"></div>`
@@ -4392,7 +5153,9 @@ ${lines}`
     const t = taskOf(id)
     if (!t) return
     const before = { ...t }
-    if (field === 'space') {
+    if (field === 'project') {
+      t.projectPath = $id<HTMLSelectElement>('wb-f-project')?.value ?? ''
+    } else if (field === 'space') {
       t.space = $id<HTMLSelectElement>('wb-f-space')?.value ?? t.space
     } else if (field === 'date') {
       t.date = $id<HTMLInputElement>('wb-f-date')?.value || null
@@ -4415,7 +5178,7 @@ ${lines}`
       t.group = ($id<HTMLInputElement>('wb-f-group')?.value ?? '').trim()
     }
     t.updatedAt = nowStamp()
-    t.logs.unshift({ at: nowStamp(), type: 'edit', text: `修改${field === 'space' ? '空间' : field === 'date' ? '日期' : field === 'time' ? '时间' : field === 'status' ? '执行状态' : field === 'priority' ? '优先级' : field === 'tags' ? '标签' : '分组'}` })
+    t.logs.unshift({ at: nowStamp(), type: 'edit', text: `修改${field === 'project' ? '项目' : field === 'space' ? '空间' : field === 'date' ? '日期' : field === 'time' ? '时间' : field === 'status' ? '执行状态' : field === 'priority' ? '优先级' : field === 'tags' ? '标签' : '分组'}` })
     closeModal()
     renderAll()
     scheduleSave()
@@ -4578,12 +5341,25 @@ ${lines}`
   function onClick(event: MouseEvent): void {
     const target = event.target as Element | null
     if (!target) return
+    if (ctxMenuOpen && target.closest('#wb-ctxmenu') === null) closeContextMenu()
     const actEl = target.closest('[data-act]')
     if (actEl) {
       const act = actEl.getAttribute('data-act') ?? ''
       const id = actEl.getAttribute('data-id') ?? ''
       if (act === 'overlay') { if (target === actEl) closeModal(); return }
       if (act === 'close-modal') { closeModal(); return }
+      if (act === 'portal-home') { openPortal(); return }
+      if (act === 'portal-project') { setProject(actEl.getAttribute('data-id') ?? 'all'); return }
+      if (act === 'portal-open') { openFeature((actEl.getAttribute('data-view') ?? 'list') as Ui['view']); return }
+      if (act === 'portal-enter') {
+        setProject(actEl.getAttribute('data-id') ?? 'all', false)
+        openFeature((actEl.getAttribute('data-view') ?? 'list') as Ui['view'])
+        return
+      }
+      if (act === 'portal-new') { openProductEdit(undefined, actEl.getAttribute('data-path') ?? undefined); return }
+      if (act === 'portal-edit') { openProductEdit(actEl.getAttribute('data-id') ?? undefined); return }
+      if (act === 'portal-delete') { void deleteProduct(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'portal-load') { void refreshPortal().then(() => toast('项目数据已刷新')); return }
       if (act === 'new') { openNewTask(); return }
       if (act === 'settings') { void void openSettings(); return }
       if (act === 'space-add') { openSpace(); return }
@@ -4751,7 +5527,7 @@ ${lines}`
             try { await appendToExistingSession(target, prompt); toast('已追加到已有会话'); return }
             catch (cause) { toast(`追加失败，已复制提示词：${String((cause as Error).message ?? cause)}`); return }
           }
-          try { queueTestExec(project, run) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+          try { await queueTestExec(project, run) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
         })()
         return
       }
@@ -4765,6 +5541,14 @@ ${lines}`
       if (act === 'test-report-save') { void saveTestReport(); return }
       if (act === 'test-deploy') { void deployTestProject(); return }
       if (act === 'product-pick') { const id = actEl.getAttribute('data-id') ?? ''; if (productPicked.has(id)) productPicked.delete(id); else productPicked.add(id); renderContent(); return }
+      if (act === 'product-select') {
+        productSelected = actEl.getAttribute('data-id') ?? null
+        productNodeSelected = null
+        productDemoSelected = ''
+        productPicked = productDefaultPicked(productOf(productSelected))
+        renderContent()
+        return
+      }
       if (act === 'product-new') { openProductEdit(); return }
       if (act === 'product-edit') { openProductEdit(productSelected ?? undefined); return }
       if (act === 'product-save') { void saveProduct(actEl.getAttribute('data-id') ?? ''); return }
@@ -4776,6 +5560,23 @@ ${lines}`
       if (act === 'product-node-child') { openNodeQuickAdd('child'); return }
       if (act === 'product-node-sibling') { openNodeQuickAdd('sibling'); return }
       if (act === 'product-node-add-quick') { void saveQuickNode(); return }
+      if (act === 'pm-map-new') { openMapEditor(); return }
+      if (act === 'pm-map-rename') { openMapEditor(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-map-save') { void saveMapFromModal(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-map-delete') { void deleteMapById(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-map-select') { selectMap(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-layout') {
+        const mode = actEl.getAttribute('data-mode')
+        if (mode === 'right' || mode === 'bilateral' || mode === 'down' || mode === 'radial') {
+          db.settings.mapLayout = mode
+          scheduleSave()
+          renderContent()
+          toast(`布局：${MAP_LAYOUTS.find(layout => layout.id === mode)?.label ?? mode}`)
+        }
+        return
+      }
+      if (act === 'pm-toggle-fold') { toggleNodeFold(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-node-kind') { void changeNodeKind(actEl.getAttribute('data-id') ?? '', actEl.getAttribute('data-type') === 'requirement' ? 'requirement' : 'feature'); return }
       if (act === 'pm-collapse-all') { for (const n of productNodes(productOf(productSelected))) if (n.type !== 'root' && (productNodes(productOf(productSelected)).some(k => k.parentId === n.id))) productNodeCollapsed.add(n.id); renderContent(); return }
       if (act === 'pm-expand-all') { productNodeCollapsed.clear(); renderContent(); return }
       if (act === 'pm-zoom-in') { setMapZoom(productMapZoom + 0.15); return }
@@ -4825,7 +5626,13 @@ ${lines}`
         const view = actEl.getAttribute('data-view') ?? ''
         const action = actEl.getAttribute('data-action') ?? ''
         closeModal()
-        if (view !== '') { ui.view = view as Ui['view']; ui.selected = null; renderAll(); return }
+        if (view !== '') {
+          ui.view = view as Ui['view']
+          ui.selected = null
+          renderAll()
+          if (ui.view === 'portal') void refreshPortal()
+          return
+        }
         if (action === 'new') { openNewTask(); return }
         if (action === 'note-new') { ui.view = 'notes'; renderAll(); window.setTimeout(() => { void createNote() }, 0); return }
         if (action === 'bug-new') { ui.view = 'bugs'; renderAll(); window.setTimeout(() => openBugEditor(), 0); return }
@@ -4859,7 +5666,7 @@ ${lines}`
         inspQuery = q
         closeModal()
         const prompt = inspirationPrompt(product)
-        try { queueProductPrompt(prompt); toast('已新建调研会话，AI 检索后会写回灵感库') } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+        void queueProductPrompt(prompt).then(() => toast('已新建调研会话，AI 检索后会写回灵感库')).catch((cause: unknown) => { toast(`提交失败：${String((cause as Error).message ?? cause)}`) })
         return
       }
       if (act === 'bug-project') { bugProjectFilter = actEl.getAttribute('data-id') ?? 'all'; bugSelected.clear(); renderContent(); return }
@@ -4987,6 +5794,7 @@ ${lines}`
       if (ui.view === 'notes' && next !== 'notes') void flushNoteSave()
       ui.view = next
       renderAll()
+      if (ui.view === 'portal') void refreshPortal()
       if (ui.view === 'news') void loadNews()
       if (ui.view === 'notes') void loadNotes()
       if (ui.view === 'bugs') void loadBugs()
@@ -5040,6 +5848,7 @@ ${lines}`
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && ctxMenuOpen) { closeContextMenu(); return }
     if (ui.view === 'notes' && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
       event.preventDefault()
       event.stopPropagation()
@@ -5137,6 +5946,7 @@ ${lines}`
       if (timer.taskId === null) timer.taskId = chooseSelection()
       loaded = true
       renderAll()
+      if (ui.view === 'portal') void refreshPortal()
       if (ui.view === 'news') void loadNews()
       if (ui.view === 'notes') void loadNotes()
       if (ui.view === 'bugs') void loadBugs()
@@ -5151,8 +5961,11 @@ ${lines}`
 
   const clickListener: EventListener = (e) => onClick(e as MouseEvent)
   const keyListener: EventListener = (e) => onKeydown(e as KeyboardEvent)
+  const contextListener: EventListener = (e) => onContextMenu(e as MouseEvent)
   shadow.addEventListener('click', clickListener)
   shadow.addEventListener('keydown', keyListener)
+  shadow.addEventListener('contextmenu', contextListener)
+  shadow.addEventListener('scroll', closeContextMenu, true)
   window.addEventListener('visibilitychange', onVisibility)
   const themeObserver = typeof MutationObserver !== 'undefined'
     ? new MutationObserver(() => { if ((db.settings.theme ?? 'auto') === 'auto') applyTheme() })
@@ -5239,6 +6052,8 @@ ${lines}`
       hostObserver?.disconnect()
       shadow.removeEventListener('click', clickListener)
       shadow.removeEventListener('keydown', keyListener)
+      shadow.removeEventListener('contextmenu', contextListener)
+      shadow.removeEventListener('scroll', closeContextMenu, true)
       window.removeEventListener('visibilitychange', onVisibility)
       themeObserver?.disconnect()
       shadow.innerHTML = ''
@@ -5260,4 +6075,5 @@ const SHELL = `
   <nav class="dock" id="wb-dock"></nav>
 </div>
 <div id="wb-modal"></div>
+<div id="wb-ctxmenu" class="ctxmenu"></div>
 <div class="toast" id="wb-toast"></div>`
