@@ -1,7 +1,7 @@
 {
   "name": "dsh-workbench",
-  "version": "1.7.0",
-  "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 灵感 / 测试 / 新闻（SQLite 本地库）",
+  "version": "1.7.1",
+  "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 灵感 / 智能体团队 / 测试 / 新闻（SQLite 本地库）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

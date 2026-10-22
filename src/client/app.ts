@@ -7,6 +7,7 @@
  */
 import { WORKBENCH_CSS } from './styles'
 import { createIdeaView, type IdeaViewHandle } from './idea'
+import { createAgentPanel } from './agent-panel'
 
 const API = '/workbench-api'
 
@@ -274,7 +275,11 @@ function ic(name: string, size = 16): string {
 
 /* ------------------------------- 挂载 ------------------------------- */
 export interface WorkbenchHandle { destroy(): void }
-interface DshClientContext { get?<T = unknown>(name: string): T | undefined; layout?: { selectPanel(panelId: string | null): void } }
+interface DshClientContext {
+  get?<T = unknown>(name: string): T | undefined
+  layout?: { selectPanel(panelId: string | null): void }
+  on?(event: string, callback: (...args: any[]) => void): () => void
+}
 
 export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): WorkbenchHandle {
   const shadow = hostEl.attachShadow({ mode: 'open' })
@@ -284,6 +289,15 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   shadow.innerHTML = `<style>${WORKBENCH_CSS}</style>${SHELL}`
 
   const $id = <T extends HTMLElement = HTMLElement>(id: string): T | null => shadow.getElementById(id) as T | null
+  const agentPanel = createAgentPanel({
+    api: API, esc, ic,
+    toast: (message: string) => toast(message),
+    confirm: (message: string) => (typeof window.confirm === 'function' ? window.confirm(message) : true),
+    openModal: (html: string) => openModal(html),
+    closeModal: () => closeModal(),
+    q: $id,
+  })
+  agentPanel.onRefresh(() => renderAll())
   const content = (): HTMLElement => $id('wb-content') as HTMLElement
   const detail = (): HTMLElement => $id('wb-detail') as HTMLElement
 
@@ -1062,7 +1076,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     <div class="portal-projects">${cardAll}${cardProjects}${cardNone}</div>
     ${cards.length === 0 ? `<div class="portal-empty">${ic('layers', 16)}<div><b>还没有项目</b><span>新建一个项目 / 产品并关联 DSH 工作区，任务、Bug、测试、笔记就会按项目归拢。</span></div><button class="btn" data-act="portal-new">${ic('plus', 12)}新建</button></div>` : ''}
     <div class="portal-sec-head"><h2>功能区</h2><span>按业务分组 · 每组整行铺满，卡片随宽度自适应</span></div>
-    ${featureGroups}`
+    ${featureGroups}
+    ${agentPanel.sectionHtml()}`
   }
 
   let ideaView: IdeaViewHandle | null = null
@@ -5302,6 +5317,21 @@ ${lines}`
       if (act === 'portal-edit') { openProductEdit(actEl.getAttribute('data-id') ?? undefined); return }
       if (act === 'portal-delete') { void deleteProduct(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'portal-load') { void refreshPortal().then(() => toast('项目数据已刷新')); return }
+      if (act === 'agent-team-open') { void agentPanel.openTeam(id); return }
+      if (act === 'agent-team-new') { agentPanel.openTeamForm(); return }
+      if (act === 'agent-team-save') { void agentPanel.createTeam(); return }
+      if (act === 'agent-team-delete') { void agentPanel.deleteTeam(id); return }
+      if (act === 'agent-member-new') { agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? ''); return }
+      if (act === 'agent-member-edit') {
+        const member = agentPanel.members().find(item => item.id === id)
+        if (member !== undefined) agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? '', member)
+        return
+      }
+      if (act === 'agent-member-save') { void agentPanel.saveMember(actEl.getAttribute('data-team') ?? '', id); return }
+      if (act === 'agent-member-del') { void agentPanel.removeMember(actEl.getAttribute('data-team') ?? '', id); return }
+      if (act === 'agent-member-write') { void agentPanel.toggleWrite(actEl.getAttribute('data-team') ?? '', id); return }
+      if (act === 'agent-member-add') { void agentPanel.addMemberToTeam(actEl.getAttribute('data-team') ?? ''); return }
+      if (act === 'agent-close') { closeModal(); return }
       if (act === 'new') { openNewTask(); return }
       if (act === 'settings') { void void openSettings(); return }
       if (act === 'space-add') { openSpace(); return }
@@ -5572,7 +5602,6 @@ ${lines}`
           ui.view = view as Ui['view']
           ui.selected = null
           renderAll()
-          if (ui.view === 'portal') void refreshPortal()
           return
         }
         if (action === 'new') { openNewTask(); return }
@@ -5874,6 +5903,7 @@ ${lines}`
       if (timer.taskId === null) timer.taskId = chooseSelection()
       loaded = true
       renderAll()
+      void agentPanel.load().then(() => { if (ui.view === 'portal') renderAll() })
       if (ui.view === 'portal') void refreshPortal()
       if (ui.view === 'news') void loadNews()
       if (ui.view === 'notes') void loadNotes()

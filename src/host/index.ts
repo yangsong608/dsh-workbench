@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createIdeaModule, buildIdeaPrompt } from './idea.js'
+import { createAgentModule } from './agent.js'
 
 const require = createRequire(import.meta.url)
 
@@ -3369,6 +3370,13 @@ export function apply(ctx: any): void {
   if (ideaModule !== null) ideaModule.registerTools(ctx)
   else console.warn('[dsh-workbench] 灵感需要 SQLite，当前为 JSON 兜底存储：灵感入口将提示不可用')
 
+  /* 智能体团队：与灵感同库不同表；无 SQLite 时禁用。 */
+  const agentModule = typeof (store as any).connection === 'function'
+    ? createAgentModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+    : null
+  if (agentModule !== null) agentModule.registerTools(ctx)
+  else console.warn('[dsh-workbench] 智能体团队需要 SQLite，当前为 JSON 兜底存储：团队入口将提示不可用')
+
   registerNewsTool(ctx, store)
   registerBugTool(ctx, store)
   registerProductTools(ctx, store)
@@ -3391,6 +3399,7 @@ export function apply(ctx: any): void {
 
       try {
         if (ideaModule !== null && (await ideaModule.handle(req, res, path, method, url))) return
+        if (agentModule !== null && (await agentModule.handle(req, res, path, method, url))) return
         if (method === 'GET' && (path === '/state' || path === '/')) {
           send(res, 200, store.readState())
           return

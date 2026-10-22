@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   draft_rev INTEGER NOT NULL DEFAULT 0,
   draft_json TEXT NOT NULL DEFAULT '',
   custom_angles TEXT NOT NULL DEFAULT '[]',
+  agent_team_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT
@@ -120,6 +121,9 @@ export class IdeaStore {
       const cols = (this.db.prepare('PRAGMA table_info(ideas)').all() as AnyMap[]).map(c => String(c.name))
       if (!cols.includes('custom_angles')) {
         this.db.exec("ALTER TABLE ideas ADD COLUMN custom_angles TEXT NOT NULL DEFAULT '[]'")
+      }
+      if (!cols.includes('agent_team_id')) {
+        this.db.exec("ALTER TABLE ideas ADD COLUMN agent_team_id TEXT NOT NULL DEFAULT ''")
       }
     } catch (cause) {
       console.warn('[dsh-workbench] 灵感表补列失败（不影响使用）：', String(cause))
@@ -201,6 +205,7 @@ export class IdeaStore {
       currentVersionId: row.current_version_id || '',
       draftRev: Number(row.draft_rev ?? 0),
       customAngles: parseJson<Array<{ id: string; label: string }>>(row.custom_angles, []),
+      agentTeamId: String(row.agent_team_id ?? ''),
       graph: draft,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -258,11 +263,12 @@ export class IdeaStore {
     const title = patch.title === undefined ? row.title : (String(patch.title).trim().slice(0, IDEA_LIMITS.title) || row.title)
     const brief = patch.brief === undefined ? row.brief : String(patch.brief).slice(0, IDEA_LIMITS.brief)
     const projectId = patch.projectId === undefined ? row.project_id : String(patch.projectId).slice(0, 64)
+    const agentTeamId = patch.agentTeamId === undefined ? String(row.agent_team_id ?? '') : String(patch.agentTeamId).slice(0, 64)
     const customAngles = patch.customAngles === undefined
       ? String(row.custom_angles ?? '[]')
       : JSON.stringify(Array.isArray(patch.customAngles) ? patch.customAngles.slice(0, 6) : [])
-    this.db.prepare('UPDATE ideas SET title=?, brief=?, project_id=?, custom_angles=?, updated_at=? WHERE id=?')
-      .run(title, brief, projectId, customAngles, now(), id)
+    this.db.prepare('UPDATE ideas SET title=?, brief=?, project_id=?, custom_angles=?, agent_team_id=?, updated_at=? WHERE id=?')
+      .run(title, brief, projectId, customAngles, agentTeamId, now(), id)
     return this.getIdea(id) ?? {}
   }
 
