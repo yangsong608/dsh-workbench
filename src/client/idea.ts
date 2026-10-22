@@ -124,7 +124,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       <div class="idea-root" id="idea-root">
         <aside class="idea-list">
           <div class="idea-list-head">
-            <div class="idea-list-title">${deps.ic('spark', 14)}<span>灵感</span><span class="n" id="idea-count"></span></div>
+            <div class="idea-list-title">${deps.ic('spark', 14)}<span>灵感</span><span class="n" id="idea-count"></span><button class="icon-btn" data-idea-act="idea-new" title="新建灵感（文字 / 截图 / 链接）" style="margin-left:auto">＋</button></div>
             <div class="idea-project" id="idea-project-box"></div>
             <div class="idea-search">${deps.ic('search', 12)}<input id="idea-search" data-idea-input="search" placeholder="搜索标题或正文"></div>
             <div class="idea-filter" id="idea-filter"></div>
@@ -386,6 +386,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       <button class="btn tiny" data-idea-act="idea-zoom" data-dir="out" ${hasIdea ? '' : 'disabled'}>－</button>
       <button class="btn tiny" data-idea-act="idea-zoom" data-dir="fit" ${hasIdea ? '' : 'disabled'}>适应</button>
       <button class="btn tiny" data-idea-act="idea-export" ${hasIdea ? '' : 'disabled'}>导出 ▾</button>
+      <button class="btn tiny" data-idea-act="idea-node-add" ${hasIdea ? '' : 'disabled'}>＋ 节点</button>
       <button class="btn tiny" data-idea-act="idea-archive" ${hasIdea ? '' : 'disabled'}>存档版本</button>
       <button class="btn-primary" style="height:26px;font-size:11.5px" data-idea-act="idea-generate" ${hasIdea && run?.status !== 'running' ? '' : 'disabled'} ${hasIdea && stats.nodes > 1 ? 'title="重新发散会新建版本"' : ''}>${run?.status === 'running' ? '生成中…' : '✦ 生成'}</button>`
   }
@@ -442,7 +443,10 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
           <span class="idea-chip">🖼 截图 ${inputs.filter(i => i.kind === 'image').length}</span>
           <span class="idea-chip">🔗 链接 ${inputs.filter(i => i.kind === 'url').length}</span>
           <button class="btn tiny" data-idea-act="idea-edit">编辑输入</button>
-        </div></div>`)
+        </div>
+        <div class="idea-quick"><textarea id="idea-quick-text" rows="2" placeholder="补充一句想法（Ctrl/⌘+Enter 添加）"></textarea><button class="btn tiny" data-idea-act="idea-quick-text">＋ 添加文字</button></div>
+        ${inputs.filter(i => i.kind === 'text').length > 0 ? `<div style="margin-top:6px;display:flex;flex-direction:column;gap:3px">${inputs.filter(i => i.kind === 'text').slice(-3).map(i => `<span style="font-size:10.5px;color:var(--text-3)">· ${deps.esc(i.text)}</span>`).join('')}</div>` : ''}
+      </div>`)
       body.push(`<div class="idea-sec"><h4>发散角度</h4><div class="idea-angles">${IDEA_ANGLES.map(a => `<button class="${anglesOfCurrent().includes(a.id) ? 'on' : ''}" data-idea-act="idea-angle" data-id="${a.id}" title="${deps.esc(a.hint)}">${a.label}</button>`).join('')}
         <button class="${anglesOfCurrent().includes('cross') ? 'on' : ''}" data-idea-act="idea-angle" data-id="cross">跨界类比</button></div></div>`)
       body.push(`<div class="idea-sec"><h4>操作</h4><div class="idea-actions">
@@ -515,8 +519,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }
     if (detail === null) {
       target.className = 'idea-plot'
-      target.innerHTML = `<div class="idea-empty" style="padding:60px 20px;text-align:center"><b style="font-size:13px">还没有内容</b>点上方「✦ 生成」，AI 会从 6 个方向把这件事炸开。
-        <div style="margin-top:12px"><button class="btn-primary" data-idea-act="idea-generate">✦ 生成思维导图</button></div></div>`
+      target.innerHTML = `<div class="idea-empty" style="padding:60px 20px;text-align:center"><b style="font-size:13px">还没有灵感</b>先写一句想法（也可以贴截图或链接），再让 AI 从 6 个方向发散。
+        <div style="margin-top:12px"><button class="btn-primary" data-idea-act="idea-new">＋ 新建灵感</button></div></div>`
       return
     }
     target.className = 'idea-plot'
@@ -779,7 +783,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
 
   async function generate(mode: 'diverge' | 'continue', targetNodeId = ''): Promise<void> {
-    if (selectedId === '' || busy !== '' || run?.status === 'running') return
+    if (selectedId === '') { void openForm('create'); return }
+    if (busy !== '' || run?.status === 'running') return
     busy = 'generate'
     try {
       const angles = anglesOfCurrent()
@@ -985,7 +990,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       <div class="m-field"><label>发散角度 <span style="font-weight:400">默认全选 · 至少 3 个</span></label><div class="idea-angles">${angleButtons}</div></div>
       <div class="idea-modal-foot"><span class="note">生成会新建一个版本，旧版本保留可对比</span><div class="right">
         <button class="btn" data-idea-act="idea-close-modal">取消</button>
-        ${f.mode === 'create' ? '<button class="btn-primary" data-idea-act="idea-modal-create">创建并生成</button>' : '<button class="btn-primary" data-idea-act="idea-modal-save">保存</button>'}
+        ${f.mode === 'create' ? '<button class="btn" data-idea-act="idea-modal-create">仅保存</button><button class="btn-primary" data-idea-act="idea-modal-create-generate">保存并生成</button>' : '<button class="btn-primary" data-idea-act="idea-modal-save">保存</button>'}
       </div></div></div>`)
     const fileInput = q<HTMLInputElement>('idea-form-file')
     if (fileInput !== null) fileInput.onchange = () => { void addFiles(fileInput.files); fileInput.value = '' }
@@ -1040,7 +1045,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     })
   }
 
-  async function submitForm(create: boolean): Promise<void> {
+  async function submitForm(create: boolean, thenGenerate = false): Promise<void> {
     if (form === null) return
     const f = form
     if (f.title.trim() === '') { deps.toast('先给灵感起个标题'); return }
@@ -1069,12 +1074,13 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         await api(`/ideas/${ideaId}/inputs`, { method: 'POST', body: { kind: 'image', dataUrl: image.dataUrl, name: image.name } })
       }
       deps.closeModal()
-      const shouldGenerate = f.mode === 'create'
+      const shouldGenerate = create && thenGenerate
       form = null
       await loadIdeas()
       await selectIdea(ideaId)
       renderAll()
       if (shouldGenerate) await generate('diverge')
+      else deps.toast('已保存；点右上「✦ 生成」开始发散')
     } finally {
       busy = ''
     }
@@ -1206,7 +1212,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-modal-url-del': form?.urls.splice(Number(el.getAttribute('data-index') ?? 0), 1); renderForm(); break
       case 'idea-modal-image-del': form?.images.splice(Number(el.getAttribute('data-index') ?? 0), 1); renderForm(); break
       case 'idea-modal-angle': toggleFormAngle(el.getAttribute('data-id') ?? ''); break
-      case 'idea-modal-create': void submitForm(true); break
+      case 'idea-modal-create': void submitForm(true, false); break
+      case 'idea-modal-create-generate': void submitForm(true, true); break
+      case 'idea-quick-text': void addQuickText(); break
       case 'idea-modal-save': void submitForm(false); break
       default: break
     }
@@ -1243,6 +1251,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (key === 'Escape') {
       if (form !== null) { form = null; deps.closeModal() }
       else if (preview !== null) { preview = null; renderAll() }
+    }
+    if (key === 'Enter' && ((event as KeyboardEvent).metaKey || (event as KeyboardEvent).ctrlKey) && (event.target as HTMLElement | null)?.id === 'idea-quick-text') {
+      event.preventDefault()
+      void addQuickText()
+      return
     }
     if (key === 'Enter' && (event.target as HTMLElement | null)?.getAttribute('data-idea-input') === 'form-url') {
       event.preventDefault()
@@ -1293,6 +1306,19 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       if (dir === 'fit') chart.setOption({ series: [{ zoom: 1 }] })
       else chart.setOption({ series: [{ zoom: Math.min(4, Math.max(0.4, zoomNow + (dir === 'in' ? 0.2 : -0.2))) }] })
     }
+  }
+
+  /** 详情面板里直接补一句文字（不用打开编辑弹窗）。 */
+  async function addQuickText(): Promise<void> {
+    if (selectedId === '') return
+    const el = q<HTMLTextAreaElement>('idea-quick-text')
+    const text = el?.value.trim() ?? ''
+    if (text === '') { el?.focus(); return }
+    const res = await api(`/ideas/${selectedId}/inputs`, { method: 'POST', body: { kind: 'text', text } })
+    if (!res.ok) { deps.toast(`添加失败：${res.body?.message ?? res.status}`); return }
+    await reloadDetail()
+    renderDetail()
+    deps.toast('已添加文字')
   }
 
   async function removeIdea(): Promise<void> {

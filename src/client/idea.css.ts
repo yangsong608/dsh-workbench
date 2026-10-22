@@ -70,6 +70,9 @@ export const IDEA_CSS = String.raw`
 .idea-kv dt{color:var(--text-3)}
 .idea-kv dd{margin:0;color:var(--text-2);word-break:break-all}
 .idea-actions{display:flex;gap:6px;flex-wrap:wrap}
+.idea-quick{display:flex;gap:6px;margin-top:8px;align-items:flex-end}
+.idea-quick textarea{flex:1;min-width:0;min-height:46px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:inherit;font-size:11.5px;line-height:1.5;padding:6px 8px;outline:0;resize:vertical}
+.idea-quick textarea:focus{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));box-shadow:0 0 0 3px var(--accent-soft)}
 .idea-chip{height:22px;padding:0 8px;border-radius:999px;background:var(--panel-3);color:var(--text-2);font-size:10.5px;display:inline-flex;align-items:center;gap:4px}
 .idea-chip.ok{background:var(--green-soft);color:var(--green)}
 .idea-chip.warn{background:var(--amber-soft);color:var(--amber)}
