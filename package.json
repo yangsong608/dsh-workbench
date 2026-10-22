@@ -1,7 +1,7 @@
 {
   "name": "dsh-workbench",
-  "version": "1.4.0",
-  "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 测试 / 新闻（SQLite 本地库）",
+  "version": "1.6.0",
+  "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 灵感 / 测试 / 新闻（SQLite 本地库）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -17,7 +17,9 @@
     "lib/**/*.js",
     "src",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "assets",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "bundle": "pnpm run bundle:host && pnpm run bundle:client",

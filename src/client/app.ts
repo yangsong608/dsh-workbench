@@ -6,6 +6,7 @@
  * 外层的 React 只负责挂载/卸载。
  */
 import { WORKBENCH_CSS } from './styles'
+import { createIdeaView, type IdeaViewHandle } from './idea'
 
 const API = '/workbench-api'
 
@@ -92,20 +93,10 @@ interface ProductDemo {
   featureId: string; title: string; filePath: string; createdAt: string
   platform?: string; kind?: 'page' | 'system'; status?: string
 }
-interface ProductInspiration {
-  id: string; productId: string; mapId?: string; featureId: string
-  kind: 'github' | 'web' | 'article' | 'design' | 'tool' | 'paper'
-  title: string; url: string; source: string; summary: string
-  takeaways: string[]; tags: string[]; stars: number; createdAt: string
-}
 interface DemoProgress {
   id: string; productId: string; demoId: string; step: number; total: number
   status: 'running' | 'done' | 'failed'; message: string
   log: { step: number; message: string; at: string }[]; updatedAt: string
-}
-interface GithubHit {
-  fullName: string; title: string; url: string; summary: string
-  stars: number; language: string; topics: string[]; updatedAt: string
 }
 interface Note {
   id: string; notebookId: string; mapId?: string; title: string; content: string; tags: string[]; pinned: boolean
@@ -116,12 +107,12 @@ interface CronTask {
   lastRunAt?: number | null; lastStatus?: string | null; nextRunAt?: number | null
   lastDurationMs?: number; totalTokens?: number; totalCostUsd?: number
 }
-interface Settings { theme?: Theme; weekStart?: string; [key: string]: unknown }
+interface Settings { theme?: Theme; weekStart?: string; sideWidth?: number; [key: string]: unknown }
 interface DB { spaces: Space[]; tasks: Task[]; focus: FocusSession[]; settings: Settings }
 interface Health { ok: boolean; engine: string; file: string; sqlite?: string; revision: number; tasks: number; spaces: number; focus: number }
 
 interface Ui {
-  view: 'portal' | 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'test'
+  view: 'portal' | 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'test' | 'idea'
   /** 当前项目范围：'all' 全部 / 'none' 未归属 / 其余为 DSH 工作区绝对路径。 */
   project: string
   scope: 'today' | 'all'
@@ -153,6 +144,21 @@ const STATUS_LABEL: Record<Status, string> = { next: '下一步', doing: '进行
 const STATUS_COLOR: Record<Status, string> = { next: '#8a8a94', doing: '#0f9f6e', waiting: '#c27c0e', done: '#9a9aa4' }
 const PRIORITY_LABEL: Record<Priority, string> = { high: '高优先级', normal: '普通', low: '低优先级' }
 const ACCENTS = ['#d97706', '#0f9f6e', '#2563eb', '#7c3aed', '#db2777', '#0891b2']
+
+/** 侧栏宽度：拖动范围与默认值（窄面板跟随旧的 190 布局）。 */
+const SIDE_MIN = 156
+const SIDE_MAX = 420
+const SIDE_DEFAULT = 200
+const SIDE_DEFAULT_NARROW = 190
+
+/**
+ * 门户功能区按业务分组：每个分组整行铺满，组内卡片由 grid auto-fill 自适应宽度。
+ * 改分组只改这里，渲染与样式不必跟着动。
+ */
+const PORTAL_GROUPS: Array<{ id: string; title: string; hint: string; views: Array<Ui['view']> }> = [
+  { id: 'work', title: '工作', hint: '任务、日程与沉淀', views: ['list', 'board', 'calendar', 'stats', 'focus', 'notes', 'news'] },
+  { id: 'rd', title: '研发', hint: '产品设计、缺陷、测试与灵感', views: ['product', 'bugs', 'test', 'idea'] },
+]
 
 /* ------------------------------- 时间工具 ------------------------------- */
 function pad(n: number): string { return String(n).padStart(2, '0') }
@@ -289,6 +295,30 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let saveState: 'saved' | 'saving' | 'error' = 'saved'
   let conflictReloading = false
   let dirty = false
+  /** 侧栏当前宽度（像素）；持久化在 settings.sideWidth。 */
+  let sideWidth = SIDE_DEFAULT
+
+  /**
+   * 应用侧栏宽度：写到 .app 的 --wb-side-w 上，由 CSS 驱动侧栏与 dock 的位置。
+   * persist 为真时写回 settings.sideWidth（一次拖动只在松手时落库一次）。
+   */
+  function applySideWidth(px: number, persist: boolean): void {
+    const next = Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(Number.isFinite(px) ? px : SIDE_DEFAULT)))
+    sideWidth = next
+    const app = $id('wb-app')
+    if (app !== null) app.style.setProperty('--wb-side-w', `${next}px`)
+    if (persist) {
+      db.settings.sideWidth = next
+      scheduleSave()
+    }
+  }
+
+  /** 首次进入：优先用保存过的宽度，否则按面板宽度给默认值。 */
+  function initSideWidth(): void {
+    const saved = typeof db.settings.sideWidth === 'number' ? db.settings.sideWidth : undefined
+    const fallback = window.matchMedia('(max-width:1250px)').matches ? SIDE_DEFAULT_NARROW : SIDE_DEFAULT
+    applySideWidth(saved ?? fallback, false)
+  }
 
   /* ---------- 新闻（与任务快照分开，由定时任务 agent 异步写入） ---------- */
   let newsTopics: NewsTopic[] = []
@@ -323,7 +353,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productMapScopeAll = false
   /** 宿主是否提供多导图接口（旧宿主 404 时退回单导图 + products.mindmap）。 */
   let productMapsReady = false
-  let productTab: 'map' | 'notes' | 'modules' | 'demo' | 'inspiration' = 'map'
+  let productTab: 'map' | 'notes' | 'modules' | 'demo' = 'map'
   let productNodeSelected: string | null = null
   const productNodeCollapsed = new Set<string>()
   let productMapZoom = 1
@@ -333,15 +363,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productPlatform: 'pc' | 'mobile' | 'tablet' | 'all' = 'all'
   let productDemoKind: 'page' | 'system' = 'page'
   let demoViewport: 'pc' | 'tablet' | 'mobile' = 'pc'
-  let productInspirations: ProductInspiration[] = []
   let demoProgress: DemoProgress | null = null
   let demoProgressDismissedAt = ''
-  let inspQuery = ''
-  let inspFilter: 'all' | ProductInspiration['kind'] = 'all'
-  let inspFeatureFilter = ''
-  let githubHits: GithubHit[] = []
-  let githubLoading = false
-  let githubError = ''
   let productLoading = false
   let productError = ''
   let productSig = ''
@@ -663,6 +686,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     renderContent()
     renderDetail()
     renderDock()
+    syncIdeaView()
   }
   function renderSidebar(): void {
     const ts = todayStats()
@@ -717,6 +741,10 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         '<div class="side-sub" style="padding:3px 8px 6px">按主题、按时间用 DSH Agent 检索</div>' +
         sideItem('新闻检索', { icon: 'news', view: 'news', active: true }) +
         sideItem('新增订阅', { icon: 'plus', act: 'news-add' }))
+    } else if (ui.view === 'idea') {
+      context = sideGroup('灵感', null,
+        '<div class="side-sub" style="padding:3px 8px 6px">中间一栏管理灵感；画布可在导图 / 力导之间切换</div>' +
+        '<div class="side-sub" style="padding:2px 8px 4px;color:var(--text-3);font-size:10.5px">研发视图</div>')
     } else if (ui.view === 'stats') {
       context = sideGroup('统计', null,
         '<div class="side-sub" style="padding:3px 8px 6px">用同一套任务数据复盘每天、每周与全年</div>' +
@@ -748,6 +776,13 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         <div class="side-item${ui.view === 'portal' ? ' active' : ''}" data-act="portal-home">${ic('home', 15)}<span>门户</span></div>
       </div>
       <div class="side-scroll">${context}
+        <div class="side-sec">
+          <div class="side-head">研发</div>
+          ${sideItem('产品设计', { icon: 'product', view: 'product', active: ui.view === 'product' })}
+          ${sideItem('Bug 管理', { icon: 'bug', view: 'bugs', active: ui.view === 'bugs' })}
+          ${sideItem('测试', { icon: 'test', view: 'test', active: ui.view === 'test' })}
+          ${sideItem('灵感', { icon: 'spark', view: 'idea', active: ui.view === 'idea' })}
+        </div>
         ${ui.view === 'portal' ? '' : `<div class="side-sec"><div class="side-head">空间<button class="add" data-act="space-add" title="新建空间">${ic('plus', 13)}</button></div>${spaces}</div>`}
       </div>
       <div class="side-foot">
@@ -779,6 +814,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       { id: 'bugs', label: 'Bug 管理', hint: '质量看板', icon: 'bug', view: 'bugs' },
       { id: 'product', label: '产品设计', hint: '导图/模块/笔记/Demo', icon: 'product', view: 'product' },
       { id: 'test', label: '测试', hint: '用例/执行/报告', icon: 'test', view: 'test' },
+      { id: 'idea', label: '灵感', hint: '发散成导图 / 力导图', icon: 'spark', view: 'idea' },
       { id: 'new-task', label: '新建任务', hint: '⌘N', icon: 'plus', action: 'new' },
       { id: 'new-note', label: '新建笔记', hint: '记事本', icon: 'plus', action: 'note-new' },
       { id: 'new-bug', label: '新建 Bug', hint: '质量管理', icon: 'plus', action: 'bug-new' },
@@ -836,7 +872,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试' }
 
   function renderContent(): void {
-    const el = content()
+    if (ui.view === 'idea') { syncIdeaView(); return }
+    const el = $id('wb-generic') ?? content()
     if (!el) return
     if (!loaded) {
       el.innerHTML = loadError !== ''
@@ -985,10 +1022,29 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       { view: 'focus', title: '专注', desc: '番茄计时与待专注队列', icon: 'target', count: null, tile: '#db2777' },
       { view: 'bugs', title: 'Bug 管理', desc: '缺陷看板与 AI 修复', icon: 'bug', count: scopeBugs, tile: '#d83b3b' },
       { view: 'test', title: '测试', desc: '用例 / 执行 / 回归', icon: 'test', count: scopeTests, tile: '#0891b2' },
+      { view: 'idea', title: '灵感', desc: '多角度发散 · 导图 / 力导', icon: 'spark', count: null, tile: '#5b5bd6' },
       { view: 'product', title: '产品设计', desc: '导图 / 设计笔记 / Demo', icon: 'product', count: null, tile: '#5b5bd6' },
       { view: 'notes', title: '记事本', desc: '笔记与 PDF 导出', icon: 'notebook', count: scopeNotes, tile: '#c27c0e' },
       { view: 'news', title: '新闻', desc: '定时检索与 AI 摘要', icon: 'news', count: null, tile: '#0f766e' },
     ]
+    /** 单个功能卡（分组内外共用同一套外观）。 */
+    const featureCard = (item: (typeof features)[number]): string => `<button class="portal-feature" style="--tile:${item.tile}" data-act="portal-open" data-view="${item.view}">
+        <span class="portal-feature-ico">${ic(item.icon, 19)}</span>
+        <span class="portal-feature-main"><b>${item.title}</b><small>${esc(item.desc)}</small></span>
+        ${item.count !== null ? `<span class="portal-feature-n">${item.count}</span>` : `<span class="portal-feature-go">${ic('arrowR', 13)}</span>`}
+      </button>`
+    /** 功能区：按 PORTAL_GROUPS 分组，每组一整行，组内网格自适应。 */
+    const featureGroups = (() => {
+      const byView = new Map(features.map(item => [item.view, item] as const))
+      return PORTAL_GROUPS.map(group => {
+        const items = group.views.map(view => byView.get(view)).filter((item): item is (typeof features)[number] => item !== undefined)
+        if (items.length === 0) return ''
+        return `<section class="portal-group" data-group="${group.id}">
+        <div class="portal-group-head"><h3><span class="portal-group-dot"></span>${group.title}</h3><span class="portal-group-meta">${items.length} 个功能 · ${group.hint}</span></div>
+        <div class="portal-features">${items.map(featureCard).join('')}</div>
+      </section>`
+      }).join('')
+    })()
     const cardAll = tile('all', '全部项目', { tasks: db.tasks.length, bugs: bugs.length, tests: testProjects.length, notes: notes.length }, { all: true })
     const cardNone = tile('none', '未归属', { tasks: projectTaskCount('none'), bugs: 0, tests: 0, notes: 0 }, { none: true })
     const cardProjects = cards.map(card => tile(card.path, card.name, {
@@ -1005,12 +1061,40 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     <div class="portal-sec-head"><h2>项目 / 产品</h2><span>${cards.length} 个项目 · 卡片内可编辑、删除</span></div>
     <div class="portal-projects">${cardAll}${cardProjects}${cardNone}</div>
     ${cards.length === 0 ? `<div class="portal-empty">${ic('layers', 16)}<div><b>还没有项目</b><span>新建一个项目 / 产品并关联 DSH 工作区，任务、Bug、测试、笔记就会按项目归拢。</span></div><button class="btn" data-act="portal-new">${ic('plus', 12)}新建</button></div>` : ''}
-    <div class="portal-sec-head"><h2>功能</h2><span>${esc(projectLabel(ui.project))} · 点卡片进入</span></div>
-    <div class="portal-features">${features.map(item => `<button class="portal-feature" style="--tile:${item.tile}" data-act="portal-open" data-view="${item.view}">
-        <span class="portal-feature-ico">${ic(item.icon, 19)}</span>
-        <span class="portal-feature-main"><b>${item.title}</b><small>${esc(item.desc)}</small></span>
-        ${item.count !== null ? `<span class="portal-feature-n">${item.count}</span>` : `<span class="portal-feature-go">${ic('arrowR', 13)}</span>`}
-      </button>`).join('')}</div>`
+    <div class="portal-sec-head"><h2>功能区</h2><span>按业务分组 · 每组整行铺满，卡片随宽度自适应</span></div>
+    ${featureGroups}`
+  }
+
+  let ideaView: IdeaViewHandle | null = null
+
+  /** 灵感视图常驻（编辑器实例不能每次重建），按当前视图显隐。 */
+  function ensureIdeaView(): IdeaViewHandle | null {
+    if (ideaView !== null) return ideaView
+    const root = $id('wb-idea-root')
+    if (root === null) return null
+    ideaView = createIdeaView(root, {
+      api: API,
+      esc,
+      ic,
+      toast: (message: string) => toast(message),
+      confirm: (message: string) => (typeof window.confirm === 'function' ? window.confirm(message) : true),
+      openModal,
+      closeModal,
+      dispatch: (projectPath: string, prompt: string) => dispatchToNewSession(projectPath, prompt),
+      isDark: () => resolvedTheme() === 'dark',
+    })
+    return ideaView
+  }
+
+  function syncIdeaView(): void {
+    const on = ui.view === 'idea'
+    $id('wb-app')?.classList.toggle('idea-mode', on)
+    const generic = $id('wb-generic')
+    const root = $id('wb-idea-root')
+    if (generic !== null) generic.style.display = on ? 'none' : ''
+    if (root !== null) root.style.display = on ? '' : 'none'
+    if (on) ensureIdeaView()?.show()
+    else ideaView?.hide()
   }
 
   function renderBoard(): string {
@@ -3135,7 +3219,7 @@ ${lines}
         ${productMaps.map(map => `<option value="${map.id}"${!productMapScopeAll && map.id === productMapSelected ? ' selected' : ''}>${esc(map.name)}</option>`).join('')}
       </select>`
     const tabs = `<div class="product-tabs">
-      ${(['map', 'notes', 'modules', 'inspiration', 'demo'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : tab === 'inspiration' ? `灵感（${productInspirationList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
+      ${(['map', 'notes', 'modules', 'demo'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
       ${scopeSelect}
     </div>`
     let body = ''
@@ -3181,8 +3265,6 @@ ${lines}
       body = `<div class="product-panel-head"><div><b>模块 / 业务 / 功能 / 需求</b><span>产品 → 模块 → 业务 → 功能 / 需求；端：PC / 移动 / 平板 / 全部</span></div><button class="btn-primary" data-act="product-gen-modules">${ic('spark', 12)}AI 生成模块与详细设计</button></div>
         <div class="module-coverage"><b>${mods.length}</b> 节点${['all','pc','mobile','tablet'].map(p => `<span>${platformLabel(p)} ${mods.filter(m => m.platform === p).length}</span>`).join('')}<span class="bar">${['all','pc','mobile','tablet'].map((p, i) => `<i style="width:${mods.length ? Math.round(mods.filter(m => m.platform === p).length / mods.length * 100) : 0}%;background:${['var(--accent)','var(--green)','var(--orange)','var(--amber)'][i]}"></i>`).join('')}</span></div>
         <div class="module-grid">${mods.map(m => `<div class="module-card ${m.kind}" data-act="product-module-detail" data-id="${m.id}" title="${esc(m.name)}"><div><span class="module-kind">${kindName(m.kind)}</span><b>${esc(m.name)}</b><i class="platform ${m.platform}">${m.platform.toUpperCase()}</i></div><p>${esc(m.description || '待补充模块说明')}</p><small>${esc(m.status)}${m.noteId ? ' · 已关联笔记' : ''}</small></div>`).join('') || '<div class="notes-empty small">还没有模块，点右上角 AI 生成；AI 会按产品导图拆分模块并逐模块生成详细设计笔记。</div>'}</div>`
-    } else if (productTab === 'inspiration') {
-      body = renderInspirationTab(product)
     } else {
       const demos = productDemoList(product)
       const current = demos.find(d => d.id === productDemoSelected) ?? demos[0]
@@ -3268,21 +3350,14 @@ ${lines}
       await loadProductMaps()
       const product = productOf(productSelected)
       if (product && productPicked.size === 0) productPicked = productDefaultPicked(product)
-      // 灵感库与 Demo 进度（失败不阻塞主数据）
+      // Demo 进度（失败不阻塞主数据）
       try {
-        const [iRes, gRes] = await Promise.all([
-          fetch(`${API}/products/inspirations`),
-          fetch(`${API}/products/demo-progress?productId=${encodeURIComponent(productSelected ?? '')}`),
-        ])
-        if (iRes.ok) {
-          const iData = await iRes.json() as { inspirations?: ProductInspiration[] }
-          productInspirations = Array.isArray(iData.inspirations) ? iData.inspirations : []
-        }
+        const gRes = await fetch(`${API}/products/demo-progress?productId=${encodeURIComponent(productSelected ?? '')}`)
         if (gRes.ok) {
           const gData = await gRes.json() as { progress?: DemoProgress | null }
           demoProgress = gData.progress ?? null
         }
-      } catch { /* 灵感/进度拉取失败不影响主流程 */ }
+      } catch { /* 进度拉取失败不影响主流程 */ }
       productError = ''
     } catch (cause) { if (!silent) productError = String((cause as Error).message ?? cause) }
     productLoading = false
@@ -3291,130 +3366,12 @@ ${lines}
       p: products.map(p => [p.id, p.name, p.updatedAt, p.mindmap.length]),
       d: productDemos.map(d => [d.id, d.createdAt]),
       n: notes.length,
-      i: productInspirations.length,
       g: [demoProgress?.step, demoProgress?.status, demoProgress?.message],
     })
     if (!silent || sig !== productSig) {
       productSig = sig
       if (($id('wb-modal')?.innerHTML ?? '') === '') renderContent()
     }
-  }
-  /* ------------------------------- 灵感库 ------------------------------- */
-  const INSP_KIND_LABEL: Record<string, string> = { github: 'GitHub', web: '网页', article: '文章', design: '设计参考', tool: '工具', paper: '论文' }
-  function productInspirationList(product: Product | undefined): ProductInspiration[] {
-    if (!product) return []
-    const list = productInspirations.filter(i => i.productId === product.id)
-    if (productMapScopeAll || productMapSelected === '') return list
-    return list.filter(i => i.mapId === undefined || i.mapId === '' || i.mapId === productMapSelected)
-  }
-  function renderInspirationTab(product: Product): string {
-    const all = productInspirationList(product)
-    const featureNodes = productFeatureNodes(product)
-    const filtered = all.filter(i =>
-      (inspFilter === 'all' || i.kind === inspFilter) &&
-      (inspFeatureFilter === '' || i.featureId === inspFeatureFilter))
-    const chips = (['all', 'github', 'web', 'article', 'design', 'tool', 'paper'] as const).map(k =>
-      `<button class="insp-chip${inspFilter === k ? ' on' : ''}" data-act="insp-filter" data-k="${k}">${k === 'all' ? `全部 ${all.length}` : `${INSP_KIND_LABEL[k]} ${all.filter(i => i.kind === k).length}`}</button>`).join('')
-    const featureOpts = `<option value="">全部节点</option>${featureNodes.map(n => `<option value="${n.id}" ${inspFeatureFilter === n.id ? 'selected' : ''}>${esc(n.label)}</option>`).join('')}`
-    const hitCards = githubHits.map((h, idx) => `<div class="insp-card hit"><div class="insp-card-head"><span class="insp-kind github">GitHub</span><b>${esc(h.title)}</b><i>★ ${h.stars}</i></div><div class="insp-card-src">${esc(h.fullName)}${h.language ? ` · ${esc(h.language)}` : ''}</div><p>${esc(h.summary || '（无描述）')}</p>${h.topics.length > 0 ? `<div class="insp-tags">${h.topics.map(t => `<span>${esc(t)}</span>`).join('')}</div>` : ''}<div class="insp-card-foot"><a href="${esc(h.url)}" target="_blank" rel="noreferrer">打开仓库</a><button class="btn" data-act="insp-collect" data-idx="${idx}">${ic('plus', 11)}收录</button></div></div>`).join('')
-    const cards = filtered.map(i => `<div class="insp-card ${i.kind}"><div class="insp-card-head"><span class="insp-kind ${i.kind}">${INSP_KIND_LABEL[i.kind] ?? i.kind}</span><b>${esc(i.title)}</b>${i.stars > 0 ? `<i>★ ${i.stars}</i>` : ''}</div><div class="insp-card-src">${esc(i.source || '未知来源')} · ${i.createdAt.slice(0, 10)}</div><p>${esc(i.summary)}</p>${i.takeaways.length > 0 ? `<ul class="insp-takeaways">${i.takeaways.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}${i.tags.length > 0 ? `<div class="insp-tags">${i.tags.map(t => `<span>${esc(t)}</span>`).join('')}</div>` : ''}<div class="insp-card-foot">${i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noreferrer">查看来源</a>` : ''}${i.featureId ? `<em>关联：${esc(featureNodes.find(n => n.id === i.featureId)?.label ?? i.featureId)}</em>` : ''}<button class="icon-btn" data-act="insp-delete" data-id="${i.id}" title="移除">${ic('trash', 11)}</button></div></div>`).join('')
-    return `<div class="product-panel-head"><div><b>产品灵感 · 调研库</b><span>搜索 GitHub / 公开网络资料，丰富产品设计与 Demo 素材</span></div><div class="product-actions"><button class="btn" data-act="insp-ai-research">${ic('spark', 12)}AI 深度调研</button></div></div>
-      <div class="insp-toolbar"><input id="wb-insp-query" class="insp-input" placeholder="关键词：如 客户管理 CRM / 低代码表单 / glassmorphism ui" value="${esc(inspQuery)}"><button class="btn-primary" data-act="insp-search-github" ${githubLoading ? 'disabled' : ''}>${ic('search', 12)}${githubLoading ? '搜索中…' : '搜 GitHub'}</button><select id="wb-insp-feature" class="notes-nb-select">${featureOpts}</select></div>
-      <div class="insp-chips">${chips}</div>
-      ${githubError !== '' ? `<div class="insp-error">${esc(githubError)}</div>` : ''}
-      ${githubHits.length > 0 ? `<div class="insp-section-title"><b>GitHub 检索结果</b><span>点「收录」存入灵感库，供 AI 生成 Demo 时引用</span><button class="btn" data-act="insp-clear-hits">清空</button></div><div class="insp-grid">${hitCards}</div>` : ''}
-      <div class="insp-section-title"><b>灵感库</b><span>${filtered.length} 条 · Demo 生成会自动带上这些参考资料</span></div>
-      <div class="insp-grid">${cards || `<div class="notes-empty small">${all.length === 0 ? '灵感库为空：先「搜 GitHub」收录，或用「AI 深度调研」让 Agent 检索网络资料后自动写回。' : '当前筛选下没有灵感。'}</div>`}</div>`
-  }
-  async function searchGithub(): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
-    const q = $id<HTMLInputElement>('wb-insp-query')?.value.trim() ?? ''
-    if (q === '') { $id<HTMLInputElement>('wb-insp-query')?.focus(); return }
-    inspQuery = q
-    githubLoading = true; githubError = ''
-    renderContent()
-    try {
-      const res = await fetch(`${API}/search/github?q=${encodeURIComponent(q)}&perPage=8`)
-      const data = await res.json() as { items?: GithubHit[]; message?: string }
-      if (!res.ok || !data.items) throw new Error(data.message ?? `HTTP ${res.status}`)
-      githubHits = data.items
-      if (githubHits.length === 0) githubError = 'GitHub 没有匹配结果，换个关键词试试'
-    } catch (cause) {
-      githubHits = []
-      githubError = `GitHub 检索失败：${String((cause as Error).message ?? cause)}（未认证限额约 10 次/分钟）`
-    }
-    githubLoading = false
-    renderContent()
-  }
-  async function collectInspiration(idx: number): Promise<void> {
-    const product = productOf(productSelected)
-    const hit = githubHits[idx]
-    if (!product || !hit) return
-    try {
-      const res = await fetch(`${API}/products/inspirations`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inspiration: { productId: product.id, kind: 'github', title: hit.title, url: hit.url, source: hit.fullName, summary: hit.summary, stars: hit.stars, tags: [hit.language, ...hit.topics].filter(Boolean).slice(0, 6), takeaways: [] } }),
-      })
-      const data = await res.json() as { inspiration?: ProductInspiration; message?: string }
-      if (!res.ok || !data.inspiration) throw new Error(data.message ?? `HTTP ${res.status}`)
-      productInspirations = [data.inspiration, ...productInspirations]
-      renderContent()
-      toast(`已收录「${hit.title}」`)
-    } catch (cause) { toast(`收录失败：${String((cause as Error).message ?? cause)}`) }
-  }
-  async function deleteInspiration(id: string): Promise<void> {
-    const ok = typeof window.confirm === 'function' ? window.confirm('从灵感库移除这条资料？') : true
-    if (!ok) return
-    try {
-      const res = await fetch(`${API}/products/inspirations/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      productInspirations = productInspirations.filter(i => i.id !== id)
-      renderContent()
-      toast('已移除')
-    } catch (cause) { toast(`移除失败：${String((cause as Error).message ?? cause)}`) }
-  }
-  function inspirationPrompt(product: Product): string {
-    const query = inspQuery.trim() || product.name
-    const nodes = productFeatureNodes(product)
-    const features = nodes.slice(0, 20).map(n => `- ${n.id} [${n.type === 'feature' ? '功能' : '需求'}] ${n.label}`).join('\n')
-    const existing = productInspirationList(product).slice(0, 10).map(i => `- ${i.title}（${i.source}）${i.url}`).join('\n')
-    const map = activeMap()
-    const mapLine = map === undefined ? '' : `本次针对导图：${map.name}（mapId: ${map.id}）\n`
-    return `产品调研任务：${product.name}
-
-${mapLine}
-
-你是资深产品调研员。请围绕下面的产品，检索 GitHub 与公开网络资料（竞品、开源实现、设计参考、行业文章），提炼对本产品真正有用的借鉴点，逐条写入灵感库。
-
-【产品】
-- 名称：${product.name}
-- 简介：${product.description || '未填写'}
-- 产品 ID：${product.id}
-- 调研关键词：${query}
-
-【功能节点（用于关联灵感）】
-${features || '- （无）'}
-
-【已有灵感（避免重复收录）】
-${existing || '- （无）'}
-
-【执行方式】
-1. 先用你的联网/网页搜索能力检索：GitHub 优质仓库、竞品官网与评测、设计系统参考、领域文章；也可用工具 workbench 检索接口。至少覆盖 3 个不同来源。
-2. 每条有价值的资料，立即调用一次 workbench_inspiration_publish：
-   { productId:"${product.id}", featureId:"最相关节点 id（可空）", kind:"github|web|article|design|tool|paper", title:"资料标题", url:"http/https 原文链接（必须真实可访问，不得编造）", source:"来源名", summary:"它是什么、解决什么问题（100-300 字）", takeaways:["对本产品的借鉴点 2-5 条，要具体"], tags:["关键词"], stars:0 }
-3. 收录 6-12 条：既有 GitHub 开源参考，也有设计/文章类资料；每条必须有「对本产品的借鉴点」，不要泛泛而谈。
-4. 不要只回复调研报告正文；唯一交付方式是调用工具。链接必须来自你实际检索到的页面，禁止编造 URL。
-5. 最后简短汇报：收录 N 条，按类型分布，最值得借鉴的 3 条。`
-  }
-  function openInspireResearch(): void {
-    const product = productOf(productSelected)
-    if (!product) return
-    openModal(`<h3>AI 深度调研</h3>
-      <div class="mfield"><label>调研关键词（留空则用产品名）</label><input id="wb-insp-research-q" value="${esc(inspQuery || product.name)}" placeholder="如：任务协作工具 竞品 / form builder 开源"></div>
-      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">将在产品关联工作区新建会话，AI 检索 GitHub 与公开网络资料，提炼借鉴点并逐条写回「灵感库」。会消耗模型额度。</div>
-      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="insp-research-run">开始调研</button></div>`)
-    window.setTimeout(() => $id<HTMLInputElement>('wb-insp-research-q')?.focus(), 0)
   }
   function productPrompt(product: Product, mode: 'notes' | 'demo' | 'modules', scope: 'all' | 'feature', opts?: { kind?: 'page' | 'system'; platform?: string }): string {
     const nodes = productNodes(product)
@@ -3437,16 +3394,12 @@ ${existing || '- （无）'}
     if (mode === 'notes') {
       return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}"${mapArg}, featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
     }
-    const inspirations = productInspirationList(product)
-    const inspContext = inspirations.length > 0
-      ? `\n\n参考资料（来自灵感库，设计时请借鉴其交互/布局/信息架构，但不要照抄品牌）：\n${inspirations.slice(0, 15).map(i => `- [${i.kind}] ${i.title}${i.source ? `（${i.source}${i.stars > 0 ? ` ★${i.stars}` : ''}）` : ''}${i.url ? ` ${i.url}` : ''}\n  摘要：${i.summary.slice(0, 200)}${i.takeaways.length > 0 ? `\n  借鉴点：${i.takeaways.join('；').slice(0, 300)}` : ''}`).join('\n')}`
-      : ''
     const platformLabelMap: Record<string, string> = { pc: 'PC（宽屏 1280+，侧栏导航、多栏信息密度）', mobile: '移动端（375-430px，单列、底部导航、大触控目标）', tablet: '平板（768-1024px，双栏自适应、大间距）', all: '自适应（移动优先，PC 增强）' }
     return `产品 Demo 生成任务：${product.name}
 
 你是资深前端原型工程师 + 产品设计师。请依据产品设计笔记与灵感资料，生成高保真、可交互的 Demo。
 
-${common}${inspContext}
+${common}
 
 【Demo 规格】
 - 形态：${kind === 'system' ? '产品系统（多页）：单文件 HTML 内用左侧/顶部导航切换页面，每页是完整界面（含列表/表单/详情等真实布局），页面间可跳转' : '单页面：一个完整界面或长页分区锚点'}
@@ -3888,10 +3841,6 @@ ${common}${inspContext}
     return productNoteList(product).find(note => note.tags.includes(feature.id) || note.title.includes(feature.label)) ?? productNoteList(product).find(note => note.title.startsWith(feature.label))
   }
   function productDemoHtml(product: Product, features: ProductNode[], style: string, scope: 'all' | 'feature', kind: 'page' | 'system' = 'page', platform: string = 'all'): string {
-    const inspirations = productInspirationList(product).slice(0, 8)
-    const inspSection = inspirations.length > 0
-      ? `<section class="feature" id="f-insp"><span class="tag">参考灵感</span><h2>设计参考</h2><div class="insp-row">${inspirations.map(i => `<div class="insp-mini"><b>${esc(i.title)}</b><small>${esc(i.source || i.kind)}${i.stars > 0 ? ` · ★${i.stars}` : ''}</small><p>${esc(i.summary.slice(0, 120))}</p>${i.takeaways[0] ? `<em>借鉴：${esc(i.takeaways[0].slice(0, 80))}</em>` : ''}</div>`).join('')}</div></section>`
-      : ''
     const sections = features.map(feature => {
       const note = productNoteForFeature(product, feature)
       const body = note ? markdownToHtml(note.content) : `<div class="empty">还没有设计笔记；先点「设计笔记 → AI 生成设计笔记」。</div>`
@@ -3900,16 +3849,16 @@ ${common}${inspContext}
     const pageNav = features.map((feature, i) => `<a href="${kind === 'system' ? `#p-${feature.id}` : `#f-${feature.id}`}" ${kind === 'system' ? `data-page="${feature.id}" class="page-link${i === 0 ? ' active' : ''}"` : ''}>${esc(feature.label)}</a>`).join('')
     const modeBadge = kind === 'system' ? '产品系统' : '单页原型'
     const shell = kind === 'system'
-      ? `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}${inspirations.length > 0 ? '<a href="#f-insp">设计参考</a>' : ''}</nav><main class="main"><div class="hero"><span class="kicker">Product System</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记与灵感资料生成的可交互产品系统 Demo。')}</p></div><div class="pages">${features.map((feature, i) => {
+      ? `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}</nav><main class="main"><div class="hero"><span class="kicker">Product System</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记与灵感资料生成的可交互产品系统 Demo。')}</p></div><div class="pages">${features.map((feature, i) => {
         const note = productNoteForFeature(product, feature)
         const body = note ? markdownToHtml(note.content) : `<div class="empty">还没有设计笔记；先点「设计笔记 → AI 生成设计笔记」。</div>`
         return `<section class="feature page${i === 0 ? ' active' : ''}" id="p-${feature.id}" data-page-panel="${feature.id}"><span class="tag">${feature.type === 'requirement' ? '需求' : '功能'}</span><h2>${esc(feature.label)}</h2><div class="doc">${body}</div></section>`
-      }).join('')}</div>${inspSection}</main></div>`
-      : `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}${inspirations.length > 0 ? '<a href="#f-insp">设计参考</a>' : ''}</nav><main class="main"><div class="hero"><span class="kicker">Product Prototype</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记生成的可交互原型。')}</p></div>${sections}${inspSection}</main></div>`
+      }).join('')}</div></main></div>`
+      : `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}</nav><main class="main"><div class="hero"><span class="kicker">Product Prototype</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记生成的可交互原型。')}</p></div>${sections}</main></div>`
     const systemJs = kind === 'system'
       ? `<script>document.querySelectorAll('.page-link').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();var id=a.getAttribute('data-page');document.querySelectorAll('.page-link').forEach(function(x){x.classList.remove('active')});a.classList.add('active');document.querySelectorAll('[data-page-panel]').forEach(function(p){p.classList.toggle('active',p.getAttribute('data-page-panel')===id)});window.scrollTo({top:0,behavior:'smooth'})})})</script>`
       : ''
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(product.name)} · 产品 Demo</title><style>${productDemoCss(style)}${kind === 'system' ? '.pages .page{display:none}.pages .page.active{display:block}' : ''}.insp-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}.insp-mini{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--surface)}.insp-mini b{display:block;font-size:12.5px;margin-bottom:3px}.insp-mini small{color:var(--muted);font-size:10px}.insp-mini p{margin:6px 0 0;font-size:11.5px;color:var(--muted);line-height:1.5}.insp-mini em{display:block;margin-top:5px;font-size:10.5px;color:var(--accent);font-style:normal}</style></head><body><div class="shell"><header class="top"><span class="brand">${esc(product.name)}</span><span class="badge">${modeBadge} · ${esc(themeOf(style).name)}</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${platformLabel(platform)} · ${scope === 'all' ? '整个产品' : '单功能预览'}</span></header>${shell}<footer class="foot"><span>由工作台产品设计生成 · ${new Date().toLocaleString()}</span><span>${esc(style)} / ${esc(platform)}</span></footer></div>${systemJs}</body></html>`
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(product.name)} · 产品 Demo</title><style>${productDemoCss(style)}${kind === 'system' ? '.pages .page{display:none}.pages .page.active{display:block}' : ''}</style></head><body><div class="shell"><header class="top"><span class="brand">${esc(product.name)}</span><span class="badge">${modeBadge} · ${esc(themeOf(style).name)}</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${platformLabel(platform)} · ${scope === 'all' ? '整个产品' : '单功能预览'}</span></header>${shell}<footer class="foot"><span>由工作台产品设计生成 · ${new Date().toLocaleString()}</span><span>${esc(style)} / ${esc(platform)}</span></footer></div>${systemJs}</body></html>`
   }
   async function generateProductDemo(scope: 'all' | 'feature'): Promise<void> {
     const product = productOf(productSelected)
@@ -4352,8 +4301,6 @@ ${mapLine}
     $id<HTMLSelectElement>('wb-product-style')?.addEventListener('change', e => { productStyle = (e.currentTarget as HTMLSelectElement).value; renderContent() })
     $id<HTMLSelectElement>('wb-product-platform')?.addEventListener('change', e => { productPlatform = (e.currentTarget as HTMLSelectElement).value as typeof productPlatform; renderContent() })
     $id<HTMLSelectElement>('wb-product-kind')?.addEventListener('change', e => { productDemoKind = (e.currentTarget as HTMLSelectElement).value as typeof productDemoKind; renderContent() })
-    $id<HTMLSelectElement>('wb-insp-feature')?.addEventListener('change', e => { inspFeatureFilter = (e.currentTarget as HTMLSelectElement).value; renderContent() })
-    $id<HTMLInputElement>('wb-insp-query')?.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); void searchGithub() } })
   }
 
   /* ---------- 测试 ---------- */
@@ -4921,7 +4868,7 @@ ${lines}`
 
   /* ---------- 底部 dock ---------- */
   function renderDock(): void {
-    const items: Array<[string, string, string]> = [['portal', 'home', '门户'], ['list', 'list', '行动清单'], ['calendar', 'calendar', '日历'], ['board', 'board', '看板'], ['stats', 'chart', '统计'], ['focus', 'target', '专注'], ['news', 'news', '新闻'], ['notes', 'notebook', '记事本'], ['bugs', 'bug', 'Bug 管理'], ['product', 'product', '产品设计'], ['test', 'test', '测试'], ['settings', 'settings', '设置']]
+    const items: Array<[string, string, string]> = [['portal', 'home', '门户'], ['list', 'list', '行动清单'], ['calendar', 'calendar', '日历'], ['board', 'board', '看板'], ['stats', 'chart', '统计'], ['focus', 'target', '专注'], ['news', 'news', '新闻'], ['notes', 'notebook', '记事本'], ['bugs', 'bug', 'Bug 管理'], ['product', 'product', '产品设计'], ['test', 'test', '测试'], ['idea', 'spark', '灵感'], ['settings', 'settings', '设置']]
     const dock = $id('wb-dock')
     if (!dock) return
     dock.innerHTML = items.map(([view, icon, label]) => `<button ${view === 'settings' ? 'data-act="settings"' : `data-view="${view}"`} class="${ui.view === view ? 'active' : ''}" title="${label}" aria-label="${label}">${ic(icon, 17)}</button>`).join('')
@@ -5073,7 +5020,7 @@ ${lines}`
       <div class="switch-row"><span>空间</span><button class="btn" style="height:26px;padding:0 9px" data-act="manage-spaces">管理（${db.spaces.length}）</button></div>
       <div class="switch-row"><span>数据存储</span><span class="muted" style="font-size:11px" id="wb-health">读取中…</span></div>
       <div class="switch-row"><span>条目</span><span class="muted" style="font-size:11px">${db.tasks.length} 项任务 · ${db.focus.length} 次专注</span></div>
-      <div class="switch-row"><span>版本</span><span class="muted" style="font-size:11px">dsh-workbench 1.4.0</span></div>
+      <div class="switch-row"><span>版本</span><span class="muted" style="font-size:11px">dsh-workbench 1.5.0</span></div>
       <div class="switch-row"><span>最近 AI 提交</span><span class="muted" style="font-size:11px;max-width:320px;text-align:right;word-break:break-all">${esc(String(db.settings.lastAiError ?? '无'))}</span></div>
       <div class="mfield"><label>笔记保存目录</label>
         <input id="wb-export-dir" value="" placeholder="读取中…">
@@ -5653,22 +5600,6 @@ ${lines}`
         renderContent()
         return
       }
-      if (act === 'insp-search-github') { void searchGithub(); return }
-      if (act === 'insp-collect') { void collectInspiration(Number(actEl.getAttribute('data-idx') ?? -1)); return }
-      if (act === 'insp-delete') { void deleteInspiration(actEl.getAttribute('data-id') ?? ''); return }
-      if (act === 'insp-filter') { inspFilter = (actEl.getAttribute('data-k') as typeof inspFilter) ?? 'all'; renderContent(); return }
-      if (act === 'insp-clear-hits') { githubHits = []; renderContent(); return }
-      if (act === 'insp-ai-research') { openInspireResearch(); return }
-      if (act === 'insp-research-run') {
-        const product = productOf(productSelected)
-        const q = $id<HTMLInputElement>('wb-insp-research-q')?.value.trim() ?? ''
-        if (!product) return
-        inspQuery = q
-        closeModal()
-        const prompt = inspirationPrompt(product)
-        void queueProductPrompt(prompt).then(() => toast('已新建调研会话，AI 检索后会写回灵感库')).catch((cause: unknown) => { toast(`提交失败：${String((cause as Error).message ?? cause)}`) })
-        return
-      }
       if (act === 'bug-project') { bugProjectFilter = actEl.getAttribute('data-id') ?? 'all'; bugSelected.clear(); renderContent(); return }
       if (act === 'bug-project-new') { openBugProject(); return }
       if (act === 'bug-project-manage') { openBugProjectManager(); return }
@@ -5921,6 +5852,7 @@ ${lines}`
       const data = await res.json() as { revision: number } & DB
       applyRemote(data)
       ui.compact = db.settings.compact === true
+      initSideWidth()
       if (ui.selected === null) ui.selected = chooseSelection()
       dirty = false
       setSaveState('saved')
@@ -5942,6 +5874,7 @@ ${lines}`
       const data = await res.json() as { revision: number } & DB
       applyRemote(data)
       ui.compact = db.settings.compact === true
+      initSideWidth()
       if (ui.selected === null) ui.selected = chooseSelection()
       if (timer.taskId === null) timer.taskId = chooseSelection()
       loaded = true
@@ -5967,6 +5900,54 @@ ${lines}`
   shadow.addEventListener('contextmenu', contextListener)
   shadow.addEventListener('scroll', closeContextMenu, true)
   window.addEventListener('visibilitychange', onVisibility)
+
+  /*
+   * 侧栏宽度拖拽：在把手上按下后把 pointermove/pointerup 挂到 window，
+   * 松手才写回 settings（拖动过程只改 CSS 变量，不触发保存）。
+   */
+  const onSideResizeDown = (event: Event): void => {
+    const target = event.target as HTMLElement | null
+    const handle = target === null ? null : (target.closest('[data-resize="side"]') as HTMLElement | null)
+    if (handle === null) return
+    const pointer = event as PointerEvent
+    if (typeof pointer.button === 'number' && pointer.button !== 0) return
+    pointer.preventDefault()
+    const app = $id('wb-app')
+    if (app === null) return
+    /* 捕获指针：拖出窗口也能收到 pointerup，不会卡在拖拽态。 */
+    try { handle.setPointerCapture(pointer.pointerId) } catch { /* 不支持捕获时退回 window 监听 */ }
+    const startX = pointer.clientX
+    const startWidth = sideWidth
+    let done = false
+    app.classList.add('resizing')
+    const move = (next: Event): void => {
+      const p = next as PointerEvent
+      applySideWidth(startWidth + (p.clientX - startX), false)
+    }
+    const finish = (): void => {
+      if (done) return
+      done = true
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', finish)
+      app.classList.remove('resizing')
+      applySideWidth(sideWidth, true)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+    window.addEventListener('blur', finish)
+  }
+  /** 双击把手回到默认宽度。 */
+  const onSideResizeReset = (event: Event): void => {
+    const target = event.target as HTMLElement | null
+    if (target === null || target.closest('[data-resize="side"]') === null) return
+    const fallback = window.matchMedia('(max-width:1250px)').matches ? SIDE_DEFAULT_NARROW : SIDE_DEFAULT
+    applySideWidth(fallback, true)
+  }
+  shadow.addEventListener('pointerdown', onSideResizeDown)
+  shadow.addEventListener('dblclick', onSideResizeReset)
   const themeObserver = typeof MutationObserver !== 'undefined'
     ? new MutationObserver(() => { if ((db.settings.theme ?? 'auto') === 'auto') applyTheme() })
     : null
@@ -6039,6 +6020,8 @@ ${lines}`
 
   return {
     destroy(): void {
+      try { ideaView?.destroy() } catch (cause) { console.warn('[dsh-workbench] 灵感视图卸载失败', cause) }
+      ideaView = null
       if (saveTimer !== 0) window.clearTimeout(saveTimer)
       if (noteSaveTimer !== 0) window.clearTimeout(noteSaveTimer)
       if (toastTimer !== 0) window.clearTimeout(toastTimer)
@@ -6054,6 +6037,8 @@ ${lines}`
       shadow.removeEventListener('keydown', keyListener)
       shadow.removeEventListener('contextmenu', contextListener)
       shadow.removeEventListener('scroll', closeContextMenu, true)
+      shadow.removeEventListener('pointerdown', onSideResizeDown)
+      shadow.removeEventListener('dblclick', onSideResizeReset)
       window.removeEventListener('visibilitychange', onVisibility)
       themeObserver?.disconnect()
       shadow.innerHTML = ''
@@ -6065,10 +6050,11 @@ ${lines}`
 const SHELL = `
 <div class="app" id="wb-app">
   <aside class="sidebar" id="wb-sidebar"></aside>
+  <div class="side-resizer" id="wb-side-resizer" data-resize="side" role="separator" aria-orientation="vertical" title="拖动调整侧栏宽度 · 双击复位"></div>
   <div class="main">
     <header class="topbar" id="wb-topbar"></header>
     <div class="workspace">
-      <section class="content" id="wb-content"></section>
+      <section class="content" id="wb-content"><div id="wb-generic"></div><div id="wb-idea-root" style="display:none"></div></section>
       <aside class="detail" id="wb-detail"></aside>
     </div>
   </div>

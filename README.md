@@ -2,7 +2,7 @@
 
 把「时序」式个人工作台搬进 **DeepSeek Harness**：任务、计划、专注、复盘、记事本（AI 完善）、Bug、产品设计（导图 / 模块 / 业务 / 端 / Demo）、测试（AI 用例 / 实时 3D 执行 / Bug 回归 / 报告 / Docker）、定时新闻在同一块面板完成，数据落在本机 **SQLite**，主题跟随 DSH，兼容 **dsh-startup-moss** 与 **dsh-opencode-palette** 的换肤。
 
-> 版本：**1.4.0** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
+> 版本：**1.6.0** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
 
 | 看板（MOSS 550W 主题） | 日历 |
 | --- | --- |
@@ -143,6 +143,19 @@
 - **自动回写**：Agent 调用 `workbench_bug_update` 工具更新状态与验证记录；看板每 6 秒轮询刷新，卡片 / 详情显示验证结果。
 - **安全**：提交前二次确认，提示会启动 Agent 并可能修改工作区文件。
 
+### 灵感（1.6）
+
+独立的「灵感」模块（研发分组），把一句想法炸成一张可继续生长的图：
+
+- **三种输入**：文字（标题 / 正文 / 补充）、截图（粘贴 / 拖入 / 选择，客户端先压到 1600px webp，落盘到 `<工作区>/.dsh-workbench/ideas/<id>/inputs/`）、URL（生成时由 Agent 抓摘要，失败不阻塞）。
+- **AI 六方向发散**：用户与场景 / 痛点与机会 / 方案形态 / 技术与可行 / 商业与传播 / 风险与反例，可选「跨界类比」；每方向 3–5 条，每条含「为什么成立」，并自动生成 2–3 条跨支关联。
+- **双引擎图视图**：思维导图用 **mind-elixir 5.15.1**（双击改名、Tab/Enter 加节点、拖拽换父级、撤销重做、折叠），力导图用 **ECharts 6.1.0 graph force**（分类配色、虚线关联、拖拽、缩放、悬停邻接高亮）；两个库都是 vendor 资产，进入视图才加载，主包不变。
+- **继续发散**：点任意方向/节点「沿这个方向再发散」，只追加这一支 2–4 条，其他节点坐标与文案不动，自动产生新版本。
+- **版本**：AI 每次生成 = 一个不可变版本；手动编辑进草稿（防抖保存），「存档版本」才落版本；支持并排对比（新增 / 删除 / 改文案）、回滚与删除（至少保留一个）。
+- **导出**：PNG / SVG / JSON / Markdown 大纲，可下载或直接存到项目工作区 `exports/`。
+- **Agent 工具**：`workbench_idea_expand`（可分批写入，`final:true` 冻结版本）与 `workbench_idea_progress`（里程碑上报）；提示词契约与 6 方向维度由宿主生成，客户端只负责派发。
+- **旧「灵感调研库」已移除**：产品页不再有「灵感」页签与 `workbench_inspiration_publish` 工具，历史数据自动归档为 `product_inspirations_legacy`。
+
 ### 产品设计
 
 - **一个产品多张导图**：产品只是项目壳（名称 / 工作区 / 笔记本）；导图独立成「图」，可建多张（如「收银主链路」「移动端」「V2 改版」），每张独立存库并镜像到 `.dsh-workbench/products/<产品 id>/maps/<mapId>.json`。
@@ -155,7 +168,6 @@
 - **AI 设计笔记**：把导图、功能勾选、工作区与结构化 PRD 提示词提交到工作区新会话；Agent 调用 `workbench_product_note_publish` 按功能/需求逐条写入现有笔记接口与产品笔记本；笔记默认镜像到工作区 `.md`。
 - **产品 Demo**：双通道生成——「快速渲染」由本地渲染器从设计笔记 + 灵感即时出稿（稳定、零额外额度）；「AI 深度生成」在工作区会话产出高保真可交互原型（≥3 类交互）。支持单页面 / 产品系统（多页）形态，目标端可选自适应 / PC / 移动 / 平板。
 - **Demo 进度监控**：本地与 AI 生成共用 `product_demo_progress` 进度卡（步骤条 + 最近日志）；生成中 4 秒快轮询实时刷新。
-- **灵感调研库**：关键词搜 GitHub 公开仓库（宿主代理 `/search/github`）一键收录；或「AI 深度调研」检索 GitHub + 公开网络资料、提炼借鉴点经 `workbench_inspiration_publish` 写回；卡片展示类型/来源/star/摘要/借鉴点/标签/关联节点，Demo 生成自动引用。
 - **12 套分端 UI 主题**：通用（极简白 / 玻璃拟态★ / 新拟态）、PC（编辑杂志 / 暗色仪表盘★ / Bento 网格★ / 科技终端）、移动（流光渐变★ / 温暖奶油★ / 黏土拟态 / 新粗野）、平板（平板双栏）；每套绑定设计令牌（进 AI 提示词）+ 本地 CSS，两条生成路径视觉一致；预览支持 PC / 平板 834px / 移动 390px 视口切换。
 - **预览**：工作台内 iframe 预览，`/workbench-api/products/demo?id=...` 读取工作区 HTML；Demo 列表可切换风格/范围。
 - **笔记本工作区**：任意笔记本可设置工作区路径；关联后笔记保存时同步写 `<工作区>/.dsh-workbench/notes/<笔记本>/*.md`，删除笔记同步删除文件。
@@ -574,6 +586,15 @@ node scripts/verify-bundle.mjs   # 16 项产物检查
 
 ## 十二、变更记录
 
+- **1.6.0（2026-10-23）**
+  - 新增「灵感」模块：多模态输入（文字 / 截图 / URL）、AI 六方向发散、思维导图（mind-elixir）与力导图（ECharts force）双视图、节点级继续发散、版本对比/回滚、PNG/SVG/JSON/Markdown 导出。
+  - 新增 5 张表（idea_projects / ideas / idea_inputs / idea_versions / idea_runs）、24 条 `/ideas` 接口与 2 个 Agent 工具（`workbench_idea_expand` / `workbench_idea_progress`）；灵感数据独立端点，不进整份任务快照。
+  - vendor 引入 mind-elixir 5.15.1（MIT）与 ECharts 6.1.0（Apache-2.0），经 `/workbench-api/assets/vendor/*` 白名单路由懒加载；见 `THIRD_PARTY_NOTICES.md`。
+  - **移除旧「灵感调研库」**：产品页灵感页签、`/products/inspirations` 路由、`workbench_inspiration_publish` 工具与相关提示词全部删除；历史表自动改名归档为 `product_inspirations_legacy`。
+  - 自检：新增 `scripts/verify-idea.mjs`（36 项纯函数断言），`verify-bundle` 扩到 60 项。
+- **1.5.0（2026-10-23）**
+  - 侧栏宽度可拖动：右缘新增拖拽把手，拖动实时改宽度、松手写回 `settings.sideWidth`（随任务快照一并持久化），双击复位；范围 156–420，收起态自动隐藏把手，dock 位置跟随宽度。
+  - 门户功能区按业务分组：「工作」（任务清单 / 看板 / 日历 / 统计 / 专注 / 记事本 / 新闻）与「研发」（产品设计 / Bug 管理 / 测试）两组，每组整行铺满、组内卡片 `auto-fill` 自适应宽度；分组配置集中在 `PORTAL_GROUPS` 一处。
 - **1.4.0（2026-10-21）**
   - 产品重构为「项目壳 + 多导图」：新增 `product_maps` 表；每张导图独立 JSON 与工作区文件；删除时至少保留一张。
   - 模块 / Demo / 灵感 / 产品笔记增加 `map_id`（`notes` 同步加列），写库与 AI 工具（`workbench_module_publish` / `workbench_product_demo_publish` / `workbench_inspiration_publish` / `workbench_product_note_publish`）都接受 `mapId`；同名模块可分属不同导图。

@@ -74,6 +74,18 @@ check('Bug/测试平台字段', host.includes('module_id') && host.includes("pla
 check('AI 协同新/旧会话', client.includes('appendToExistingSession') && client.includes('ai-dispatch') && client.includes('retainAgentScope'))
 check('测试执行实时动画', client.includes('test-live-bars') && client.includes('test-live-scan') && client.includes('prefers-reduced-motion'))
 check('UI 命令面板/模块覆盖', client.includes('cmd-palette') && client.includes('cmd-go') && client.includes('module-coverage') && client.includes('head-pills'))
+check('侧栏宽度可拖动', client.includes('side-resizer') && client.includes('--wb-side-w') && client.includes('settings.sideWidth') && client.includes('data-resize'))
+check('门户功能区按业务分组', client.includes('PORTAL_GROUPS') && client.includes('portal-group') && /id:\s*["']work["']/.test(client) && /id:\s*["']rd["']/.test(client) && client.includes('工作') && client.includes('研发'))
+check('宿主含灵感五张表', ['idea_projects','ideas','idea_inputs','idea_versions','idea_runs'].every(t => host.includes(t)))
+check('宿主暴露灵感接口与工具', host.includes('/ideas') && host.includes('workbench_idea_expand') && host.includes('workbench_idea_progress'))
+check('宿主提供 vendor 资产路由', host.includes('/assets/vendor/') && host.includes('echarts.min.js') && host.includes('MindElixir.iife.js'))
+check('宿主归档旧灵感库', host.includes('product_inspirations_legacy'))
+check('客户端含灵感视图骨架', client.includes('idea-root') && client.includes('idea-plot') && client.includes('idea-view'))
+check('客户端集成导图与力导引擎', client.includes('MindElixir.iife.js') && client.includes('echarts.min.js') && client.includes('buildForceOption'))
+check('灵感含项目与方向切换', client.includes('idea-project-box') && client.includes('idea-direction') && client.includes('idea-project-save'))
+check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
+check('灵感含 5 分钟超时与防重复生成', client.includes('生成超过 5 分钟') && /status\s*!==\s*["']running["']/.test(client))
+check('旧灵感已移除', !client.includes('productInspiration') && !host.includes('workbench_inspiration_publish') && !client.includes('/products/inspirations'))
 check('无 TODO 占位符', !/TODO|PLACEHOLDER|FIXME/.test(client + host))
 
 let failed = 0

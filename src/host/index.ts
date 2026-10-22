@@ -17,6 +17,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
+import { createIdeaModule, buildIdeaPrompt } from './idea.js'
 
 const require = createRequire(import.meta.url)
 
@@ -297,20 +298,6 @@ CREATE TABLE IF NOT EXISTS product_demos (
   kind TEXT NOT NULL DEFAULT 'page',
   status TEXT NOT NULL DEFAULT 'ready'
 );
-CREATE TABLE IF NOT EXISTS product_inspirations (
-  id TEXT PRIMARY KEY,
-  product_id TEXT NOT NULL,
-  feature_id TEXT NOT NULL DEFAULT '',
-  kind TEXT NOT NULL DEFAULT 'web',
-  title TEXT NOT NULL,
-  url TEXT NOT NULL DEFAULT '',
-  source TEXT NOT NULL DEFAULT '',
-  summary TEXT NOT NULL DEFAULT '',
-  takeaways TEXT NOT NULL DEFAULT '[]',
-  tags TEXT NOT NULL DEFAULT '[]',
-  stars INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS product_demo_progress (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL,
@@ -367,6 +354,9 @@ class SqliteStore {
   private db: any
   private revision = 0
 
+  /** 灵感模块复用同一连接：同一 SQLite 文件只留一个写者，避免锁竞争。 */
+  connection(): any { return this.db }
+
   constructor(file: string) {
     this.file = file
     mkdirSync(dirname(file), { recursive: true })
@@ -400,7 +390,7 @@ class SqliteStore {
   /**
    * 旧库升级：一个产品可拥有多张导图。
    * - 新建 product_maps 表；每个产品的旧 products.mindmap 迁成一张「主导图」。
-   * - modules / product_demos / product_inspirations 增加 map_id，并回填到产品的第一张导图。
+   * - modules / product_demos 增加 map_id，并回填到产品的第一张导图。
    * products.mindmap 保留为第一张导图的镜像（旧版本仍能读到导图）。
    */
   private migrateProductMaps(): void {
@@ -410,7 +400,7 @@ class SqliteStore {
       sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )`)
     const columns = (table: string): string[] => (this.db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => String(c.name))
-    for (const table of ['modules', 'product_demos', 'product_inspirations']) {
+    for (const table of ['modules', 'product_demos']) {
       if (!columns(table).includes('map_id')) this.db.exec(`ALTER TABLE ${table} ADD COLUMN map_id TEXT NOT NULL DEFAULT ''`)
     }
     const now = isoDateTimeSeconds()
@@ -423,7 +413,7 @@ class SqliteStore {
         this.db.prepare('INSERT INTO product_maps(id, product_id, name, description, mindmap, sort_order, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)')
           .run(mapId, product.id, '主导图', '', String(product.mindmap ?? '{"nodes":[]}'), 0, product.created_at ?? now, now)
       }
-      for (const table of ['modules', 'product_demos', 'product_inspirations']) {
+      for (const table of ['modules', 'product_demos']) {
         this.db.prepare(`UPDATE ${table} SET map_id = ? WHERE product_id = ? AND map_id = ''`).run(mapId, product.id)
       }
       if (existing === undefined) {
@@ -768,20 +758,6 @@ CREATE TABLE IF NOT EXISTS product_demos (
   kind TEXT NOT NULL DEFAULT 'page',
   status TEXT NOT NULL DEFAULT 'ready'
 );
-CREATE TABLE IF NOT EXISTS product_inspirations (
-  id TEXT PRIMARY KEY,
-  product_id TEXT NOT NULL,
-  feature_id TEXT NOT NULL DEFAULT '',
-  kind TEXT NOT NULL DEFAULT 'web',
-  title TEXT NOT NULL,
-  url TEXT NOT NULL DEFAULT '',
-  source TEXT NOT NULL DEFAULT '',
-  summary TEXT NOT NULL DEFAULT '',
-  takeaways TEXT NOT NULL DEFAULT '[]',
-  tags TEXT NOT NULL DEFAULT '[]',
-  stars INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS product_demo_progress (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL,
@@ -934,12 +910,6 @@ CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY, product_id TEXT NOT NULL, style TEXT NOT NULL, scope TEXT NOT NULL,
       feature_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, file_path TEXT NOT NULL, created_at TEXT NOT NULL,
       platform TEXT NOT NULL DEFAULT 'all', kind TEXT NOT NULL DEFAULT 'page', status TEXT NOT NULL DEFAULT 'ready'
-    )`)
-    this.db.exec(`CREATE TABLE IF NOT EXISTS product_inspirations (
-      id TEXT PRIMARY KEY, product_id TEXT NOT NULL, feature_id TEXT NOT NULL DEFAULT '',
-      kind TEXT NOT NULL DEFAULT 'web', title TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
-      source TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', takeaways TEXT NOT NULL DEFAULT '[]',
-      tags TEXT NOT NULL DEFAULT '[]', stars INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
     )`)
     this.db.exec(`CREATE TABLE IF NOT EXISTS product_demo_progress (
       id TEXT PRIMARY KEY, product_id TEXT NOT NULL, demo_id TEXT NOT NULL DEFAULT '',
@@ -1207,7 +1177,6 @@ CREATE TABLE IF NOT EXISTS products (
       try { rmSync(join(str(product.workspace_path), '.dsh-workbench', 'products', id), { recursive: true, force: true }) } catch { /* ignore */ }
     }
     this.db.prepare('DELETE FROM product_demos WHERE product_id = ?').run(id)
-    this.db.prepare('DELETE FROM product_inspirations WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM product_demo_progress WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM product_maps WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM products WHERE id = ?').run(id)
@@ -1252,39 +1221,7 @@ CREATE TABLE IF NOT EXISTS products (
     return toProductDemo(this.db.prepare('SELECT * FROM product_demos WHERE id = ?').get(id))
   }
 
-  /* ---------- 产品灵感 / Demo 进度 ---------- */
-  listProductInspirations(productId?: string, mapId?: string): any[] {
-    const map = str(mapId)
-    const rows = productId
-      ? (map === '' || map === 'all'
-        ? this.db.prepare('SELECT * FROM product_inspirations WHERE product_id = ? ORDER BY created_at DESC').all(productId)
-        : this.db.prepare('SELECT * FROM product_inspirations WHERE product_id = ? AND map_id = ? ORDER BY created_at DESC').all(productId, map))
-      : this.db.prepare('SELECT * FROM product_inspirations ORDER BY created_at DESC').all()
-    return rows.map(toInspiration)
-  }
-
-  saveProductInspiration(input: any): any {
-    const product = this.db.prepare('SELECT id FROM products WHERE id = ?').get(str(input?.productId)) as any
-    if (!product) throw new Error('产品不存在')
-    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
-    const title = str(input?.title).trim().slice(0, 200)
-    if (title === '') throw new Error('灵感标题不能为空')
-    const url = normalizeHttpUrl(input?.url)
-    const kind = ['github', 'web', 'article', 'design', 'tool', 'paper'].includes(str(input?.kind)) ? str(input?.kind) : 'web'
-    const id = `insp-${randomUUID().slice(0, 12)}`
-    const now = isoDateTimeSeconds()
-    const takeaways = JSON.stringify(list(input?.takeaways).map(x => str(x).slice(0, 300)).slice(0, 12))
-    const tags = JSON.stringify(list(input?.tags).map(x => str(x).slice(0, 40)).slice(0, 10))
-    this.db.prepare('INSERT INTO product_inspirations(id, product_id, feature_id, kind, title, url, source, summary, takeaways, tags, stars, created_at, map_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, str(input?.productId), str(input?.featureId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60), kind, title, url,
-        str(input?.source).slice(0, 120), str(input?.summary).slice(0, 2000), takeaways, tags,
-        Math.max(0, Math.round(Number(input?.stars ?? 0)) || 0), now, mapId)
-    return toInspiration(this.db.prepare('SELECT * FROM product_inspirations WHERE id = ?').get(id))
-  }
-
-  deleteProductInspiration(id: string): void {
-    this.db.prepare('DELETE FROM product_inspirations WHERE id = ?').run(id)
-  }
+  /* ---------- Demo 进度 ---------- */
 
   getDemoProgress(productId: string): any {
     const row = this.db.prepare('SELECT * FROM product_demo_progress WHERE product_id = ?').get(str(productId)) as any
@@ -1623,7 +1560,6 @@ class JsonStore {
   private bugs: any[] = []
   private products: any[] = []
   private productDemos: any[] = []
-  private productInspirations: any[] = []
   private productMaps: any[] = []
   private demoProgress: any[] = []
   private modules: any[] = []
@@ -1649,7 +1585,6 @@ class JsonStore {
         this.bugs = list(parsed.bugs)
         this.products = list(parsed.products)
         this.productDemos = list(parsed.productDemos)
-        this.productInspirations = list(parsed.productInspirations)
         this.productMaps = list(parsed.productMaps)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
@@ -1699,7 +1634,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -1769,7 +1704,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productInspirations: this.productInspirations, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
@@ -1900,7 +1835,7 @@ class JsonStore {
         first = { id: `map-${randomUUID().slice(0, 12)}`, productId: product.id, name: '主导图', description: '', mindmap: String(product.mindmap ?? '{"nodes":[]}'), sortOrder: 0, createdAt: product.createdAt ?? now, updatedAt: now }
         this.productMaps.push(first)
       }
-      for (const item of [...this.modules, ...this.productDemos, ...this.productInspirations]) {
+      for (const item of [...this.modules, ...this.productDemos]) {
         if (item.productId === product.id && !item.mapId) item.mapId = first.id
       }
     }
@@ -1966,7 +1901,6 @@ class JsonStore {
       try { rmSync(join(product.workspacePath, '.dsh-workbench', 'products', id), { recursive: true, force: true }) } catch { /* ignore */ }
     }
     this.productDemos = this.productDemos.filter(d => d.productId !== id)
-    this.productInspirations = this.productInspirations.filter(i => i.productId !== id)
     this.productMaps = this.productMaps.filter(m => m.productId !== id)
     this.demoProgress = this.demoProgress.filter(p => p.productId !== id)
     this.products = this.products.filter(p => p.id !== id)
@@ -2006,42 +1940,6 @@ class JsonStore {
   }
 
   /* ---------- 产品灵感 / Demo 进度 ---------- */
-  listProductInspirations(productId?: string, mapId?: string): any[] {
-    if (productId && mapId && mapId !== 'all') return this.productInspirations.filter(i => i.productId === productId && i.mapId === mapId)
-    return this.productInspirations.filter(i => productId === undefined || i.productId === productId)
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-  }
-
-  saveProductInspiration(input: any): any {
-    const product = this.products.find(p => p.id === str(input?.productId))
-    if (!product) throw new Error('产品不存在')
-    const mapId = str(input?.mapId) || this.defaultMapId(product.id)
-    const title = str(input?.title).trim().slice(0, 200)
-    if (title === '') throw new Error('灵感标题不能为空')
-    const url = normalizeHttpUrl(input?.url)
-    const kind = ['github', 'web', 'article', 'design', 'tool', 'paper'].includes(str(input?.kind)) ? str(input?.kind) : 'web'
-    const insp = {
-      id: `insp-${randomUUID().slice(0, 12)}`,
-      productId: product.id,
-      mapId,
-      featureId: str(input?.featureId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60),
-      kind, title, url,
-      source: str(input?.source).slice(0, 120),
-      summary: str(input?.summary).slice(0, 2000),
-      takeaways: list(input?.takeaways).map(x => str(x).slice(0, 300)).slice(0, 12),
-      tags: list(input?.tags).map(x => str(x).slice(0, 40)).slice(0, 10),
-      stars: Math.max(0, Math.round(Number(input?.stars ?? 0)) || 0),
-      createdAt: isoDateTimeSeconds(),
-    }
-    this.productInspirations.push(insp)
-    this.persistNews()
-    return insp
-  }
-
-  deleteProductInspiration(id: string): void {
-    this.productInspirations = this.productInspirations.filter(i => i.id !== id)
-    this.persistNews()
-  }
 
   getDemoProgress(productId: string): any {
     return this.demoProgress.find(p => p.productId === str(productId))
@@ -2814,23 +2712,6 @@ function toProductDemo(row: any): any {
   }
 }
 
-function toInspiration(row: any): any {
-  return {
-    id: row.id,
-    productId: row.product_id,
-    mapId: row.map_id ?? '',
-    featureId: row.feature_id ?? '',
-    kind: row.kind ?? 'web',
-    title: row.title,
-    url: row.url ?? '',
-    source: row.source ?? '',
-    summary: row.summary ?? '',
-    takeaways: jsonList(row.takeaways),
-    tags: jsonList(row.tags),
-    stars: Number(row.stars ?? 0),
-    createdAt: row.created_at,
-  }
-}
 
 function toDemoProgress(row: any): any {
   return {
@@ -3435,34 +3316,6 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
       } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
     },
   }
-  const inspirationTool = {
-    name: 'workbench_inspiration_publish',
-    description: '把调研到的公开资料（GitHub 仓库 / 网络文章 / 设计参考 / 工具）写入产品灵感库，供产品设计与 Demo 生成引用。产品调研任务中按条调用；每条要有可核实的 URL 与一句话价值点。',
-    parameters: {
-      type: 'object', additionalProperties: false,
-      properties: {
-        productId: { type: 'string', description: '产品 id。' },
-        mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
-        featureId: { type: 'string', description: '关联的导图节点 id（可空）。' },
-        kind: { type: 'string', enum: ['github', 'web', 'article', 'design', 'tool', 'paper'], description: '资料类型。' },
-        title: { type: 'string', description: '资料标题（仓库名/文章标题）。' },
-        url: { type: 'string', description: 'http/https 原文链接，不得编造。' },
-        source: { type: 'string', description: '来源：GitHub / 媒体名 / 站点名。' },
-        summary: { type: 'string', description: '内容摘要：它是什么、解决什么问题。' },
-        takeaways: { type: 'array', items: { type: 'string' }, description: '对本产品的借鉴点（2-5 条）。' },
-        tags: { type: 'array', items: { type: 'string' }, description: '标签（可空）。' },
-        stars: { type: 'number', description: 'GitHub star 数（可空）。' },
-      },
-      required: ['productId', 'kind', 'title', 'url', 'summary'],
-    },
-    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `已收录灵感「${v.inspiration?.title ?? ''}」` : `写入失败：${String(v?.error ?? '')}` }] },
-    async execute(args: any): Promise<any> {
-      try {
-        const inspiration = await serialized(() => store.saveProductInspiration(args))
-        return { ok: true, inspiration }
-      } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
-    },
-  }
   const progressTool = {
     name: 'workbench_demo_progress_publish',
     description: 'Demo 生成过程中的进度上报。开始时 step=0 status=running；每个里程碑调用一次；结束时 status=done；失败时 status=failed 并说明原因。工作台 Demo 页会实时展示。',
@@ -3493,7 +3346,6 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
   }
   register(noteTool, 'product note tool')
   register(demoTool, 'product demo tool')
-  register(inspirationTool, 'product inspiration tool')
   register(progressTool, 'demo progress tool')
 }
 
@@ -3509,6 +3361,14 @@ export function apply(ctx: any): void {
     store = new JsonStore(dbFile.replace(/\.sqlite$/, '.json'))
   }
   console.log(`[dsh-workbench] ${store.engine} 存储就绪：${store.file}`)
+
+  /* 灵感：独立表与独立端点，不进整份快照；JSON 兜底时不可用。 */
+  const ideaModule = typeof (store as any).connection === 'function'
+    ? createIdeaModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+    : null
+  if (ideaModule !== null) ideaModule.registerTools(ctx)
+  else console.warn('[dsh-workbench] 灵感需要 SQLite，当前为 JSON 兜底存储：灵感入口将提示不可用')
+
   registerNewsTool(ctx, store)
   registerBugTool(ctx, store)
   registerProductTools(ctx, store)
@@ -3530,6 +3390,7 @@ export function apply(ctx: any): void {
       const method = (req.method ?? 'GET').toUpperCase()
 
       try {
+        if (ideaModule !== null && (await ideaModule.handle(req, res, path, method, url))) return
         if (method === 'GET' && (path === '/state' || path === '/')) {
           send(res, 200, store.readState())
           return
@@ -3678,12 +3539,6 @@ export function apply(ctx: any): void {
           send(res, 200, { ok: true })
           return
         }
-        if (method === 'DELETE' && path.startsWith('/products/inspirations/')) {
-          const id = decodeURIComponent(path.slice('/products/inspirations/'.length))
-          await serialized(() => store.deleteProductInspiration(id))
-          send(res, 200, { ok: true })
-          return
-        }
         if (method === 'GET' && path === '/products/maps') {
           send(res, 200, { maps: store.listProductMaps(str(url.searchParams.get('productId'))) })
           return
@@ -3727,16 +3582,6 @@ export function apply(ctx: any): void {
           } catch {
             send(res, 404, { error: 'demo_file_missing' })
           }
-          return
-        }
-        if (method === 'GET' && path === '/products/inspirations') {
-          send(res, 200, { inspirations: store.listProductInspirations(str(url.searchParams.get('productId') ?? ''), str(url.searchParams.get('mapId') ?? '')) })
-          return
-        }
-        if (method === 'POST' && path === '/products/inspirations') {
-          const body = await readJson(req)
-          const inspiration = await serialized(() => store.saveProductInspiration(body?.inspiration ?? body))
-          send(res, 200, { ok: true, inspiration })
           return
         }
         if (method === 'GET' && path === '/products/demo-progress') {
