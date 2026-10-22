@@ -1082,6 +1082,9 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       closeModal,
       dispatch: (projectPath: string, prompt: string) => dispatchToNewSession(projectPath, prompt),
       isDark: () => resolvedTheme() === 'dark',
+      portalProjects: () => projectCards()
+        .filter(card => card.path !== '' && card.path !== 'all' && card.path !== 'none')
+        .map(card => ({ name: card.name, workspacePath: card.path })),
     })
     return ideaView
   }

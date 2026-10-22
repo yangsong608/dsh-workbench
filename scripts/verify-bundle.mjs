@@ -85,6 +85,7 @@ check('客户端集成导图与力导引擎', client.includes('MindElixir.iife.j
 check('灵感含项目与方向切换', client.includes('idea-project-box') && client.includes('idea-direction') && client.includes('idea-project-save'))
 check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
 check('灵感含 5 分钟超时与防重复生成', client.includes('生成超过 5 分钟') && /status\s*!==\s*["']running["']/.test(client))
+check('灵感项目可从门户同步', client.includes('portalProjects') && client.includes('idea-project-sync') && host.includes('saved.created'))
 check('旧灵感已移除', !client.includes('productInspiration') && !host.includes('workbench_inspiration_publish') && !client.includes('/products/inspirations'))
 check('无 TODO 占位符', !/TODO|PLACEHOLDER|FIXME/.test(client + host))
 

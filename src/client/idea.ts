@@ -24,6 +24,8 @@ export interface IdeaDeps {
   closeModal: () => void
   dispatch: (projectPath: string, prompt: string) => Promise<string>
   isDark: () => boolean
+  /** 门户里的项目（由产品 / Bug 项目 / 测试项目 / 任务的工作区路径汇总得到）。 */
+  portalProjects?: () => Array<{ name: string; workspacePath: string }>
 }
 
 export interface IdeaViewHandle {
@@ -158,6 +160,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     loading = true
     try {
       if (projects.length === 0) await loadProjects()
+      const synced = await syncPortalProjects(true)
+      if (synced > 0) await loadProjects()
       await loadIdeas()
       if (selectedId === '' && ideas.length > 0) await selectIdea(ideas[0].id)
       else if (selectedId !== '') await reloadDetail()
@@ -171,6 +175,30 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   async function loadProjects(): Promise<void> {
     const res = await api('/ideas/projects')
     if (res.ok && Array.isArray(res.body?.projects)) projects = res.body.projects
+  }
+
+  /**
+   * 把门户里的项目同步成灵感项目（按工作区路径去重）。
+   * 门户项目来自产品 / Bug 项目 / 测试项目 / 任务的工作区路径，灵感项目需要自己的行来挂截图与产物。
+   */
+  async function syncPortalProjects(silent: boolean): Promise<number> {
+    const candidates = deps.portalProjects?.() ?? []
+    if (candidates.length === 0) return 0
+    const byPath = new Map<string, { name: string; workspacePath: string }>()
+    for (const item of candidates) {
+      const path = String(item.workspacePath ?? '').trim()
+      if (path === '' || path === 'all' || path === 'none') continue
+      if (!byPath.has(path)) byPath.set(path, { name: item.name || path.split('/').filter(Boolean).pop() || path, workspacePath: path })
+    }
+    let added = 0
+    for (const item of byPath.values()) {
+      try {
+        const res = await api('/ideas/projects', { method: 'POST', body: item })
+        if (res.ok && res.body?.created === true) added += 1
+      } catch { /* 单个失败不影响其它项目 */ }
+    }
+    if (!silent) deps.toast(added > 0 ? `已从门户同步 ${added} 个项目` : '门户项目已是最新')
+    return added
   }
 
   async function loadIdeas(): Promise<void> {
@@ -270,12 +298,26 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         <button class="btn tiny" data-idea-act="idea-project-del" data-id="${p.id}">删除</button>
       </div>`).join('') || '<div style="font-size:11px;color:var(--text-3);margin-bottom:8px">还没有项目；创建后灵感产物会写到项目工作区。</div>'
     deps.openModal(`<div class="idea-modal"><h3>项目（关联工作区）</h3>
-      <div style="margin:8px 0 12px">${rows}</div>
+      <div class="idea-actions" style="margin:6px 0 10px">
+        <button class="btn tiny" data-idea-act="idea-project-sync">⟳ 从门户同步项目</button>
+        <span style="font-size:10.5px;color:var(--text-3);align-self:center">门户里的产品 / Bug / 测试项目会按工作区路径自动同步到灵感</span>
+      </div>
+      <div style="margin:0 0 12px">${rows}</div>
       <div class="m-field"><label>项目名称</label><input type="text" id="idea-project-name" maxlength="60" placeholder="例如：AI 面试陪练"></div>
       <div class="m-field"><label>工作区绝对路径 <span style="font-weight:400">可选</span></label><input type="text" id="idea-project-path" maxlength="500" placeholder="/Users/you/work/ai-coach"></div>
       <div class="idea-modal-foot"><span class="note">截图与导出默认写到 &lt;工作区&gt;/.dsh-workbench/ideas/</span><div class="right">
         <button class="btn" data-idea-act="idea-close-modal">关闭</button>
         <button class="btn-primary" data-idea-act="idea-project-save">创建项目</button></div></div></div>`)
+  }
+
+  async function syncFromPortal(): Promise<void> {
+    const added = await syncPortalProjects(false)
+    if (added > 0) {
+      await loadProjects()
+      deps.closeModal()
+      renderProjectBox()
+      renderAll()
+    }
   }
 
   async function saveProject(): Promise<void> {
@@ -1124,6 +1166,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-project-new': openProjectModal(); break
       case 'idea-project-manage': openProjectModal(); break
       case 'idea-project-save': void saveProject(); break
+      case 'idea-project-sync': void syncFromPortal(); break
       case 'idea-project-del': void deleteProject(el.getAttribute('data-id') ?? ''); break
       case 'idea-project-pick': {
         projectFilter = el.getAttribute('data-id') ?? ''

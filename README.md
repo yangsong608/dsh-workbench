@@ -2,7 +2,7 @@
 
 把「时序」式个人工作台搬进 **DeepSeek Harness**：任务、计划、专注、复盘、记事本（AI 完善）、Bug、产品设计（导图 / 模块 / 业务 / 端 / Demo）、测试（AI 用例 / 实时 3D 执行 / Bug 回归 / 报告 / Docker）、定时新闻在同一块面板完成，数据落在本机 **SQLite**，主题跟随 DSH，兼容 **dsh-startup-moss** 与 **dsh-opencode-palette** 的换肤。
 
-> 版本：**1.6.0** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
+> 版本：**1.6.1** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
 
 | 看板（MOSS 550W 主题） | 日历 |
 | --- | --- |
@@ -154,6 +154,7 @@
 - **版本**：AI 每次生成 = 一个不可变版本；手动编辑进草稿（防抖保存），「存档版本」才落版本；支持并排对比（新增 / 删除 / 改文案）、回滚与删除（至少保留一个）。
 - **导出**：PNG / SVG / JSON / Markdown 大纲，可下载或直接存到项目工作区 `exports/`。
 - **Agent 工具**：`workbench_idea_expand`（可分批写入，`final:true` 冻结版本）与 `workbench_idea_progress`（里程碑上报）；提示词契约与 6 方向维度由宿主生成，客户端只负责派发。
+- **项目与门户一致**：门户里新建的产品 / Bug / 测试项目会按其工作区路径自动出现在灵感项目下拉里（同路径不重复建）。
 - **旧「灵感调研库」已移除**：产品页不再有「灵感」页签与 `workbench_inspiration_publish` 工具，历史数据自动归档为 `product_inspirations_legacy`。
 
 ### 产品设计
@@ -586,6 +587,9 @@ node scripts/verify-bundle.mjs   # 16 项产物检查
 
 ## 十二、变更记录
 
+- **1.6.1（2026-10-23）**
+  - 门户项目自动同步到灵感：打开灵感时把门户里的产品 / Bug 项目 / 测试项目 / 任务工作区路径去重后写进 `idea_projects`，项目下拉直接可选；项目管理弹窗增加「⟳ 从门户同步项目」。
+  - 灵感项目按工作区路径 upsert：同名/同路径不会重复建，改名会同步更新；修掉新建项目返回 id 为空的问题。
 - **1.6.0（2026-10-23）**
   - 新增「灵感」模块：多模态输入（文字 / 截图 / URL）、AI 六方向发散、思维导图（mind-elixir）与力导图（ECharts force）双视图、节点级继续发散、版本对比/回滚、PNG/SVG/JSON/Markdown 导出。
   - 新增 5 张表（idea_projects / ideas / idea_inputs / idea_versions / idea_runs）、24 条 `/ideas` 接口与 2 个 Agent 工具（`workbench_idea_expand` / `workbench_idea_progress`）；灵感数据独立端点，不进整份任务快照。

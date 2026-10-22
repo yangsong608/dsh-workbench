@@ -196,8 +196,8 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           if (method === 'GET') { send(res, 200, { ok: true, projects: store.listProjects() }); return true }
           if (method === 'POST') {
             const body = await readJson(req)
-            const project = store.saveProject(body ?? {})
-            send(res, 200, { ok: true, project }); return true
+            const saved = store.saveProject(body ?? {})
+            send(res, 200, { ok: true, project: saved.project, created: saved.created }); return true
           }
           fail(res, 405, 'method_not_allowed'); return true
         }

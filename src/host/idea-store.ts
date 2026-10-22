@@ -139,22 +139,33 @@ export class IdeaStore {
     }))
   }
 
-  saveProject(input: AnyMap): AnyMap {
+  /**
+   * 保存项目。同名（同工作区路径）视为同一个项目，避免「门户新增一次、灵感再建一次」。
+   * 返回 created 标记，供前端提示「已从门户同步 N 个」。
+   */
+  saveProject(input: AnyMap): { project: AnyMap; created: boolean } {
     const ts = now()
-    const id = typeof input?.id === 'string' && input.id !== '' ? input.id : `ip-${randomUUID().slice(0, 8)}`
     const name = String(input?.name ?? '').trim().slice(0, 60) || '未命名项目'
     const workspacePath = String(input?.workspacePath ?? '').trim().slice(0, 500)
     const workspaceName = String(input?.workspaceName ?? '').trim().slice(0, 80)
       || (workspacePath === '' ? '' : workspacePath.split('/').filter(Boolean).pop() ?? '')
-    const exists = this.db.prepare('SELECT id, created_at FROM idea_projects WHERE id = ?').get(id) as AnyMap | undefined
-    if (exists) {
+    const wantedId = typeof input?.id === 'string' && input.id !== '' ? input.id : ''
+    const byId = wantedId !== ''
+      ? this.db.prepare('SELECT id FROM idea_projects WHERE id = ?').get(wantedId) as AnyMap | undefined
+      : undefined
+    const byPath = byId === undefined && workspacePath !== ''
+      ? this.db.prepare('SELECT id FROM idea_projects WHERE workspace_path = ? AND workspace_path <> \'\'').get(workspacePath) as AnyMap | undefined
+      : undefined
+    const existing = byId ?? byPath
+    const id = String(existing?.id ?? (wantedId !== '' ? wantedId : `ip-${randomUUID().slice(0, 8)}`))
+    if (existing !== undefined) {
       this.db.prepare('UPDATE idea_projects SET name=?, workspace_path=?, workspace_name=?, updated_at=? WHERE id=?')
         .run(name, workspacePath, workspaceName, ts, id)
     } else {
       this.db.prepare('INSERT INTO idea_projects(id, name, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?)')
         .run(id, name, workspacePath, workspaceName, ts, ts)
     }
-    return this.listProjects().find((p: AnyMap) => p.id === id) ?? {}
+    return { project: this.listProjects().find((p: AnyMap) => p.id === id) ?? {}, created: existing === undefined }
   }
 
   deleteProject(id: string): void {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbench",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "个人工作台：任务 / 计划 / 专注 / 记事本 / Bug / 产品设计 / 灵感 / 测试 / 新闻（SQLite 本地库）",
   "type": "module",
   "main": "lib/index.js",
@@ -10,8 +10,12 @@
     "./package.json": "./package.json"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
   },
   "files": [
     "lib/**/*.js",
