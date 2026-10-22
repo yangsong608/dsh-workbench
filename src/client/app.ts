@@ -4134,9 +4134,32 @@ ${common}
     }
   }
   /* ------------------------------ 智能体团队会话适配 ------------------------------ */
-  interface AgentHandlers { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }
+  interface AgentHandlers { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void; team?: (projection: any) => void }
   interface AgentDispatchInput { ideaId: string; runId: string; teamId: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }
   const agentSessionOffs: Array<() => void> = []
+
+  /** 读 Lead 会话的 agentTeam 投影；读不到返回 null（由事件解析降级）。 */
+  function teamStateOfSession(sessionId: string): any {
+    try {
+      const sessions = dshCtx?.get?.<any>('sessions')
+      const list = sessions?.list
+      const snapshot = list?.getSnapshot?.()
+      const projection = snapshot?.projectionsBySession?.[sessionId]?.values?.agentTeam
+      return projection ?? null
+    } catch { return null }
+  }
+  /** 订阅投影变化；返回退订函数（DSH 版本不支持时为空操作）。 */
+  function watchTeam(sessionId: string, callback: (projection: any) => void): () => void {
+    const sessions = dshCtx?.get?.<any>('sessions')
+    const list = sessions?.list
+    if (list === undefined || typeof list.subscribe !== 'function') return () => undefined
+    const emit = (): void => { const projection = teamStateOfSession(sessionId); if (projection !== null) callback(projection) }
+    emit()
+    try {
+      const off = list.subscribe(emit)
+      return typeof off === 'function' ? off : () => undefined
+    } catch { return () => undefined }
+  }
 
   /** 建派发 → 建会话 → 订阅事件 → 发送 kickoff；返回 dispatch/session 供页内会话展示。 */
   async function startAgentDispatch(input: AgentDispatchInput, handlers: AgentHandlers): Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null> {
@@ -4151,6 +4174,9 @@ ${common}
       await fetch(`${API}/agents/dispatches/${encodeURIComponent(String(dispatch.id))}`, {
         method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, status: 'running' }),
       }).catch(() => undefined)
+      if (handlers.team !== undefined) {
+        try { agentSessionOffs.push(watchTeam(sessionId, handlers.team)) } catch { /* 投影不可用就只靠事件 */ }
+      }
       const subscribe = dshCtx?.on
       if (typeof subscribe === 'function') {
         try {

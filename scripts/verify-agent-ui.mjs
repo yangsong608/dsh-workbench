@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const temp = mkdtempSync(join(tmpdir(), 'dsh-workbench-chat-'))
 const code = stripTypeScriptTypes(readFileSync(join(root, 'src/client/agent-chat.ts'), 'utf8'))
 writeFileSync(join(temp, 'agent-chat.mjs'), code)
-const { chatItemOf, renderMarkdown } = await import(join(temp, 'agent-chat.mjs'))
+const { chatItemOf, renderMarkdown, teamStateOf } = await import(join(temp, 'agent-chat.mjs'))
 
 let pass = 0
 let fail = 0
@@ -27,6 +27,10 @@ check('工具失败', failed?.kind === 'tool' && failed.who === '工具失败' &
 const aborted = chatItemOf({ type: 'turn/end', time: 5, data: { reason: 'aborted' } })
 check('中止系统行', aborted?.kind === 'system')
 check('未知事件忽略', chatItemOf({ type: 'step/start', data: {} }) === null)
+
+const team = teamStateOf({ members: [{ role: 'lead' }, { role: 'teammate' }, { role: 'teammate', phase: 'failed' }], tasks: [{ status: 'completed' }, { status: 'pending' }, { status: 'deleted' }] })
+check('投影提取成员/任务计数', team !== null && team.members === 3 && team.tasksDone === 1 && team.tasksTotal === 2)
+check('无投影返回 null', teamStateOf(null) === null && teamStateOf({}) !== null)
 
 const md = renderMarkdown('# 标题\n- 列表 `code`\n```\nconst a = 1\n```\n<b>x</b>', esc)
 check('标题/列表/代码块渲染', md.includes('chat-h') && md.includes('chat-li') && md.includes('<pre>'))

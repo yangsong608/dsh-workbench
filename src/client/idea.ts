@@ -9,7 +9,7 @@
  */
 import { IDEA_CSS } from './idea.css.js'
 import { IDEA_ANGLES } from '../shared/idea-angles.js'
-import { createAgentChat, type ChatHandle } from './agent-chat.js'
+import { createAgentChat, teamStateOf, type ChatHandle } from './agent-chat.js'
 import {
   buildForceOption, fromMindElixir, graphStats, graphToMarkdown, graphToSVG,
   nodeById, safeName, toMindElixir, type IdeaGraph,
@@ -859,6 +859,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
             event: event => chat?.ingest(event),
             history: events => chat?.ingestMany(events),
             status: (status, note) => chat?.setStatus(status, note),
+            team: projection => chat?.setTeam(teamStateOf(projection)),
           },
         )
         if (started !== null) {

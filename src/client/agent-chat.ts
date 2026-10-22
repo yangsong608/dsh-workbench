@@ -7,6 +7,16 @@ export type ChatKind = 'user' | 'assistant' | 'tool' | 'system'
 export interface ChatItem { kind: ChatKind; who: string; text: string; at: number }
 export interface ChatMeta { teamName: string; dispatchId: string; sessionId: string; timeoutMs: number }
 
+export interface TeamState { members: number; tasksDone: number; tasksTotal: number }
+
+/** 从 Lead 会话的 agentTeam 投影提取成员/任务计数（读不到返回 null）。 */
+export function teamStateOf(projection: any): TeamState | null {
+  if (projection === null || typeof projection !== 'object') return null
+  const members = Array.isArray(projection.members) ? projection.members.filter((member: any) => member?.role !== 'lead' || member?.phase !== 'failed') : []
+  const tasks = Array.isArray(projection.tasks) ? projection.tasks.filter((task: any) => task?.status !== 'deleted') : []
+  return { members: members.length, tasksDone: tasks.filter((task: any) => task?.status === 'completed').length, tasksTotal: tasks.length }
+}
+
 export interface ChatDeps {
   esc: (value: unknown) => string
   ic: (name: string, size?: number) => string
@@ -22,6 +32,7 @@ export interface ChatHandle {
   ingest(event: any): void
   ingestMany(events: any[]): void
   setStatus(status: string, note?: string): void
+  setTeam(state: TeamState | null): void
   setCounts(running: number, total: number): void
   clear(): void
   destroy(): void
@@ -98,6 +109,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
   let note = ''
   let running = 0
   let total = 0
+  let team: TeamState | null = null
   let open = false
 
   host.innerHTML = `<div class="chat-head">
@@ -121,7 +133,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
   function paintStatus(): void {
     statusEl.textContent = status
     statusEl.className = `chat-status ${status}`
-    countEl.textContent = total > 0 ? `成员 ${running}/${total}` : ''
+    countEl.textContent = team !== null ? `成员 ${team.members} · 任务 ${team.tasksDone}/${team.tasksTotal}` : total > 0 ? `成员 ${running}/${total}` : ''
     host.classList.toggle('is-running', status === 'running' || status === 'dispatching')
     if (note !== '') statusEl.title = note
   }
@@ -193,6 +205,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     ingestMany(events) { for (const event of events) this.ingest(event) },
     setStatus(next, nextNote = '') { status = next; note = nextNote; paintStatus() },
     setCounts(nextRunning, nextTotal) { running = nextRunning; total = nextTotal; paintStatus() },
+    setTeam(state) { team = state; paintStatus() },
     clear() { items = []; list.innerHTML = '' },
     destroy() { host.innerHTML = ''; items = [] },
   }

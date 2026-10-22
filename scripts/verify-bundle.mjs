@@ -84,6 +84,7 @@ check('客户端含灵感视图骨架', client.includes('idea-root') && client.i
 check('客户端集成导图与力导引擎', client.includes('MindElixir.iife.js') && client.includes('echarts.min.js') && client.includes('buildForceOption'))
 check('灵感含项目与方向切换', client.includes('idea-project-box') && client.includes('idea-direction') && client.includes('idea-project-save'))
 check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
+check('页内会话读 agentTeam 投影', client.includes('teamStateOf') && client.includes('projectionsBySession') && client.includes('agentTeam'))
 check('记忆与知识接口/工具', host.includes('=== "memory"') && host.includes('=== "knowledge"') && host.includes('workbench_memory_search') && host.includes('workbench_knowledge_search'))
 check('知识 FTS 与界面入口', host.includes('knowledge_chunks_fts') && client.includes('agent-memory-open') && client.includes('agent-knowledge-open'))
 check('灵感含团队选择与页内会话', client.includes('idea-team') && client.includes('idea-chat') && client.includes('createAgentChat'))

@@ -2,7 +2,7 @@
 
 把「时序」式个人工作台搬进 **DeepSeek Harness**：任务、计划、专注、复盘、记事本（AI 完善）、Bug、产品设计（导图 / 模块 / 业务 / 端 / Demo）、测试（AI 用例 / 实时 3D 执行 / Bug 回归 / 报告 / Docker）、定时新闻在同一块面板完成，数据落在本机 **SQLite**，主题跟随 DSH，兼容 **dsh-startup-moss** 与 **dsh-opencode-palette** 的换肤。
 
-> 版本：**1.9.0** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
+> 版本：**1.9.1** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
 
 | 看板（MOSS 550W 主题） | 日历 |
 | --- | --- |
@@ -588,6 +588,10 @@ node scripts/verify-bundle.mjs   # 16 项产物检查
 
 ## 十二、变更记录
 
+- **1.9.1（2026-10-23）**
+  - 页内会话读取 Lead 会话的 `agentTeam` 投影（`sessions.list.projectionsBySession`），头部显示 `成员 N · 任务 done/total`；读不到时保持事件解析降级。
+  - 投影订阅随派发建立、随灵感切换/卸载退订；新增 `teamStateOf` 纯函数与 2 条自检。
+  - `verify-bundle` 77 项。
 - **1.9.0（2026-10-23）**
   - 记忆：个人（`<DSH_HOME>/dsh-workbench/memory/personal.md`）/ 项目（`<工作区>/.dsh-workbench/memory.md`）/ 团队（SQLite `agent_memory`）三层；派发时按作用域注入，默认手动采纳。
   - 知识：工作区文本索引（跳过 node_modules/.git/dist 等，单文件 ≤512KB），分块 600 字，SQLite FTS5 检索（中文退化 LIKE），派发时自动 top-5 注入并带来源路径。
