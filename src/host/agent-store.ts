@@ -140,7 +140,11 @@ export class AgentStore {
   private ftsReady = false
   private migrateFts(): void {
     try {
-      this.db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(text, content='')")
+      /* 1.8 建过一版空 FTS（未被使用），1.9 换成带 chunk_id 的结构；老表直接重建。 */
+      const cols = this.db.prepare("PRAGMA table_info('knowledge_chunks_fts')").all() as AnyMap[]
+      const hasChunkId = cols.some(col => String(col.name) === 'chunk_id')
+      if (cols.length > 0 && !hasChunkId) this.db.exec('DROP TABLE knowledge_chunks_fts')
+      this.db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(chunk_id UNINDEXED, text)")
       this.ftsReady = true
     } catch {
       this.ftsReady = false
@@ -376,7 +380,43 @@ export class AgentStore {
     return rows.map(row => ({ seq: Number(row.seq), kind: String(row.kind), member: String(row.member ?? ''), payload: parseJson(row.payload_json, {}), at: String(row.at) }))
   }
 
-  /* ------------------------------ 记忆（R2 使用，R1 提供基础读） ------------------------------ */
+  /* ------------------------------ 记忆 ------------------------------ */
+  addMemory(input: AnyMap): AnyMap {
+    const id = `mem-${randomUUID().slice(0, 8)}`
+    const ts = now()
+    const content = String(input?.content ?? '').trim().slice(0, 4000)
+    if (content === '') throw new Error('记忆内容不能为空')
+    const scope = ['personal', 'project', 'team', 'global'].includes(String(input?.scope)) ? String(input.scope) : 'project'
+    this.db.prepare('INSERT INTO agent_memory(id,scope,team_id,member_id,project_path,content,source,pinned,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(id, scope, String(input?.teamId ?? ''), String(input?.memberId ?? ''), String(input?.projectPath ?? ''), content,
+        String(input?.source ?? 'manual').slice(0, 40), input?.pinned === true ? 1 : 0, ts, ts)
+    return this.getMemory(id) ?? {}
+  }
+
+  getMemory(id: string): AnyMap | null {
+    const row = this.db.prepare('SELECT * FROM agent_memory WHERE id = ?').get(id) as AnyMap | undefined
+    if (row === undefined) return null
+    return {
+      id: String(row.id), scope: String(row.scope), teamId: String(row.team_id ?? ''), memberId: String(row.member_id ?? ''),
+      projectPath: String(row.project_path ?? ''), content: String(row.content), source: String(row.source ?? 'manual'),
+      pinned: Number(row.pinned ?? 0) === 1, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    }
+  }
+
+  updateMemory(id: string, patch: AnyMap): AnyMap | null {
+    const row = this.getMemory(id)
+    if (row === null) return null
+    const content = patch?.content === undefined ? String(row.content) : String(patch.content).trim().slice(0, 4000)
+    const pinned = patch?.pinned === undefined ? (row.pinned ? 1 : 0) : patch.pinned === true ? 1 : 0
+    this.db.prepare('UPDATE agent_memory SET content = ?, pinned = ?, updated_at = ? WHERE id = ?').run(content, pinned, now(), id)
+    return this.getMemory(id)
+  }
+
+  deleteMemory(id: string): void {
+    this.db.prepare('DELETE FROM agent_memory WHERE id = ?').run(id)
+  }
+
+  /* ------------------------------ 记忆查询 ------------------------------ */
   listMemory(filter: AnyMap = {}): AnyMap[] {
     const clauses: string[] = []
     const args: any[] = []

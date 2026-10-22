@@ -50,7 +50,7 @@ export function createAgentPanel(deps: AgentPanelDeps) {
   }
 
   function sectionHtml(): string {
-    const header = `<div class="portal-sec-head"><h2>智能体团队</h2><span>${teams.length > 0 ? `${teams.length} 支团队 · 成员可在团队里增删` : '默认产品研发团队'}</span></div>`
+    const header = `<div class="portal-sec-head"><h2>智能体团队</h2><span>${teams.length > 0 ? `${teams.length} 支团队 · 成员可在团队里增删` : '默认产品研发团队'} · <button class="btn tiny" data-act="agent-memory-open">记忆</button> <button class="btn tiny" data-act="agent-knowledge-open">知识</button></span></div>`
     if (teams.length === 0) {
       return `${header}<div class="portal-empty">${deps.ic('users', 16)}<div><b>还没有团队</b><span>创建团队并添加智能体，灵感发散时由主理人调度执行。</span></div><button class="btn" data-act="agent-team-new">${deps.ic('plus', 12)}新建团队</button></div>`
     }
@@ -89,6 +89,70 @@ export function createAgentPanel(deps: AgentPanelDeps) {
         <button class="btn tiny danger" data-act="agent-team-delete" data-id="${deps.esc(team.id)}">删除团队</button>
       </div>
       <div class="idea-modal-foot"><span class="note">运行中改权限不会热生效；下次派发或创建替代成员才生效。</span><div class="right"><button class="btn" data-act="agent-close">关闭</button></div></div></div>`)
+  }
+
+  async function openMemoryModal(): Promise<void> {
+    let memories: any[] = []
+    try {
+      const res = await fetch(`${deps.api}/agents/memory`, { cache: 'no-store' })
+      if (res.ok) memories = (await res.json()).memories ?? []
+    } catch { /* 忽略 */ }
+    const rows = memories.map(item => `<div class="agent-row"><div class="agent-row-main"><b>[${deps.esc(item.scope)}]</b><div class="agent-intro">${deps.esc(item.content)}</div></div>
+      <div class="agent-row-acts"><button class="btn tiny" data-act="agent-memory-del" data-id="${deps.esc(item.id)}">删除</button></div></div>`).join('') || '<div class="agent-empty">还没有记忆。</div>'
+    deps.openModal(`<div class="idea-modal agent-modal"><h3>记忆</h3>
+      <div class="agent-team-meta">派发时会按作用域注入；个人/项目也可放文件里</div>
+      <div class="agent-list">${rows}</div>
+      <div class="m-field"><label>新增记忆</label><textarea id="agent-memory-text" rows="2" placeholder="要长期记住的结论"></textarea></div>
+      <div class="agent-add-row"><select id="agent-memory-scope"><option value="project">项目</option><option value="team">团队</option><option value="personal">个人</option></select>
+        <button class="btn tiny" data-act="agent-memory-add">添加</button></div>
+      <div class="idea-modal-foot"><span class="note">采纳才写入；删除后不再注入</span><div class="right"><button class="btn" data-act="agent-close">关闭</button></div></div></div>`)
+  }
+
+  async function addMemory(): Promise<void> {
+    const content = (deps.q<HTMLTextAreaElement>('agent-memory-text')?.value ?? '').trim()
+    const scope = deps.q<HTMLSelectElement>('agent-memory-scope')?.value ?? 'project'
+    if (content === '') { deps.toast('先写内容'); return }
+    const res = await fetch(`${deps.api}/agents/memory`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, content }) })
+    if (!res.ok) { deps.toast('保存失败'); return }
+    await openMemoryModal()
+  }
+
+  async function deleteMemory(id: string): Promise<void> {
+    await fetch(`${deps.api}/agents/memory/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    await openMemoryModal()
+  }
+
+  function openKnowledgeModal(): void {
+    const path = teams.find(team => team.defaultWorkspace !== '')?.defaultWorkspace ?? ''
+    deps.openModal(`<div class="idea-modal agent-modal"><h3>知识</h3>
+      <div class="agent-team-meta">索引工作区文本（md/代码等），派发时按任务检索注入</div>
+      <div class="agent-add-row"><input id="agent-kb-path" value="${deps.esc(path)}" placeholder="工作区绝对路径" style="flex:1;min-width:0;height:26px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text-2);font:inherit;font-size:11px;padding:0 6px">
+        <button class="btn tiny" data-act="agent-knowledge-index">索引</button><button class="btn tiny" data-act="agent-knowledge-status">状态</button></div>
+      <div id="agent-kb-status" class="agent-team-meta"></div>
+      <div class="agent-add-row" style="margin-top:8px"><input id="agent-kb-q" placeholder="检索测试…" style="flex:1;min-width:0;height:26px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text-2);font:inherit;font-size:11px;padding:0 6px">
+        <button class="btn tiny" data-act="agent-knowledge-search">检索</button></div>
+      <div id="agent-kb-hits" class="agent-list" style="margin-top:8px"></div>
+      <div class="idea-modal-foot"><span class="note">索引按工作区隔离，不会读到别的项目</span><div class="right"><button class="btn" data-act="agent-close">关闭</button></div></div></div>`)
+  }
+
+  async function indexKnowledge(): Promise<void> {
+    const path = (deps.q<HTMLInputElement>('agent-kb-path')?.value ?? '').trim()
+    if (path === '') { deps.toast('先填工作区路径'); return }
+    const box = deps.q('agent-kb-status')
+    if (box) box.textContent = '索引中…'
+    const res = await fetch(`${deps.api}/agents/knowledge/index`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectPath: path }) })
+    const body = await res.json().catch(() => ({}))
+    if (box) box.textContent = res.ok ? `已索引 ${body.result?.docs ?? 0} 个文件 / ${body.result?.chunks ?? 0} 个片段` : `索引失败：${body?.message ?? res.status}`
+  }
+
+  async function searchKnowledge(): Promise<void> {
+    const path = (deps.q<HTMLInputElement>('agent-kb-path')?.value ?? '').trim()
+    const q = (deps.q<HTMLInputElement>('agent-kb-q')?.value ?? '').trim()
+    const box = deps.q('agent-kb-hits')
+    if (path === '' || q === '') { deps.toast('先填路径与关键词'); return }
+    const res = await fetch(`${deps.api}/agents/knowledge/search?projectPath=${encodeURIComponent(path)}&q=${encodeURIComponent(q)}`)
+    const body = await res.json().catch(() => ({}))
+    if (box) box.innerHTML = (body.hits ?? []).map((hit: any) => `<div class="agent-row"><div class="agent-row-main"><b>${deps.esc(hit.path)}</b><div class="agent-intro">${deps.esc(hit.chunk)}</div></div></div>`).join('') || '<div class="agent-empty">没有命中</div>'
   }
 
   function openTeamForm(): void {
@@ -198,7 +262,7 @@ export function createAgentPanel(deps: AgentPanelDeps) {
   let renderPortalRefresh: (() => void) | null = null
   function onRefresh(callback: () => void): void { renderPortalRefresh = callback }
 
-  return { teams: () => teams, members: () => members, load, sectionHtml, openTeam, openTeamForm, openMemberForm, saveMember, removeMember, toggleWrite, addMemberToTeam, createTeam, deleteTeam, onRefresh }
+  return { teams: () => teams, members: () => members, load, sectionHtml, openTeam, openTeamForm, openMemberForm, saveMember, removeMember, toggleWrite, addMemberToTeam, createTeam, deleteTeam, openMemoryModal, addMemory, deleteMemory, openKnowledgeModal, indexKnowledge, searchKnowledge, onRefresh }
 }
 
 export type AgentPanel = ReturnType<typeof createAgentPanel>

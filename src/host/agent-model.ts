@@ -202,6 +202,36 @@ export function nextDispatchStatus(current: DispatchStatus, incoming: DispatchSt
   return current
 }
 
+export interface MemoryEntryView { scope: string; content: string }
+export interface KnowledgeHitView { path: string; chunk: string; score: number }
+
+/** 派发时的记忆注入：按作用域标注来源，总量截断，避免挤占上下文。 */
+export function assembleMemory(entries: MemoryEntryView[], limit = 2000): string {
+  const lines: string[] = []
+  let used = 0
+  for (const entry of entries) {
+    const line = `- [${entry.scope}] ${entry.content}`.slice(0, 500)
+    if (used + line.length > limit) break
+    lines.push(line)
+    used += line.length + 1
+  }
+  return lines.join('\n')
+}
+
+/** 知识注入：带路径来源，便于模型判断是否相关。 */
+export function assembleKnowledge(hits: KnowledgeHitView[], limit = 1600): string {
+  const lines: string[] = []
+  let used = 0
+  hits.forEach((hit, index) => {
+    const body = hit.chunk.replace(/\s+/g, ' ').slice(0, 500)
+    const line = `[${index + 1}] ${hit.path}\n${body}`
+    if (used + line.length > limit) return
+    lines.push(line)
+    used += line.length + 1
+  })
+  return lines.join('\n\n')
+}
+
 export function isRunning(status: string): boolean {
   return status === 'dispatching' || status === 'running'
 }

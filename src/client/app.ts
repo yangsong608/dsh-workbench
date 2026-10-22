@@ -5396,6 +5396,12 @@ ${lines}`
       if (act === 'agent-member-write') { void agentPanel.toggleWrite(actEl.getAttribute('data-team') ?? '', id); return }
       if (act === 'agent-member-add') { void agentPanel.addMemberToTeam(actEl.getAttribute('data-team') ?? ''); return }
       if (act === 'agent-close') { closeModal(); return }
+      if (act === 'agent-memory-open') { void agentPanel.openMemoryModal(); return }
+      if (act === 'agent-memory-add') { void agentPanel.addMemory(); return }
+      if (act === 'agent-memory-del') { void agentPanel.deleteMemory(id); return }
+      if (act === 'agent-knowledge-open') { agentPanel.openKnowledgeModal(); return }
+      if (act === 'agent-knowledge-index') { void agentPanel.indexKnowledge(); return }
+      if (act === 'agent-knowledge-search') { void agentPanel.searchKnowledge(); return }
       if (act === 'new') { openNewTask(); return }
       if (act === 'settings') { void void openSettings(); return }
       if (act === 'space-add') { openSpace(); return }

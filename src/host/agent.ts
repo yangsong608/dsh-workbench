@@ -4,10 +4,13 @@
  * 数据独立成表、独立端点，不进整份任务快照；团队成员与派发记录由工作台管理，
  * 真正的执行仍由 DSH 会话（Agent Teams）完成。
  */
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { AgentStore } from './agent-store.js'
+import { KnowledgeIndex, KNOWLEDGE_LIMITS } from './knowledge.js'
 import {
-  AGENT_LIMITS, FILE_WRITES, MEMORY_SCOPES, MEMBER_ROLES, buildTeamKickoff,
-  clampText, type AgentMember,
+  AGENT_LIMITS, FILE_WRITES, MEMORY_SCOPES, MEMBER_ROLES, assembleKnowledge, assembleMemory,
+  buildTeamKickoff, clampText, type AgentMember,
 } from './agent-model.js'
 
 interface RouteRequest { url?: string; method?: string; on?: Function; json?: Function; headers?: Record<string, string> }
@@ -63,6 +66,24 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/
 
 export function createAgentModule(options: AgentModuleOptions): AgentModule {
   const store = new AgentStore(options.db)
+  const knowledge = new KnowledgeIndex(store.db)
+  /** 个人/项目记忆优先用文件（可随仓库走），读不到再看数据库。 */
+  function fileMemory(path: string): string {
+    try {
+      if (!existsSync(path)) return ''
+      return readFileSync(path, 'utf8').slice(0, 4000).trim()
+    } catch { return '' }
+  }
+  function injectMemory(teamId: string, projectPath: string): string {
+    const dbEntries = store.listMemory({ teamId, projectPath }).map(row => ({ scope: String(row.scope), content: String(row.content) }))
+    const personal = fileMemory(join(options.dataDir, 'dsh-workbench', 'memory', 'personal.md'))
+    const project = projectPath !== '' ? fileMemory(join(projectPath, '.dsh-workbench', 'memory.md')) : ''
+    const parts: string[] = []
+    if (personal !== '') parts.push(`- [personal] ${personal}`)
+    if (project !== '') parts.push(`- [project] ${project}`)
+    const merged = parts.join('\n') + (dbEntries.length > 0 ? `\n${assembleMemory(dbEntries, 1600)}` : '')
+    return merged.trim()
+  }
   const membersOf = (teamId: string): AgentMember[] => store.listTeamMembers(teamId) as unknown as AgentMember[]
 
   async function handle(req: RouteRequest, res: RouteResponse, path: string, method: string, url: URL): Promise<boolean> {
@@ -171,6 +192,11 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
             }
             const members = (team.members as AgentMember[]).filter(member => member.enabled)
             const timeoutMinutes = Math.min(120, Math.max(1, Math.round((Number(body?.timeoutMs) || AGENT_LIMITS.dispatchTimeoutMs) / 60000)))
+            const workspacePath = String(body?.workspacePath ?? team.defaultWorkspace ?? '')
+            const injectedMemory = typeof body?.memory === 'string' ? body.memory : injectMemory(teamId, workspacePath)
+            const injectedKnowledge = typeof body?.knowledge === 'string'
+              ? body.knowledge
+              : assembleKnowledge(knowledge.search(workspacePath, `${clampText(body?.ideaTitle, 80)} ${clampText(body?.goal, 120)}`, 5))
             const kickoff = buildTeamKickoff({
               team: { name: String(team.name), desc: String(team.desc ?? '') },
               members,
@@ -178,10 +204,10 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
               idea: { title: clampText(body?.ideaTitle, 200), brief: clampText(body?.ideaBrief, 4000) },
               ideaId,
               runId: String(body?.runId ?? ''),
-              workspacePath: String(body?.workspacePath ?? team.defaultWorkspace ?? ''),
+              workspacePath,
               timeoutMinutes,
-              memory: typeof body?.memory === 'string' ? body.memory : undefined,
-              knowledge: typeof body?.knowledge === 'string' ? body.knowledge : undefined,
+              memory: injectedMemory !== '' ? injectedMemory : undefined,
+              knowledge: injectedKnowledge !== '' ? injectedKnowledge : undefined,
             })
             const dispatch = store.createDispatch({
               ideaId, runId: body?.runId, teamId, goal: body?.goal,
@@ -220,6 +246,66 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
         fail(res, 404, '未知接口'); return true
       }
 
+      /* ---------------- 记忆 ---------------- */
+      if (a === 'memory') {
+        if (b === undefined) {
+          if (method === 'GET') {
+            send(res, 200, { ok: true, memories: store.listMemory({
+              scope: String(url.searchParams.get('scope') ?? ''),
+              teamId: String(url.searchParams.get('teamId') ?? ''),
+              projectPath: String(url.searchParams.get('projectPath') ?? ''),
+            }) }); return true
+          }
+          if (method === 'POST') {
+            const body = await readJson(req)
+            const memory = store.addMemory(body ?? {})
+            send(res, 200, { ok: true, memory }); return true
+          }
+          fail(res, 405, '不支持的方法'); return true
+        }
+        if (!ID.test(b)) { fail(res, 400, 'memory_id_invalid'); return true }
+        if (method === 'PATCH' || method === 'PUT') {
+          const body = await readJson(req)
+          const memory = store.updateMemory(b, body ?? {})
+          if (memory === null) { fail(res, 404, '记忆不存在'); return true }
+          send(res, 200, { ok: true, memory }); return true
+        }
+        if (method === 'DELETE') { store.deleteMemory(b); send(res, 200, { ok: true }); return true }
+        if (method === 'GET') {
+          const memory = store.getMemory(b)
+          if (memory === null) { fail(res, 404, '记忆不存在'); return true }
+          send(res, 200, { ok: true, memory }); return true
+        }
+        fail(res, 405, '不支持的方法'); return true
+      }
+
+      /* ---------------- 知识 ---------------- */
+      if (a === 'knowledge') {
+        if (b === 'index' && method === 'POST') {
+          const body = await readJson(req)
+          const projectPath = String(body?.projectPath ?? '').trim()
+          if (projectPath === '') { fail(res, 400, 'projectPath 不能为空'); return true }
+          try {
+            const result = knowledge.index(projectPath)
+            send(res, 200, { ok: true, result, status: knowledge.status(projectPath) }); return true
+          } catch (cause) {
+            fail(res, 500, `索引失败：${cause instanceof Error ? cause.message : String(cause)}`); return true
+          }
+        }
+        if (b === 'status' && method === 'GET') {
+          const projectPath = String(url.searchParams.get('projectPath') ?? '')
+          send(res, 200, { ok: true, status: knowledge.status(projectPath) }); return true
+        }
+        if (b === 'search' && method === 'GET') {
+          const projectPath = String(url.searchParams.get('projectPath') ?? '')
+          const q = String(url.searchParams.get('q') ?? '')
+          if (projectPath === '' || q === '') { fail(res, 400, 'projectPath 与 q 必填'); return true }
+          const hits = knowledge.search(projectPath, q, Math.min(20, Number(url.searchParams.get('topK')) || KNOWLEDGE_LIMITS.topK))
+          send(res, 200, { ok: true, hits }); return true
+        }
+        fail(res, 404, '未知接口'); return true
+      }
+
       /* ---------------- 元信息 ---------------- */
       if (a === 'meta') {
         send(res, 200, {
@@ -249,6 +335,48 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
       if (typeof ctx.effect === 'function') ctx.effect(() => tools.register(tool), `workbench: ${label}`)
       else tools.register(tool)
     }
+    register({
+      name: 'workbench_memory_search',
+      description: '在个人/项目/团队记忆里搜索（团队与灵感发散时用）。',
+      parameters: { type: 'object', additionalProperties: false, properties: {
+        query: { type: 'string' }, teamId: { type: 'string' }, projectPath: { type: 'string' }, limit: { type: 'number' },
+      }, required: ['query'] },
+      execute: async (args: any) => {
+        const query = String(args?.query ?? '').toLowerCase().trim()
+        if (query === '') return { ok: false, error: 'query 不能为空' }
+        const rows = store.listMemory({ teamId: String(args?.teamId ?? ''), projectPath: String(args?.projectPath ?? '') })
+          .filter(row => String(row.content).toLowerCase().includes(query))
+          .slice(0, Math.min(20, Number(args?.limit) || 8))
+        return { ok: true, memories: rows }
+      },
+    })
+    register({
+      name: 'workbench_memory_write',
+      description: '把一条结论写入团队/项目/个人记忆（用户明确要求记住时调用）。',
+      parameters: { type: 'object', additionalProperties: false, properties: {
+        content: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'project', 'team'] },
+        teamId: { type: 'string' }, projectPath: { type: 'string' },
+      }, required: ['content', 'scope'] },
+      execute: async (args: any) => {
+        try {
+          const memory = store.addMemory({ content: args?.content, scope: args?.scope, teamId: args?.teamId, projectPath: args?.projectPath, source: 'agent' })
+          return { ok: true, memory }
+        } catch (cause) { return { ok: false, error: cause instanceof Error ? cause.message : String(cause) } }
+      },
+    })
+    register({
+      name: 'workbench_knowledge_search',
+      description: '在项目已索引的知识里做全文检索（BM25），返回带路径的片段。',
+      parameters: { type: 'object', additionalProperties: false, properties: {
+        projectPath: { type: 'string' }, query: { type: 'string' }, topK: { type: 'number' },
+      }, required: ['projectPath', 'query'] },
+      execute: async (args: any) => {
+        const projectPath = String(args?.projectPath ?? '')
+        const query = String(args?.query ?? '')
+        if (projectPath === '' || query === '') return { ok: false, error: 'projectPath 与 query 必填' }
+        return { ok: true, hits: knowledge.search(projectPath, query, Math.min(20, Number(args?.topK) || KNOWLEDGE_LIMITS.topK)) }
+      },
+    })
     register({
       name: 'workbench_team_list',
       description: '读取个人工作台里的智能体团队与成员（含角色、文件权限、是否启用）。写灵感节点前可用它确认团队约定。',

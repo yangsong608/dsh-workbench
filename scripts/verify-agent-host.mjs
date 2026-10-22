@@ -1,7 +1,7 @@
 /**
  * 智能体团队宿主端到端（mock ctx + 临时 SQLite）：node scripts/verify-agent-host.mjs
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -66,6 +66,24 @@ check('工具登记与读取', out !== null && out.ok === true && out.teams.leng
 
 const bad = await call('GET', '/agents/teams/..%2Fetc')
 check('非法 id 拒绝', bad.status === 400)
+
+/* 记忆与知识 */
+const ws = join(dir, 'ws')
+mkdirSync(join(ws, 'docs'), { recursive: true })
+writeFileSync(join(ws, 'docs', 'spec.md'), '# 交付\n交付证据必须与 PPT 一致，禁止自造百分比。')
+const memory = await call('POST', '/agents/memory', { scope: 'project', content: '交付口径必须与 PPT 一致', projectPath: ws, teamId: team.id })
+check('记忆写入/读取', memory.status === 200 && String(memory.body.memory.id).startsWith('mem-'))
+const memories = await call('GET', `/agents/memory?projectPath=${encodeURIComponent(ws)}`)
+check('记忆按项目过滤', memories.body.memories.length >= 1)
+const indexed = await call('POST', '/agents/knowledge/index', { projectPath: ws })
+check('知识索引', indexed.status === 200 && indexed.body.result.docs >= 1)
+const search = await call('GET', `/agents/knowledge/search?projectPath=${encodeURIComponent(ws)}&q=${encodeURIComponent('交付证据')}`)
+check('知识检索命中', search.status === 200 && search.body.hits.length >= 1 && search.body.hits[0].path.includes('spec.md'))
+const injected = await call('POST', '/agents/dispatches', { ideaId: 'idea-2', runId: 'run-2', teamId: team.id, goal: '交付复盘', ideaTitle: '交付证据', ideaBrief: '', workspacePath: ws })
+const kickoff = String(injected.body.kickoff ?? '')
+check('派发自动注入记忆与知识', kickoff.includes('交付口径必须与 PPT 一致') && kickoff.includes('spec.md'))
+const toolNames = ['workbench_memory_search', 'workbench_memory_write', 'workbench_knowledge_search']
+check('记忆/知识工具已注册', toolNames.every(name => tools[name] !== undefined))
 
 rmSync(dir, { recursive: true, force: true })
 console.log(`\n${fail === 0 ? '全部通过' : '存在失败'}：${pass}/${pass + fail}`)
