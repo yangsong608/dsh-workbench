@@ -65,6 +65,8 @@ console.log('[3] kickoff 契约')
     memory: '- 记住：不要编造数据', knowledge: '[1] path/a.md',
   })
   check('包含 ideaId/runId', text.includes('idea-1') && text.includes('run-1'))
+  const withConfig = model.buildTeamKickoff({ team:{name:'T',desc:''}, members:[{...model.defaultMembers()[0], skills:['office'], mcp:['filesystem'], model:'deepseek-chat'}], goal:'g', idea:{title:'t',brief:''}, ideaId:'i', runId:'r', workspacePath:'', timeoutMinutes:15 })
+  check('kickoff 带成员模型/技能/MCP', withConfig.includes('model=deepseek-chat') && withConfig.includes('skills=office') && withConfig.includes('mcp=filesystem'))
   check('包含 7 名成员与权限', seeds.every(m => text.includes(`handle="${m.handle}"`)) && text.includes('fileWrite=write'))
   check('包含写回工具与 final', text.includes('workbench_idea_expand') && text.includes('workbench_idea_progress'))
   check('包含并发与超时约束', text.includes('不超过 3') && text.includes('15 分钟'))

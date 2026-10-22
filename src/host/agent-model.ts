@@ -158,7 +158,14 @@ export interface KickoffInput {
 export function buildTeamKickoff(input: KickoffInput): string {
   const roster = input.members
     .filter(member => member.enabled)
-    .map(member => `- ${member.name}（handle="${member.handle}"，role=${member.role}，fileWrite=${member.fileWrite}）：${member.intro || member.role}`)
+    .map(member => {
+      const extras: string[] = []
+      if (member.model !== '') extras.push(`model=${member.model}`)
+      if (member.skills.length > 0) extras.push(`skills=${member.skills.join('|')}`)
+      if (member.mcp.length > 0) extras.push(`mcp=${member.mcp.join('|')}`)
+      const suffix = extras.length > 0 ? `，${extras.join('，')}` : ''
+      return `- ${member.name}（handle="${member.handle}"，role=${member.role}，fileWrite=${member.fileWrite}${suffix}）：${member.intro || member.role}`
+    })
     .join('\n')
   const lines = [
     `你是「${input.team.name}」的主理人（Lead）。请用 Agent Teams 完成一次灵感发散。`,
