@@ -586,7 +586,14 @@ node scripts/verify-bundle.mjs   # 16 项产物检查
 
 ---
 
-## 十二、变更记录
+## 十二、设计文档（智能体团队）
+
+- [需求与技术分析](docs/agent-team/01-需求与技术分析.md)（PixOffice / WorkBuddy / DSH 原理）
+- [可行性评估](docs/agent-team/02-可行性评估.md)（逐项可行性、Spike、工作量）
+- [产品设计](docs/agent-team/03-产品设计.md)（信息架构、派发协议、记忆与知识、验收）
+- [Spike 结论](docs/agent-team/04-Spike结论.md)
+
+## 十三、变更记录
 
 - **1.9.2（2026-10-23）**
   - kickoff 团队花名册带上成员级 `model / skills / mcp` 配置，主理人创建成员时按此约束（1.10 的成员级配置先行落地）。

@@ -23,7 +23,8 @@
     "cordis.patch.yml",
     "README.md",
     "assets",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "docs"
   ],
   "scripts": {
     "bundle": "pnpm run bundle:host && pnpm run bundle:client",
