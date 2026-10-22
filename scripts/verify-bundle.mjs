@@ -86,6 +86,8 @@ check('灵感含项目与方向切换', client.includes('idea-project-box') && c
 check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
 check('灵感含 5 分钟超时与防重复生成', client.includes('生成超过 5 分钟') && /status\s*!==\s*["']running["']/.test(client))
 check('灵感项目可从门户同步', client.includes('portalProjects') && client.includes('idea-project-sync') && host.includes('saved.created'))
+check('底部悬浮导航已移除', !client.includes('wb-dock') && !client.includes('renderDock') && !client.includes('class="dock"'))
+check('顶栏含灵感模块名', /idea:\s*["']灵感["']/.test(client) && /idea:\s*["']研发["']/.test(client))
 check('旧灵感已移除', !client.includes('productInspiration') && !host.includes('workbench_inspiration_publish') && !client.includes('/products/inspirations'))
 check('无 TODO 占位符', !/TODO|PLACEHOLDER|FIXME/.test(client + host))
 

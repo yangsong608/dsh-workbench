@@ -110,7 +110,7 @@ button{font:inherit;color:inherit}
 .btn-primary{height:29px;padding:0 13px;border:0;border-radius:7px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(91,91,214,.3)}
 .btn-primary:hover{filter:brightness(1.06)}
 .workspace{flex:1;min-height:0;display:flex}
-.content{flex:1;min-width:0;overflow:auto;padding:20px 24px 86px}
+.content{flex:1;min-width:0;overflow:auto;padding:20px 24px 48px}
 .detail{width:318px;flex:0 0 318px;border-left:1px solid var(--line);background:var(--panel);overflow:auto;display:flex;flex-direction:column}
 .detail.hide{display:none}
 /* ---------- shared ---------- */
@@ -344,12 +344,6 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .log{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:11px;color:var(--text-2)}
 .log .lt{color:var(--text-3);font-size:10px;width:74px;flex:0 0 auto;font-variant-numeric:tabular-nums}
 .detail-empty{padding:40px 20px;text-align:center;color:var(--text-3);font-size:11.5px;line-height:1.7}
-/* ---------- dock ---------- */
-.dock{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;display:flex;gap:3px;padding:5px;background:color-mix(in srgb,var(--panel) 86%,transparent);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 34px rgba(16,16,28,.15);backdrop-filter:blur(14px);z-index:40}
-.dock button{width:38px;height:33px;border:0;border-radius:9px;background:transparent;color:var(--text-3);display:grid;place-items:center;cursor:pointer;position:relative}
-.dock button:hover{background:var(--hover);color:var(--text)}
-.dock button.active{background:var(--accent-soft);color:var(--accent-ink)}
-.dock button.active::after{content:"";position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--accent)}
 /* ---------- modal ---------- */
 .overlay{position:fixed;inset:0;background:rgba(15,15,22,.35);display:grid;place-items:center;z-index:100;backdrop-filter:blur(2px)}
 .modal{width:420px;max-height:calc(100vh - 60px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.28);padding:16px}
@@ -431,10 +425,10 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .app.resizing .sidebar{transition:none}
 .app.collapsed .side-resizer{display:none}
 
-/* ---------- DSH 面板内适配（200+300 两栏、dock 避开壳层底部按钮） ---------- */
+/* ---------- DSH 面板内适配（200+300 两栏） ---------- */
 .sidebar{width:var(--wb-side-w,200px);flex:0 0 var(--wb-side-w,200px)}
 .detail{width:300px;flex:0 0 300px}
-.content{padding:18px 20px 80px}
+.content{padding:18px 20px 48px}
 /* 灵感视图：占满内容区，隐藏任务详情栏（灵感自带右栏） */
 .app.idea-mode .detail{display:none}
 .app.idea-mode .content{padding:0;overflow:hidden;position:relative}
@@ -447,16 +441,13 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
   .sidebar{width:var(--wb-side-w,190px);flex-basis:var(--wb-side-w,190px)}
   .detail{width:280px;flex-basis:280px}
   h1.page-title{font-size:26px}
-  .content{padding:16px 16px 78px}
+  .content{padding:16px 16px 44px}
 }
 
-/* dock：贴内容区左下，避开 DSH 壳层底部悬浮按钮与右侧详情/日程栏 */
+/* 侧栏拖拽把手的定位基准 */
 .app{position:relative}
-.dock{position:absolute;left:calc(var(--wb-side-w,200px) + 20px);right:auto;bottom:14px;transform:none}
-.app.collapsed .dock{left:76px}
 .cal-grid{grid-template-columns:52px repeat(7,minmax(84px,1fr));min-width:700px}
 @media (max-width:1250px){
-  .dock{left:206px}
   .cal-grid{min-width:660px}
 }
 

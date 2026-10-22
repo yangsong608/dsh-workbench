@@ -299,7 +299,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let sideWidth = SIDE_DEFAULT
 
   /**
-   * 应用侧栏宽度：写到 .app 的 --wb-side-w 上，由 CSS 驱动侧栏与 dock 的位置。
+   * 应用侧栏宽度：写到 .app 的 --wb-side-w 上，由 CSS 驱动侧栏宽度。
    * persist 为真时写回 settings.sideWidth（一次拖动只在松手时落库一次）。
    */
   function applySideWidth(px: number, persist: boolean): void {
@@ -685,7 +685,6 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     renderTopbar()
     renderContent()
     renderDetail()
-    renderDock()
     syncIdeaView()
   }
   function renderSidebar(): void {
@@ -788,6 +787,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       <div class="side-foot">
         <div class="foot-ring" style="--p:${pct}"><i></i></div>
         <div><b>今日进度</b> · 已完成 <b>${ts.done}</b> 项任务</div>
+        <button class="icon-btn" data-act="settings" title="工作台设置" aria-label="工作台设置" style="margin-left:auto">${ic('settings', 14)}</button>
       </div>`
   }
   function sideGroup(title: string, count: string | null, items: string): string {
@@ -868,8 +868,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /* ---------- 内容 ---------- */
   const FILTER_LABEL: Record<Ui['filter'], string> = { all: '筛选', high: '高优先级', sub: '有子待办', attach: '有附件', unscheduled: '未排时间' }
   const SORT_LABEL: Record<Ui['sort'], string> = { time: '按时间', priority: '按优先级', created: '按创建', title: '按标题' }
-  const MODULE_OF: Record<Ui['view'], string> = { portal: '工作台', board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', test: '测试' }
-  const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试' }
+  const MODULE_OF: Record<Ui['view'], string> = { portal: '工作台', board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', test: '测试', idea: '研发' }
+  const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试', idea: '灵感' }
 
   function renderContent(): void {
     if (ui.view === 'idea') { syncIdeaView(); return }
@@ -4869,14 +4869,6 @@ ${lines}`
     })
   }
 
-  /* ---------- 底部 dock ---------- */
-  function renderDock(): void {
-    const items: Array<[string, string, string]> = [['portal', 'home', '门户'], ['list', 'list', '行动清单'], ['calendar', 'calendar', '日历'], ['board', 'board', '看板'], ['stats', 'chart', '统计'], ['focus', 'target', '专注'], ['news', 'news', '新闻'], ['notes', 'notebook', '记事本'], ['bugs', 'bug', 'Bug 管理'], ['product', 'product', '产品设计'], ['test', 'test', '测试'], ['idea', 'spark', '灵感'], ['settings', 'settings', '设置']]
-    const dock = $id('wb-dock')
-    if (!dock) return
-    dock.innerHTML = items.map(([view, icon, label]) => `<button ${view === 'settings' ? 'data-act="settings"' : `data-view="${view}"`} class="${ui.view === view ? 'active' : ''}" title="${label}" aria-label="${label}">${ic(icon, 17)}</button>`).join('')
-  }
-
   /* ---------- 任务操作 ---------- */
   function createTask(input: { title: string; space?: string; date?: string; start?: string; end?: string; desc?: string; priority?: Priority; projectPath?: string }): void {
     const task: Task = {
@@ -6061,7 +6053,6 @@ const SHELL = `
       <aside class="detail" id="wb-detail"></aside>
     </div>
   </div>
-  <nav class="dock" id="wb-dock"></nav>
 </div>
 <div id="wb-modal"></div>
 <div id="wb-ctxmenu" class="ctxmenu"></div>
