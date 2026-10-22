@@ -347,6 +347,7 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 /* ---------- modal ---------- */
 .overlay{position:fixed;inset:0;background:rgba(15,15,22,.35);display:grid;place-items:center;z-index:100;backdrop-filter:blur(2px)}
 .modal{width:420px;max-height:calc(100vh - 60px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.28);padding:16px}
+.modal.modal-wide{width:auto;min-width:min(680px,calc(100vw - 48px));max-width:calc(100vw - 48px)}
 .modal h3{margin:0 0 12px;font-size:14px}
 .mfield{margin-bottom:9px}
 .mfield label{display:block;font-size:10.5px;color:var(--text-3);margin-bottom:3px}
@@ -908,7 +909,8 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .portal-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .portal-scope{font-size:11px;color:var(--text-3)}
 .portal-scope b{color:var(--text);font-weight:650}
-.portal-sec-head{display:flex;align-items:baseline;gap:8px;margin:16px 0 8px}
+.portal-sec-head{display:flex;align-items:center;gap:8px;margin:16px 0 8px}
+.portal-sec-actions{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:10.5px;color:var(--text-3)}
 .portal-sec-head h2{margin:0;font-size:12.5px;font-weight:650}
 .portal-sec-head span{font-size:10.5px;color:var(--text-3)}
 .portal-projects{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px}
@@ -945,7 +947,7 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .portal-group + .portal-group{margin-top:12px}
 .portal-group-head{display:flex;align-items:baseline;gap:8px;margin:0 0 10px;min-width:0}
 .portal-teams{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
-.team-card{display:flex;flex-direction:column;gap:8px;padding:13px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);cursor:pointer;text-align:left}
+.team-card{display:flex;flex-direction:column;gap:8px;padding:13px 14px;min-height:132px;border:1px solid var(--line);border-radius:12px;background:var(--panel);cursor:pointer;text-align:left}
 .team-card:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));box-shadow:0 8px 22px rgba(16,16,28,.06)}
 .team-card.default{border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}
 .team-card.add{align-items:center;justify-content:center;border-style:dashed;color:var(--text-3);font-size:12px;min-height:130px}
@@ -960,7 +962,18 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .team-members{display:flex;flex-wrap:wrap;gap:4px}
 .team-chip{font-size:10.5px;padding:2px 7px;border-radius:6px;background:var(--panel-2);color:var(--text-2);border:1px solid var(--line)}
 .team-chip.ghost{color:var(--text-3)}
-.agent-modal{width:620px}
+.team-chip.lead{background:color-mix(in srgb,#d97706 14%,transparent);border-color:color-mix(in srgb,#d97706 26%,var(--line));color:#b45309;font-weight:600}
+/* 团队/成员弹窗自包含：不依赖灵感视图的 .idea-modal 样式 */
+.agent-modal{width:660px;max-width:100%;background:transparent;border:0;box-shadow:none;padding:0}
+.agent-modal h3{margin:0 0 10px;font-size:14px}
+.agent-modal .m-field{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+.agent-modal .m-field label{font-size:10.5px;color:var(--text-3)}
+.agent-modal .m-field input,.agent-modal .m-field select,.agent-modal .m-field textarea{height:28px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text);font:inherit;font-size:11.5px;padding:0 7px;outline:0}
+.agent-modal .m-field textarea{height:auto;min-height:58px;padding:6px 7px;resize:vertical}
+.agent-modal .m-field input:focus,.agent-modal .m-field select:focus,.agent-modal .m-field textarea:focus{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.agent-foot{display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.agent-foot .note{font-size:10.5px;color:var(--text-3)}
+.agent-foot .right{display:flex;gap:6px;margin-left:auto}
 .agent-team-meta{font-size:11px;color:var(--text-3);margin:-6px 0 10px}
 .agent-list{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto;margin-bottom:10px}
 .agent-row{display:flex;gap:8px;align-items:flex-start;padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:var(--panel-2)}

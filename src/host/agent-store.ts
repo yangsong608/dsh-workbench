@@ -160,7 +160,7 @@ export class AgentStore {
     const teamId = `at-${randomUUID().slice(0, 8)}`
     const ts = now()
     this.db.prepare('INSERT INTO agent_teams(id, name, desc, is_default, default_workspace, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
-      .run(teamId, '产品研发', '默认研发团队：产品 / 架构 / 前端 / 后端 / 测试 / 评审 + 主理人', 1, '', ts, ts)
+      .run(teamId, '产品研发', '主理人 + 产品 / 架构 / 前端 / 后端 / 测试 / 评审', 1, '', ts, ts)
     const seeds = defaultMembers()
     seeds.forEach((seed, index) => {
       const member = { ...seed, id: `am-${randomUUID().slice(0, 8)}` } as AgentMember
@@ -175,7 +175,8 @@ export class AgentStore {
   /* ------------------------------ 团队 ------------------------------ */
   listTeams(): AnyMap[] {
     const rows = this.db.prepare('SELECT * FROM agent_teams ORDER BY is_default DESC, name').all() as AnyMap[]
-    return rows.map(row => this.teamView(row, false))
+    /* 门户卡片要显示成员 chips，列表也带成员（团队数量很少，成本可接受）。 */
+    return rows.map(row => this.teamView(row, true))
   }
 
   getTeam(id: string): AnyMap | null {

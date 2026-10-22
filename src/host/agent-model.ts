@@ -160,7 +160,7 @@ export function buildTeamKickoff(input: KickoffInput): string {
     .filter(member => member.enabled)
     .map(member => {
       const extras: string[] = []
-      if (member.model !== '') extras.push(`model=${member.model}`)
+      if (member.model !== '') extras.push(`model=${member.provider !== '' ? `${member.provider}/` : ''}${member.model}`)
       if (member.skills.length > 0) extras.push(`skills=${member.skills.join('|')}`)
       if (member.mcp.length > 0) extras.push(`mcp=${member.mcp.join('|')}`)
       const suffix = extras.length > 0 ? `，${extras.join('，')}` : ''

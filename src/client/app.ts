@@ -5046,7 +5046,9 @@ ${lines}`
   function openModal(html: string): void {
     const root = $id('wb-modal')
     if (!root) return
-    root.innerHTML = `<div class="overlay" data-act="overlay"><div class="modal" data-stop="1">${html}</div></div>`
+    /* 灵感/团队弹窗需要更宽的容器；420px 的默认宽度会把双列表单挤坏。 */
+    const wide = /class="(?:idea|agent)-modal/.test(html)
+    root.innerHTML = `<div class="overlay" data-act="overlay"><div class="modal${wide ? ' modal-wide' : ''}" data-stop="1">${html}</div></div>`
     const first = root.querySelector<HTMLInputElement>('input, textarea, select')
     first?.focus()
   }

@@ -160,7 +160,8 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
         if (!ID.test(b)) { fail(res, 400, 'member_id_invalid'); return true }
         if (method === 'PATCH' || method === 'PUT') {
           const body = await readJson(req)
-          const saved = store.saveMember({ ...body, id: b })
+          /* 客户端两种写法都接受：{member:{…}} 或直接字段。 */
+          const saved = store.saveMember({ ...(body?.member ?? body ?? {}), id: b })
           if (saved.member === null) { send(res, 400, { ok: false, error: '成员校验失败', issues: saved.issues }); return true }
           send(res, 200, { ok: true, member: saved.member }); return true
         }

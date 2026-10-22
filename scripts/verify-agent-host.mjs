@@ -44,6 +44,11 @@ const created = await call('POST', '/agents/members', { member: { name: '合规'
 check('新建成员', created.status === 200 && created.body.member.id.startsWith('am-'))
 const added = await call('POST', `/agents/teams/${team.id}/members`, { memberId: created.body.member.id })
 check('成员加入团队', added.body.team.memberCount === 8)
+const edited = await call('PATCH', `/agents/members/${created.body.member.id}`, { member: { name: '合规', intro: '合规审查（改）', fileWrite: 'read', tools: ['write'], skills: ['office'], mcp: ['filesystem'], concurrency: 2, provider: 'deepseek-official', model: 'deepseek-chat' } })
+check('编辑成员兼容 {member} 包装', edited.status === 200 && edited.body.member.intro === '合规审查（改）')
+check('成员配置参数落库', edited.body.member.tools[0] === 'write' && edited.body.member.skills[0] === 'office' && edited.body.member.mcp[0] === 'filesystem' && edited.body.member.concurrency === 2 && edited.body.member.provider === 'deepseek-official')
+const listed = await call('GET', '/agents/teams')
+check('团队列表带成员（门户卡片用）', Array.isArray(listed.body.teams[0].members) && listed.body.teams[0].members.length === 8)
 
 const dispatch = await call('POST', '/agents/dispatches', { ideaId: 'idea-1', runId: 'run-1', teamId: team.id, goal: '发散', ideaTitle: 'AI 陪练', ideaBrief: '语音', workspacePath: '/tmp/ws' })
 check('派发创建 + kickoff', dispatch.status === 200 && String(dispatch.body.kickoff).includes('spawn_teammate'))
