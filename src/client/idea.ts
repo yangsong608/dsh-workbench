@@ -84,6 +84,10 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   let busy = ''
   let form: FormState | null = null
   let direction: 'right' | 'side' | 'down' | 'left' = 'right'
+  let menuNode = ''
+  let diffState: { a: string; b: string } | null = null
+  let askResolve: ((value: string | null) => void) | null = null
+  let askValue = ''
 
   /* ------------------------------ 引擎 ------------------------------ */
   let mind: any = null
@@ -146,7 +150,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     rootNode.addEventListener('keydown', onKeydown, true)
     resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onResize()) : null
     const target = plot()
-    if (target) resizeObserver?.observe(target)
+    if (target) {
+      resizeObserver?.observe(target)
+      target.addEventListener('contextmenu', onPlotContext)
+      target.addEventListener('dblclick', onPlotDblClick, true)
+    }
   }
 
   /* ------------------------------ 载入 ------------------------------ */
@@ -447,8 +455,12 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         <div class="idea-quick"><textarea id="idea-quick-text" rows="2" placeholder="补充一句想法（Ctrl/⌘+Enter 添加）"></textarea><button class="btn tiny" data-idea-act="idea-quick-text">＋ 添加文字</button></div>
         ${inputs.filter(i => i.kind === 'text').length > 0 ? `<div style="margin-top:6px;display:flex;flex-direction:column;gap:3px">${inputs.filter(i => i.kind === 'text').slice(-3).map(i => `<span style="font-size:10.5px;color:var(--text-3)">· ${deps.esc(i.text)}</span>`).join('')}</div>` : ''}
       </div>`)
-      body.push(`<div class="idea-sec"><h4>发散角度</h4><div class="idea-angles">${IDEA_ANGLES.map(a => `<button class="${anglesOfCurrent().includes(a.id) ? 'on' : ''}" data-idea-act="idea-angle" data-id="${a.id}" title="${deps.esc(a.hint)}">${a.label}</button>`).join('')}
-        <button class="${anglesOfCurrent().includes('cross') ? 'on' : ''}" data-idea-act="idea-angle" data-id="cross">跨界类比</button></div></div>`)
+      body.push(`<div class="idea-sec"><h4>发散角度<span class="right">点选下次生效</span></h4><div class="idea-angles">
+        ${IDEA_ANGLES.map(a => `<button class="${anglesOfCurrent().includes(a.id) ? 'on' : ''}" data-idea-act="idea-angle" data-id="${a.id}" title="${deps.esc(a.hint)}">${a.label}</button>`).join('')}
+        <button class="${anglesOfCurrent().includes('cross') ? 'on' : ''}" data-idea-act="idea-angle" data-id="cross">跨界类比</button>
+        ${customAngles().map(a => `<button class="${anglesOfCurrent().includes(a.id) ? 'on' : ''}" data-idea-act="idea-angle" data-id="${a.id}" title="自定义角度"><span style="color:${angleColorFor(a.id)}">◆</span> ${deps.esc(a.label)} <span data-idea-act="idea-angle-del" data-id="${a.id}" title="删除这个角度" style="opacity:.55;padding:0 2px">×</span></button>`).join('')}
+        <button data-idea-act="idea-angle-add">＋ 自定义</button>
+      </div></div>`)
       body.push(`<div class="idea-sec"><h4>操作</h4><div class="idea-actions">
         <button class="btn tiny" data-idea-act="idea-generate">✦ 重新发散</button>
         <button class="btn tiny" data-idea-act="idea-archive">存档版本</button>
@@ -488,7 +500,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   function versionList(versions: IdeaVersion[]): string {
     if (versions.length === 0) return `<div class="idea-sec"><h4>版本</h4><div style="font-size:11px;color:var(--text-3)">生成或存档后会在这里出现版本</div></div>`
-    return `<div class="idea-sec"><h4>版本<span class="right">${versions.length} 个</span></h4><div class="idea-vers">
+    return `<div class="idea-sec"><h4>版本<span class="right">${versions.length} 个${versions.length >= 2 ? ' · <button class="btn tiny" data-idea-act="idea-diff">对比</button>' : ''}</span></h4><div class="idea-vers">
       ${versions.slice(0, 12).map(version => `<div class="idea-ver${preview?.version.id === version.id ? ' on' : ''}" data-idea-act="idea-version" data-id="${version.id}">
         <span class="tag ${version.source === 'ai' ? 'ai' : ''}">${version.source === 'ai' ? 'AI' : version.source === 'manual' ? '手动' : '恢复'}</span>
         <span class="t">${deps.esc(version.label || `v${version.seq}`)}</span>
@@ -504,8 +516,23 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     return form?.angles ?? anglePref
   }
 
+  function customAngles(): Array<{ id: string; label: string }> {
+    return Array.isArray(detail?.idea?.customAngles) ? detail!.idea.customAngles : []
+  }
+
   function angleLabel(id: string): string {
-    return IDEA_ANGLES.find(a => a.id === id)?.label ?? (id === 'cross' ? '跨界类比' : id)
+    return IDEA_ANGLES.find(a => a.id === id)?.label
+      ?? (id === 'cross' ? '跨界类比' : customAngles().find(a => a.id === id)?.label ?? id)
+  }
+
+  function angleColorFor(id: string): string {
+    const colors: Record<string, string> = { users: '#2563eb', pain: '#0f9f6e', form: '#c27c0e', tech: '#7c3aed', biz: '#db2777', risk: '#0891b2' }
+    if (colors[id] !== undefined) return colors[id]
+    if (id === 'cross' || id === '') return '#8b8b98'
+    const palette = ['#2563eb', '#0f9f6e', '#c27c0e', '#7c3aed', '#db2777', '#0891b2']
+    let hash = 0
+    for (const ch of id) hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0
+    return palette[hash % palette.length]
   }
 
   /* ------------------------------ 画布 ------------------------------ */
@@ -690,6 +717,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
 
   function disposeEngines(): void {
+    closeNodeMenu()
     if (mind !== null) { try { mind.destroy() } catch { /* ignore */ } mind = null }
     if (chart !== null) { try { chart.dispose() } catch { /* ignore */ } chart = null }
     const target = plot()
@@ -855,18 +883,53 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   async function showDiff(): Promise<void> {
     if (detail === null || detail.versions.length < 2) { deps.toast('至少需要两个版本才能对比'); return }
-    const [latest, previous] = detail.versions
-    const res = await api(`/ideas/${selectedId}/versions/${previous.id}/diff/${latest.id}`)
-    if (!res.ok) { deps.toast('对比失败'); return }
+    diffState = { a: detail.versions[1].id, b: detail.versions[0].id }
+    const options = (selected: string): string => detail!.versions.slice(0, 20)
+      .map(v => `<option value="${v.id}"${v.id === selected ? ' selected' : ''}>v${v.seq} · ${deps.esc(v.label || '未命名')}${v.source === 'ai' ? '（AI）' : ''}</option>`).join('')
+    deps.openModal(`<div class="idea-modal" style="width:620px"><h3>版本对比</h3>
+      <div class="idea-diff-pick">
+        <label>A（基准）<select id="idea-diff-a" data-idea-input="diff-a">${options(diffState.a)}</select></label>
+        <button class="btn tiny" data-idea-act="idea-diff-swap" title="交换">⇄</button>
+        <label>B（对比）<select id="idea-diff-b" data-idea-input="diff-b">${options(diffState.b)}</select></label>
+      </div>
+      <div id="idea-diff-body" class="idea-diff"><div style="color:var(--text-3);font-size:11px">对比中…</div></div>
+      <div class="idea-modal-foot"><span class="note">对比基于不可变版本，不包含当前草稿</span><div class="right">
+        <button class="btn" data-idea-act="idea-close-modal">关闭</button>
+        <button class="btn" data-idea-act="idea-diff-rollback">回滚到 A</button>
+      </div></div></div>`)
+    await renderDiffBody()
+  }
+
+  function diffList(title: string, cls: string, items: Array<{ label: string }>, render?: (item: any) => string): string {
+    if (items.length === 0) return `<div class="idea-diff-sec"><h5>${title}</h5><div class="empty">无</div></div>`
+    return `<div class="idea-diff-sec"><h5 class="${cls}">${title}（${items.length}）</h5><ul>${items.map(item => `<li>${render ? render(item) : deps.esc(item.label)}</li>`).join('')}</ul></div>`
+  }
+
+  async function renderDiffBody(): Promise<void> {
+    const body = q('idea-diff-body')
+    if (body === null || diffState === null || detail === null) return
+    const versionOf = (id: string): IdeaVersion | undefined => detail!.versions.find(v => v.id === id)
+    const a = versionOf(diffState.a)
+    const b = versionOf(diffState.b)
+    if (a === undefined || b === undefined) { body.innerHTML = '<div class="empty">版本不存在</div>'; return }
+    if (a.id === b.id) { body.innerHTML = '<div class="empty">A 与 B 是同一个版本</div>'; return }
+    body.innerHTML = '<div style="color:var(--text-3);font-size:11px">对比中…</div>'
+    const res = await api(`/ideas/${selectedId}/versions/${a.id}/diff/${b.id}`)
+    if (!res.ok) { body.innerHTML = `<div class="empty">对比失败：${deps.esc(res.body?.message ?? res.status)}</div>`; return }
     const diff = res.body.diff
-    const list = (items: Array<{ label: string }>, cls: string): string => items.length === 0 ? '' : `<h5 class="${cls}">${items.length} 条</h5><ul>${items.map(i => `<li>${deps.esc(i.label)}</li>`).join('')}</ul>`
-    deps.openModal(`<div class="idea-modal"><h3>版本对比</h3><div class="idea-diff">
-      <div>v${latest.seq} vs v${previous.seq} · 节点 ${latest.nodeCount} / ${previous.nodeCount}</div>
-      <div><h5 class="add">新增节点</h5>${list(diff.added, 'add') || '<div style="color:var(--text-3);font-size:11px">无</div>'}</div>
-      <div><h5 class="del">删除节点</h5>${list(diff.removed, 'del') || '<div style="color:var(--text-3);font-size:11px">无</div>'}</div>
-      <div><h5>改文案</h5>${diff.changed.length === 0 ? '<div style="color:var(--text-3);font-size:11px">无</div>' : `<ul>${diff.changed.map((c: any) => `<li>${deps.esc(c.before)} → ${deps.esc(c.after)}</li>`).join('')}</ul>`}</div>
-      <div style="color:var(--text-3);font-size:11px">边：+${diff.addedEdges} / -${diff.removedEdges}</div>
-    </div><div class="idea-modal-foot"><span class="note"></span><div class="right"><button class="btn" data-idea-act="idea-close-modal">关闭</button></div></div></div>`)
+    body.innerHTML = `
+      <div class="idea-diff-sum">
+        <span>v${a.seq} → v${b.seq}</span>
+        <span class="add">+${diff.added.length}</span>
+        <span class="del">-${diff.removed.length}</span>
+        <span>改 ${diff.changed.length}</span>
+        <span>边 +${diff.addedEdges} / -${diff.removedEdges}</span>
+        <span style="margin-left:auto;color:var(--text-3)">节点 ${a.nodeCount} → ${b.nodeCount}</span>
+      </div>
+      ${diffList('新增节点', 'add', diff.added)}
+      ${diffList('删除节点', 'del', diff.removed)}
+      ${diffList('文案修改', '', diff.changed, (item: any) => `${deps.esc(item.before)} <span style="color:var(--text-3)">→</span> ${deps.esc(item.after)}`)}
+      ${diff.added.length + diff.removed.length + diff.changed.length + diff.addedEdges + diff.removedEdges === 0 ? '<div class="empty">两个版本没有差异</div>' : ''}`
   }
 
   /* ------------------------------ 导出 ------------------------------ */
@@ -1087,6 +1150,63 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
 
   /* ------------------------------ 节点操作 ------------------------------ */
+  /** 应用内输入弹窗：Electron 不支持 window.prompt，所有文案输入都走这里。 */
+  function askText(title: string, initial = '', placeholder = ''): Promise<string | null> {
+    askResolve?.(null)
+    askValue = initial
+    return new Promise(resolve => {
+      askResolve = resolve
+      deps.openModal(`<div class="idea-modal"><h3>${deps.esc(title)}</h3>
+        <div class="m-field"><input type="text" id="idea-ask-input" data-idea-input="ask" maxlength="120" value="${deps.esc(initial)}" placeholder="${deps.esc(placeholder)}"></div>
+        <div class="idea-modal-foot"><span class="note">Enter 确定 · Esc 取消</span><div class="right">
+          <button class="btn" data-idea-act="idea-ask-cancel">取消</button>
+          <button class="btn-primary" data-idea-act="idea-ask-ok">确定</button>
+        </div></div></div>`)
+      window.setTimeout(() => q<HTMLInputElement>('idea-ask-input')?.focus(), 0)
+    })
+  }
+
+  function finishAsk(value: string | null): void {
+    const resolve = askResolve
+    askResolve = null
+    deps.closeModal()
+    resolve?.(value)
+  }
+
+  function slugifyAngle(label: string): string {
+    const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    return base !== '' && /^[a-z]/.test(base) ? base.slice(0, 20) : `a-${Math.random().toString(36).slice(2, 7)}`
+  }
+
+  async function addCustomAngle(): Promise<void> {
+    if (selectedId === '' || detail === null) return
+    const input = await askText('自定义角度名称', '', '≤12 字，例如：合规、硬件形态')
+    if (input === null) return
+    const label = input.trim().slice(0, 12)
+    if (label === '') return
+    if (customAngles().some(a => a.label === label)) { deps.toast('这个角度已经存在'); return }
+    if (customAngles().length >= 6) { deps.toast('自定义角度最多 6 个'); return }
+    const id = slugifyAngle(label)
+    const next = customAngles().concat([{ id, label }]).map(a => ({ id: a.id, label: a.label }))
+    const res = await api(`/ideas/${selectedId}`, { method: 'PATCH', body: { customAngles: next } })
+    if (!res.ok) { deps.toast(`添加失败：${res.body?.message ?? res.status}`); return }
+    anglePref.push(id)
+    await reloadDetail()
+    renderDetail()
+    deps.toast(`已添加角度「${label}」`)
+  }
+
+  async function deleteCustomAngle(id: string): Promise<void> {
+    if (selectedId === '' || detail === null) return
+    const next = customAngles().filter(a => a.id !== id)
+    const res = await api(`/ideas/${selectedId}`, { method: 'PATCH', body: { customAngles: next } })
+    if (!res.ok) { deps.toast('删除失败'); return }
+    const index = anglePref.indexOf(id)
+    if (index >= 0) anglePref.splice(index, 1)
+    await reloadDetail()
+    renderDetail()
+  }
+
   async function setNodeStatus(status: 'kept' | 'dropped' | 'pending'): Promise<void> {
     const node = nodeById(draft.graph, selectedNode)
     if (!node) return
@@ -1125,10 +1245,105 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     await persistGraph()
   }
 
-  function editNodeLabel(): void {
+  function nodeChildren(id: string): string[] {
+    return draft.graph.edges.filter(e => e.kind === 'tree' && e.from === id).map(e => e.to)
+  }
+
+  function collectSubtree(id: string): Set<string> {
+    const drop = new Set<string>([id])
+    const stack = [...nodeChildren(id)]
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      if (drop.has(current)) continue
+      drop.add(current)
+      stack.push(...nodeChildren(current))
+    }
+    return drop
+  }
+
+  async function addSiblingNode(): Promise<void> {
+    const node = nodeById(draft.graph, selectedNode)
+    if (!node) { void addChildNode(); return }
+    if (node.id === draft.graph.rootId) { deps.toast('根节点没有同级'); return }
+    const parentId = node.parentId ?? draft.graph.rootId
+    const label = await askText('新增同级节点', '', '一句话点子（≤24 字）')
+    if (label === null || label.trim() === '') return
+    const id = `m-${Math.random().toString(36).slice(2, 8)}`
+    const index = draft.graph.nodes.findIndex(n => n.id === node.id)
+    const next = draft.graph.nodes.slice()
+    next.splice(index + 1, 0, { id, type: node.type, label: label.trim().slice(0, 24), parentId, depth: node.depth, angle: node.angle, status: 'kept' })
+    draft.graph = { ...draft.graph, nodes: next, edges: draft.graph.edges.concat([{ from: parentId, to: id, kind: 'tree' }]) }
+    selectedNode = id
+    renderAll()
+    void persistGraph()
+  }
+
+  function openNodeMenu(x: number, y: number, id: string): void {
+    const target = plot()
+    if (target === null) return
+    closeNodeMenu()
+    menuNode = id
+    const node = nodeById(draft.graph, id)
+    const isRoot = id === draft.graph.rootId
+    const menu = document.createElement('div')
+    menu.className = 'idea-menu'
+    const maxX = Math.max(4, (target.clientWidth || 600) - 190)
+    const maxY = Math.max(4, (target.clientHeight || 500) - 260)
+    menu.style.left = `${Math.min(Math.max(4, x), maxX)}px`
+    menu.style.top = `${Math.min(Math.max(4, y), maxY)}px`
+    menu.innerHTML = `
+      <button data-idea-act="idea-node-edit">✎ 修改文案</button>
+      <button data-idea-act="idea-node-add">＋ 新增子节点</button>
+      ${isRoot ? '' : '<button data-idea-act="idea-node-sibling">＋ 新增同级</button>'}
+      <button data-idea-act="idea-continue">✦ 发散思维</button>
+      <div class="sep"></div>
+      <button data-idea-act="idea-node-status" data-status="kept">✓ 采纳</button>
+      <button data-idea-act="idea-node-status" data-status="dropped">✕ 放弃</button>
+      ${isRoot ? '' : '<div class="sep"></div><button class="danger" data-idea-act="idea-node-delete">🗑 删除该节点</button>'}
+      <div class="hint">${deps.esc(node?.label ?? '')}</div>`
+    target.appendChild(menu)
+  }
+
+  function closeNodeMenu(): void {
+    menuNode = ''
+    const target = plot()
+    if (target === null) return
+    target.querySelectorAll('.idea-menu').forEach(node => node.remove())
+  }
+
+  function onPlotContext(event: Event): void {
+    if (view !== 'tree' || preview !== null) return
+    const e = event as MouseEvent
+    const target = e.target as HTMLElement | null
+    const nodeEl = target?.closest('[data-nodeid]') as HTMLElement | null
+    e.preventDefault()
+    if (nodeEl === null) { closeNodeMenu(); return }
+    const id = nodeEl.getAttribute('data-nodeid') ?? ''
+    if (id === '') return
+    selectedNode = id
+    renderDetail()
+    const rect = plot()?.getBoundingClientRect()
+    openNodeMenu(e.clientX - (rect?.left ?? 0), e.clientY - (rect?.top ?? 0), id)
+  }
+
+  function onPlotDblClick(event: Event): void {
+    if (view !== 'tree' || preview !== null) return
+    const target = event.target as HTMLElement | null
+    const nodeEl = target?.closest('[data-nodeid]') as HTMLElement | null
+    if (nodeEl === null) return
+    event.preventDefault()
+    event.stopPropagation()
+    const id = nodeEl.getAttribute('data-nodeid') ?? ''
+    if (id === '') return
+    selectedNode = id
+    renderDetail()
+    void editNodeLabel()
+  }
+
+  async function editNodeLabel(): Promise<void> {
     const node = nodeById(draft.graph, selectedNode)
     if (!node) return
-    const next = window.prompt('节点文案（≤24 字）', node.label)
+    const next = await askText('修改节点文案', node.label, '≤24 字')
     if (next === null) return
     node.label = next.trim().slice(0, 24) || node.label
     renderDetail()
@@ -1136,10 +1351,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     void persistGraph()
   }
 
-  function addChildNode(): void {
+  async function addChildNode(): Promise<void> {
     const parent = nodeById(draft.graph, selectedNode) ?? nodeById(draft.graph, draft.graph.rootId)
     if (!parent) return
-    const label = window.prompt('新节点文案（≤24 字）', '')
+    if ((parent.depth ?? 0) + 1 > 4) { deps.toast('已经到第 4 层，不能再往下加了'); return }
+    const label = await askText('新增子节点', '', '一句话点子（≤24 字）')
     if (label === null || label.trim() === '') return
     const id = `m-${Math.random().toString(36).slice(2, 8)}`
     const depth = (parent.depth ?? 0) + 1
@@ -1155,6 +1371,17 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   /* ------------------------------ 事件 ------------------------------ */
   function onClick(event: Event): void {
     const target = event.target as HTMLElement | null
+    const appAct = target?.closest('[data-act]') as HTMLElement | null
+    if (askResolve !== null && appAct !== null) {
+      const act = appAct.getAttribute('data-act')
+      if (act === 'overlay' || act === 'close-modal') {
+        event.preventDefault()
+        event.stopPropagation()
+        finishAsk(null)
+        return
+      }
+    }
+    if (menuNode !== '' && (target?.closest('.idea-menu') === null)) closeNodeMenu()
     const el = target?.closest('[data-idea-act]') as HTMLElement | null
     if (el === null) return
     const act = el.getAttribute('data-idea-act') ?? ''
@@ -1196,16 +1423,39 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-export-workspace': void exportWorkspace(); break
       case 'idea-archive': void archive(); break
       case 'idea-generate': void generate('diverge'); break
-      case 'idea-continue': void generate('continue', selectedNode); break
+      case 'idea-continue': closeNodeMenu(); void generate('continue', selectedNode); break
       case 'idea-stop': void stopRun(); break
       case 'idea-angle': void toggleAngle(el.getAttribute('data-id') ?? ''); break
-      case 'idea-node-status': void setNodeStatus((el.getAttribute('data-status') as 'kept' | 'dropped') ?? 'kept'); break
-      case 'idea-node-delete': void deleteNode(); break
-      case 'idea-node-edit': editNodeLabel(); break
-      case 'idea-node-add': addChildNode(); break
+      case 'idea-angle-add': void addCustomAngle(); break
+      case 'idea-angle-del': void deleteCustomAngle(el.getAttribute('data-id') ?? ''); break
+      case 'idea-node-status': closeNodeMenu(); void setNodeStatus((el.getAttribute('data-status') as 'kept' | 'dropped') ?? 'kept'); break
+      case 'idea-node-delete': closeNodeMenu(); void deleteNode(); break
+      case 'idea-node-edit': closeNodeMenu(); void editNodeLabel(); break
+      case 'idea-node-add': closeNodeMenu(); void addChildNode(); break
+      case 'idea-node-sibling': closeNodeMenu(); void addSiblingNode(); break
       case 'idea-version': void previewVersion(el.getAttribute('data-id') ?? ''); break
       case 'idea-version-back': preview = null; renderBar(); renderSub(); renderDetail(); renderPlot(); break
       case 'idea-diff': void showDiff(); break
+      case 'idea-diff-swap':
+        if (diffState !== null) {
+          const tmp = diffState.a
+          diffState.a = diffState.b
+          diffState.b = tmp
+          const aSel = q<HTMLSelectElement>('idea-diff-a')
+          const bSel = q<HTMLSelectElement>('idea-diff-b')
+          if (aSel) aSel.value = diffState.a
+          if (bSel) bSel.value = diffState.b
+          void renderDiffBody()
+        }
+        break
+      case 'idea-diff-rollback':
+        if (diffState !== null) {
+          deps.closeModal()
+          void rollback(diffState.a)
+        }
+        break
+      case 'idea-ask-ok': finishAsk(askValue.trim()); break
+      case 'idea-ask-cancel': finishAsk(null); break
       case 'idea-close-modal': deps.closeModal(); break
       case 'idea-modal-pick': q<HTMLInputElement>('idea-form-file')?.click(); break
       case 'idea-modal-url-add': addUrlFromForm(); break
@@ -1231,6 +1481,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       return
     }
     if (form === null) return
+    if (key === 'ask') { askValue = target.value; return }
     if (key === 'form-title') form.title = target.value.slice(0, 60)
     if (key === 'form-brief') form.brief = target.value
     if (key === 'form-text') form.text = target.value
@@ -1240,17 +1491,31 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   function onChange(event: Event): void {
     const target = event.target as HTMLSelectElement | null
     if (target === null) return
-    if (target.getAttribute('data-idea-input') === 'project') {
+    const key = target.getAttribute('data-idea-input')
+    if (key === 'project') {
       projectFilter = target.value
       void loadIdeas().then(() => renderAll())
+      return
+    }
+    if ((key === 'diff-a' || key === 'diff-b') && diffState !== null) {
+      if (key === 'diff-a') diffState.a = target.value
+      else diffState.b = target.value
+      void renderDiffBody()
     }
   }
 
   function onKeydown(event: Event): void {
     const key = (event as KeyboardEvent).key
     if (key === 'Escape') {
+      if (askResolve !== null) { finishAsk(null); return }
+      if (menuNode !== '') { closeNodeMenu(); return }
       if (form !== null) { form = null; deps.closeModal() }
       else if (preview !== null) { preview = null; renderAll() }
+    }
+    if (key === 'Enter' && (event.target as HTMLElement | null)?.id === 'idea-ask-input') {
+      event.preventDefault()
+      finishAsk(askValue.trim())
+      return
     }
     if (key === 'Enter' && ((event as KeyboardEvent).metaKey || (event as KeyboardEvent).ctrlKey) && (event.target as HTMLElement | null)?.id === 'idea-quick-text') {
       event.preventDefault()

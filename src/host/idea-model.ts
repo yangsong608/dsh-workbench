@@ -26,6 +26,32 @@ export const IDEA_LIMITS = {
 }
 
 export const NODE_TYPES = ['seed', 'direction', 'idea', 'question', 'risk'] as const
+/** 角度 id：内置 6 个 + cross，自定义也走同一 slug 形态，便于写进节点与提示词。 */
+export const ANGLE_PATTERN = /^[a-z][a-z0-9_-]{1,23}$/
+export const CUSTOM_ANGLE_LIMIT = 6
+export const CUSTOM_ANGLE_LABEL_LIMIT = 12
+
+export interface CustomAngle { id: string; label: string }
+
+/** 把用户输入的角度名规范成 {id,label}：id 由 label 转 slug，重名去重，最多 6 个。 */
+export function sanitizeCustomAngles(raw: unknown, existing: CustomAngle[] = []): { angles: CustomAngle[]; issues: GraphIssue[] } {
+  const issues: GraphIssue[] = []
+  const out: CustomAngle[] = []
+  const seen = new Set(existing.map(a => a.id))
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const label = clampText(typeof item === 'string' ? item : (item as any)?.label, CUSTOM_ANGLE_LABEL_LIMIT)
+    if (label === '') continue
+    const wantedId = typeof item === 'object' && item !== null && typeof (item as any).id === 'string'
+      ? String((item as any).id).toLowerCase()
+      : label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    const id = ANGLE_PATTERN.test(wantedId) ? wantedId : `a-${createHash('sha1').update(label).digest('hex').slice(0, 6)}`
+    if (seen.has(id)) { issues.push({ code: 'ANGLE_DUP', message: `角度重复：${label}`, id }); continue }
+    if (out.length >= CUSTOM_ANGLE_LIMIT) { issues.push({ code: 'ANGLE_LIMIT', message: `自定义角度最多 ${CUSTOM_ANGLE_LIMIT} 个` }); break }
+    seen.add(id)
+    out.push({ id, label })
+  }
+  return { angles: out, issues }
+}
 export type IdeaNodeType = (typeof NODE_TYPES)[number]
 export type IdeaNodeStatus = 'kept' | 'dropped' | 'pending'
 export type IdeaEdgeKind = 'tree' | 'relate'
@@ -152,7 +178,7 @@ export function normalizeGraph(raw: unknown, options: { title?: string } = {}): 
       label,
       detail: clampText(node.detail, IDEA_LIMITS.detail, true),
       parentId: typeof node.parentId === 'string' && node.parentId !== '' ? clampText(node.parentId, 64) : null,
-      angle: ANGLE_IDS.includes(clampText(node.angle, 24)) ? clampText(node.angle, 24) : undefined,
+      angle: ANGLE_PATTERN.test(clampText(node.angle, 24)) ? clampText(node.angle, 24) : undefined,
       status,
       tags: tags.length > 0 ? tags : undefined,
     }

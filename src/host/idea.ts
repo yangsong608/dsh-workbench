@@ -10,8 +10,8 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { IdeaStore } from './idea-store.js'
 import {
-  IDEA_ANGLES, IDEA_LIMITS, clampText, diffGraphs, graphBytes,
-  inputDigest, mergeGraph, normalizeGraph, pushRunLog, type IdeaGraph,
+  IDEA_ANGLES, IDEA_LIMITS, clampText, diffGraphs, graphBytes, sanitizeCustomAngles,
+  inputDigest, mergeGraph, normalizeGraph, pushRunLog, type CustomAngle, type IdeaGraph,
 } from './idea-model.js'
 
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -107,8 +107,10 @@ function decodeDataUrl(dataUrl: unknown): { mime: string; buffer: Buffer } | nul
   return { mime, buffer }
 }
 
-function angleLine(): string {
-  return IDEA_ANGLES.map((a, i) => `${i + 1}. ${a.label}（angle="${a.id}"）：${a.hint}`).join('\n')
+function angleLine(custom: CustomAngle[] = []): string {
+  const base = IDEA_ANGLES.map((a, i) => `${i + 1}. ${a.label}（angle="${a.id}"）：${a.hint}`)
+  const extra = custom.map((a, i) => `${base.length + i + 1}. ${a.label}（angle="${a.id}"）：用户自定义角度，按这个方向发散`)
+  return base.concat(extra).join('\n')
 }
 
 /** 生成提示词：唯一交付契约写死在这里，客户端只负责派发。 */
@@ -120,6 +122,7 @@ export function buildIdeaPrompt(input: {
   brief: string
   inputs: Array<{ kind: string; text?: string; url?: string; filePath?: string }>
   angles: string[]
+  customAngles?: CustomAngle[]
   targetNodeId?: string
   targetLabel?: string
 }): string {
@@ -128,9 +131,11 @@ export function buildIdeaPrompt(input: {
     if (item.kind === 'url' && item.url) return `- 链接：${item.url}（可尝试抓取摘要；失败就跳过）`
     return `- 文字：${clampText(item.text, 1200)}`
   })
-  const angleText = input.angles.length > 0
-    ? input.angles.map(id => IDEA_ANGLES.find(a => a.id === id)?.label ?? id).join(' / ')
-    : '全部'
+  const custom = input.customAngles ?? []
+  const labelOf = (id: string): string => IDEA_ANGLES.find(a => a.id === id)?.label
+    ?? custom.find(a => a.id === id)?.label
+    ?? id
+  const angleText = input.angles.length > 0 ? input.angles.map(labelOf).join(' / ') : '全部'
   const head = input.mode === 'continue'
     ? `沿着「${input.targetLabel ?? input.targetNodeId}」这个方向继续发散，只扩这一支，不要重做整张图。`
     : '从 6 个方向把这件事发散开，最后形成一张可继续生长的图。'
@@ -145,7 +150,7 @@ ${lines.length > 0 ? `- 输入：\n${lines.join('\n')}` : ''}
 ${head}
 本次角度：${angleText}。
 可用维度：
-${angleLine()}
+${angleLine(custom)}
 
 ## 硬性要求
 1. 只允许通过工具 **workbench_idea_expand** 交付，参数必须包含 ideaId="${input.ideaId}" 与 runId="${input.runId}"；不要输出长篇正文。
@@ -215,7 +220,10 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           }
           if (method === 'POST') {
             const body = await readJson(req)
-            const idea = store.createIdea(body ?? {})
+            const idea = store.createIdea({
+              ...(body ?? {}),
+              customAngles: sanitizeCustomAngles((body ?? {}).customAngles).angles,
+            })
             send(res, 200, { ok: true, idea }); return true
           }
           fail(res, 405, 'method_not_allowed'); return true
@@ -249,7 +257,12 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           }
           if (method === 'PATCH' || method === 'PUT') {
             const body = await readJson(req)
-            send(res, 200, { ok: true, idea: store.updateIdea(ideaId, body ?? {}) }); return true
+            const patch = { ...(body ?? {}) }
+            if (body?.customAngles !== undefined) {
+              const sanitized = sanitizeCustomAngles(body.customAngles)
+              patch.customAngles = sanitized.angles
+            }
+            send(res, 200, { ok: true, idea: store.updateIdea(ideaId, patch) }); return true
           }
           if (method === 'DELETE') {
             store.deleteIdea(ideaId)
@@ -411,7 +424,7 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
               ideaId, runId: String(run.id), mode,
               title: String(idea.title), brief: String(idea.brief),
               inputs: store.listInputs(ideaId),
-              angles, targetNodeId: targetNodeId || undefined, targetLabel: target?.label,
+              angles, customAngles: Array.isArray(idea.customAngles) ? idea.customAngles : [], targetNodeId: targetNodeId || undefined, targetLabel: target?.label,
             })
             const project = store.listProjects().find((p: any) => p.id === idea.projectId)
             send(res, 200, {
@@ -522,7 +535,7 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
             versionId = finished?.versionId ?? undefined
             if (issues.length > 0) store.updateRun(runId, { log: pushRunLog(store.getRun(runId)?.log, issues.map(i => `${i.code}：${i.message}`).join('；')) })
           }
-          return { ok: true, added: patch.graph.nodes.length - 1, nodes: merged.graph.nodes.length, rev: saved.rev, versionId, issues }
+          return { ok: true, added: patch.graph.nodes.length - 1, nodes: merged.graph.nodes.length, rev: saved.rev, versionId: versionId ?? null, issues }
         } catch (cause: any) {
           return { ok: false, error: String(cause?.message ?? cause) }
         }

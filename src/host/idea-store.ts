@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   current_version_id TEXT NOT NULL DEFAULT '',
   draft_rev INTEGER NOT NULL DEFAULT 0,
   draft_json TEXT NOT NULL DEFAULT '',
+  custom_angles TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT
@@ -109,7 +110,20 @@ export class IdeaStore {
   constructor(db: any) {
     this.db = db
     this.db.exec(SCHEMA)
+    this.migrateColumns()
     this.migrateLegacy()
+  }
+
+  /** 旧库补列：ideas.custom_angles（1.7 新增）。 */
+  private migrateColumns(): void {
+    try {
+      const cols = (this.db.prepare('PRAGMA table_info(ideas)').all() as AnyMap[]).map(c => String(c.name))
+      if (!cols.includes('custom_angles')) {
+        this.db.exec("ALTER TABLE ideas ADD COLUMN custom_angles TEXT NOT NULL DEFAULT '[]'")
+      }
+    } catch (cause) {
+      console.warn('[dsh-workbench] 灵感表补列失败（不影响使用）：', String(cause))
+    }
   }
 
   /** 旧「灵感调研库」改名归档，不删数据。 */
@@ -186,6 +200,7 @@ export class IdeaStore {
       status: row.status,
       currentVersionId: row.current_version_id || '',
       draftRev: Number(row.draft_rev ?? 0),
+      customAngles: parseJson<Array<{ id: string; label: string }>>(row.custom_angles, []),
       graph: draft,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -230,9 +245,10 @@ export class IdeaStore {
     const title = String(input?.title ?? '').trim().slice(0, IDEA_LIMITS.title) || '未命名灵感'
     const brief = String(input?.brief ?? '').slice(0, IDEA_LIMITS.brief)
     const projectId = String(input?.projectId ?? '').trim().slice(0, 64)
+    const customAngles = Array.isArray(input?.customAngles) ? input.customAngles.slice(0, 6) : []
     const graph = normalizeGraph(null, { title }).graph
-    this.db.prepare('INSERT INTO ideas(id, project_id, title, brief, status, current_version_id, draft_rev, draft_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
-      .run(id, projectId, title, brief, 'draft', '', 1, JSON.stringify(graph), ts, ts)
+    this.db.prepare('INSERT INTO ideas(id, project_id, title, brief, status, current_version_id, draft_rev, draft_json, custom_angles, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId, title, brief, 'draft', '', 1, JSON.stringify(graph), JSON.stringify(customAngles), ts, ts)
     return this.getIdea(id) ?? {}
   }
 
@@ -242,7 +258,11 @@ export class IdeaStore {
     const title = patch.title === undefined ? row.title : (String(patch.title).trim().slice(0, IDEA_LIMITS.title) || row.title)
     const brief = patch.brief === undefined ? row.brief : String(patch.brief).slice(0, IDEA_LIMITS.brief)
     const projectId = patch.projectId === undefined ? row.project_id : String(patch.projectId).slice(0, 64)
-    this.db.prepare('UPDATE ideas SET title=?, brief=?, project_id=?, updated_at=? WHERE id=?').run(title, brief, projectId, now(), id)
+    const customAngles = patch.customAngles === undefined
+      ? String(row.custom_angles ?? '[]')
+      : JSON.stringify(Array.isArray(patch.customAngles) ? patch.customAngles.slice(0, 6) : [])
+    this.db.prepare('UPDATE ideas SET title=?, brief=?, project_id=?, custom_angles=?, updated_at=? WHERE id=?')
+      .run(title, brief, projectId, customAngles, now(), id)
     return this.getIdea(id) ?? {}
   }
 

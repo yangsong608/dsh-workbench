@@ -170,6 +170,27 @@ console.log('\n[7] 导出')
   check('导出文件名安全', client.safeName('a/b:c d') === 'a-b-c-d')
 }
 
+/* ---------------- 7.5 自定义角度 ---------------- */
+console.log('\n[7.5] 自定义角度')
+{
+  const one = host.sanitizeCustomAngles(['合规', 'Hardware Form'])
+  check('中文角度生成 slug id', one.angles.length === 2 && /^[a-z]/.test(one.angles[0].id) && one.angles[0].label === '合规')
+  const dedup = host.sanitizeCustomAngles([{ id: 'compliance', label: '合规' }, { id: 'compliance', label: '重复' }])
+  check('重复 id 去重', dedup.angles.length === 1 && dedup.issues.some(i => i.code === 'ANGLE_DUP'))
+  const many = host.sanitizeCustomAngles(Array.from({ length: 9 }, (_, i) => `角度${i}`))
+  check('最多 6 个', many.angles.length === 6)
+  const long = host.sanitizeCustomAngles(['这是一个非常非常长的自定义角度名称'])
+  check('名称裁剪到 12 字', long.angles[0].label.length <= 12)
+
+  const custom = host.normalizeGraph({ v: 1, rootId: 'root', nodes: [
+    { id: 'root', type: 'seed', label: 'R' },
+    { id: 'd1', type: 'direction', label: '合规', angle: 'compliance', parentId: 'root' },
+    { id: 'n1', type: 'idea', label: 'A', angle: 'bad angle!', parentId: 'd1' },
+  ], edges: [] })
+  check('合法自定义 angle 保留', custom.graph.nodes.find(n => n.id === 'd1')?.angle === 'compliance')
+  check('非法 angle 丢弃', custom.graph.nodes.find(n => n.id === 'n1')?.angle === undefined)
+}
+
 /* ---------------- 8. 角度常量 ---------------- */
 console.log('\n[8] 角度常量')
 {

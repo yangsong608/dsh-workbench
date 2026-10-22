@@ -111,6 +111,22 @@ export const IDEA_CSS = String.raw`
 .idea-modal-foot{display:flex;align-items:center;gap:8px;margin-top:4px}
 .idea-modal-foot .note{font-size:10.5px;color:var(--text-3)}
 .idea-modal-foot .right{margin-left:auto;display:flex;gap:8px}
+.idea-menu{position:absolute;z-index:30;min-width:168px;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 12px 30px rgba(16,16,28,.18);padding:5px;display:flex;flex-direction:column;gap:1px}
+.idea-menu button{border:0;background:transparent;text-align:left;padding:6px 9px;border-radius:6px;font-size:11.5px;color:var(--text-2);cursor:pointer}
+.idea-menu button:hover{background:var(--hover);color:var(--text)}
+.idea-menu button.danger{color:var(--red)}
+.idea-menu button.danger:hover{background:var(--red-soft)}
+.idea-menu .sep{height:1px;background:var(--line);margin:3px 4px}
+.idea-menu .hint{padding:4px 9px 2px;font-size:9.5px;color:var(--text-3);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.idea-diff-pick{display:flex;align-items:flex-end;gap:8px;margin:6px 0 10px}
+.idea-diff-pick label{flex:1;display:flex;flex-direction:column;gap:4px;font-size:10.5px;color:var(--text-3)}
+.idea-diff-pick select{height:28px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text-2);font:inherit;font-size:11.5px;padding:0 6px}
+.idea-diff-sum{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:8px;background:var(--panel-2);font-size:11px;color:var(--text-2)}
+.idea-diff-sum .add{color:var(--green);font-weight:700}
+.idea-diff-sum .del{color:var(--red);font-weight:700}
+.idea-diff-sec h5{margin:0 0 4px}
+.idea-diff-sec .empty{color:var(--text-3);font-size:10.5px}
 .idea-diff{display:flex;flex-direction:column;gap:10px;font-size:11.5px;color:var(--text-2)}
 .idea-diff h5{margin:0;font-size:11px;color:var(--text-3);font-weight:600}
 .idea-diff .add{color:var(--green)}

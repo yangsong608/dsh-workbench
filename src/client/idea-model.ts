@@ -38,8 +38,15 @@ export const ANGLE_COLORS: Record<string, string> = {
   '': '#5b5bd6',
 }
 
+const EXTRA_PALETTE = ['#2563eb', '#0f9f6e', '#c27c0e', '#7c3aed', '#db2777', '#0891b2']
+
+/** 内置角度用固定色；自定义角度按 id 哈希落到同一套调色板，保证稳定且可区分。 */
 export function angleColor(angle: string | undefined): string {
-  return ANGLE_COLORS[angle ?? ''] ?? ANGLE_COLORS['']
+  if (!angle) return ANGLE_COLORS['']
+  if (ANGLE_COLORS[angle] !== undefined) return ANGLE_COLORS[angle]
+  let hash = 0
+  for (const ch of angle) hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0
+  return EXTRA_PALETTE[hash % EXTRA_PALETTE.length]
 }
 
 export function childrenMap(graph: IdeaGraph): Map<string, IdeaNode[]> {
