@@ -9,6 +9,7 @@
  */
 import { IDEA_CSS } from './idea.css.js'
 import { IDEA_ANGLES } from '../shared/idea-angles.js'
+import { createAgentChat, type ChatHandle } from './agent-chat.js'
 import {
   buildForceOption, fromMindElixir, graphStats, graphToMarkdown, graphToSVG,
   nodeById, safeName, toMindElixir, type IdeaGraph,
@@ -26,6 +27,14 @@ export interface IdeaDeps {
   isDark: () => boolean
   /** 门户里的项目（由产品 / Bug 项目 / 测试项目 / 任务的工作区路径汇总得到）。 */
   portalProjects?: () => Array<{ name: string; workspacePath: string }>
+  /** 智能体团队（页内会话）。缺省时退回传统单会话派发。 */
+  agent?: {
+    teams: () => Array<{ id: string; name: string; memberCount: number }>
+    dispatch: (input: { ideaId: string; runId: string; teamId: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }, handlers: { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }) => Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null>
+    prompt: (sessionId: string, text: string) => Promise<void>
+    stop: (dispatchId: string, sessionId: string) => Promise<void>
+    openSession: (sessionId: string) => void
+  }
 }
 
 export interface IdeaViewHandle {
@@ -88,6 +97,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   let diffState: { a: string; b: string } | null = null
   let askResolve: ((value: string | null) => void) | null = null
   let askValue = ''
+  let teamId = ''
+  let chat: ChatHandle | null = null
+  let dispatchId = ''
+  let dispatchSessionId = ''
+  let dispatchTimer = 0
 
   /* ------------------------------ 引擎 ------------------------------ */
   let mind: any = null
@@ -143,6 +157,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
           <div class="idea-plot" id="idea-plot"></div>
         </section>
         <aside class="idea-detail" id="idea-detail"></aside>
+        <aside class="idea-chat" id="idea-chat" style="display:none"></aside>
       </div>`
     rootNode.addEventListener('click', onClick, true)
     rootNode.addEventListener('input', onInput, true)
@@ -220,6 +235,12 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   async function selectIdea(id: string): Promise<void> {
     if (id === selectedId && detail !== null) return
     stopPolling()
+    closeChatTimer()
+    dispatchId = ''
+    dispatchSessionId = ''
+    chat?.clear()
+    const chatEl = q('idea-chat')
+    if (chatEl !== null) chatEl.style.display = 'none'
     selectedId = id
     selectedNode = ''
     preview = null
@@ -243,6 +264,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       draft = { rev: Number(detail.idea?.draftRev ?? 0), graph: EMPTY_GRAPH }
     }
     run = detail.run
+    teamId = String(detail.idea?.agentTeamId ?? '')
     if (run?.status === 'running') startPolling()
   }
 
@@ -378,7 +400,10 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (bar === null) return
     const hasIdea = detail !== null
     const stats = graphStats(draft.graph)
+    const agentTeams = deps.agent?.teams?.() ?? []
+    const teamOptions = `<option value="">不使用团队</option>` + agentTeams.map(team => `<option value="${deps.esc(team.id)}"${team.id === teamId ? ' selected' : ''}>${deps.esc(team.name)}（${team.memberCount}）</option>`).join('')
     bar.innerHTML = `
+      ${deps.agent ? `<select class="idea-team" id="idea-team" data-idea-input="team" title="用智能体团队执行">${teamOptions}</select>` : ''}
       <span class="idea-seg">
         <button class="${view === 'tree' ? 'on' : ''}" data-idea-act="idea-view" data-view="tree">思维导图</button>
         <button class="${view === 'force' ? 'on' : ''}" data-idea-act="idea-view" data-view="force">力导图</button>
@@ -393,6 +418,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       <button class="btn tiny" data-idea-act="idea-zoom" data-dir="in" ${hasIdea ? '' : 'disabled'}>＋</button>
       <button class="btn tiny" data-idea-act="idea-zoom" data-dir="out" ${hasIdea ? '' : 'disabled'}>－</button>
       <button class="btn tiny" data-idea-act="idea-zoom" data-dir="fit" ${hasIdea ? '' : 'disabled'}>适应</button>
+      <button class="btn tiny" data-idea-act="idea-chat-toggle" ${dispatchId === '' ? 'disabled' : ''}>会话</button>
       <button class="btn tiny" data-idea-act="idea-export" ${hasIdea ? '' : 'disabled'}>导出 ▾</button>
       <button class="btn tiny" data-idea-act="idea-node-add" ${hasIdea ? '' : 'disabled'}>＋ 节点</button>
       <button class="btn tiny" data-idea-act="idea-archive" ${hasIdea ? '' : 'disabled'}>存档版本</button>
@@ -797,12 +823,16 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       }
       if (run?.status === 'done') {
         stopPolling()
+        closeChatTimer()
+        chat?.setStatus('done')
         busy = ''
         deps.toast('已生成，可在右侧版本里对比')
         await reloadDetail()
         renderAll()
       } else if (run?.status === 'failed') {
         stopPolling()
+        closeChatTimer()
+        chat?.setStatus('failed', String(run.error || ''))
         busy = ''
         deps.toast(`生成失败：${run.error || '未知原因'}`)
         renderSub()
@@ -822,10 +852,26 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       renderSub()
       const project = projects.find(p => p.id === detail?.idea?.projectId)
       const path = String(res.body.workspacePath || project?.workspacePath || '')
-      try {
-        await deps.dispatch(path, String(res.body.prompt ?? ''))
-      } catch (cause) {
-        deps.toast(`派发到会话失败：${String((cause as Error).message ?? cause)}`)
+      if (teamId !== '' && deps.agent !== undefined) {
+        const started = await deps.agent.dispatch(
+          { ideaId: selectedId, runId: String(run?.id ?? ''), teamId, goal: String(detail?.idea?.brief || detail?.idea?.title || ''), ideaTitle: String(detail?.idea?.title ?? ''), ideaBrief: String(detail?.idea?.brief ?? ''), workspacePath: path, timeoutMs: 15 * 60 * 1000 },
+          {
+            event: event => chat?.ingest(event),
+            history: events => chat?.ingestMany(events),
+            status: (status, note) => chat?.setStatus(status, note),
+          },
+        )
+        if (started !== null) {
+          dispatchId = started.dispatchId
+          dispatchSessionId = started.sessionId
+          openChat(started.teamName, started.timeoutMs)
+        }
+      } else {
+        try {
+          await deps.dispatch(path, String(res.body.prompt ?? ''))
+        } catch (cause) {
+          deps.toast(`派发到会话失败：${String((cause as Error).message ?? cause)}`)
+        }
       }
       startPolling()
     } finally {
@@ -833,8 +879,39 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }
   }
 
+  function openChat(teamName: string, timeoutMs: number): void {
+    const el = q('idea-chat')
+    if (el === null) return
+    if (chat === null) {
+      chat = createAgentChat(el, {
+        esc: deps.esc, ic: deps.ic,
+        onSend: text => { if (dispatchSessionId !== '') void deps.agent?.prompt(dispatchSessionId, text) },
+        onStop: () => void stopRun(),
+        onRetry: () => void generate('diverge'),
+        onOpenSession: () => { if (dispatchSessionId !== '') deps.agent?.openSession(dispatchSessionId) },
+      })
+    }
+    el.style.display = ''
+    chat.open({ teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs })
+    chat.setStatus('running')
+    if (dispatchTimer !== 0) window.clearTimeout(dispatchTimer)
+    dispatchTimer = window.setTimeout(() => {
+      chat?.setStatus('timeout', '超过派发预算')
+      void stopRun()
+    }, timeoutMs)
+  }
+
+  function closeChatTimer(): void {
+    if (dispatchTimer !== 0) { window.clearTimeout(dispatchTimer); dispatchTimer = 0 }
+  }
+
   async function stopRun(): Promise<void> {
     if (run === null || selectedId === '') return
+    if (dispatchId !== '' && dispatchSessionId !== '') {
+      closeChatTimer()
+      chat?.setStatus('cancelled')
+      await deps.agent?.stop(dispatchId, dispatchSessionId).catch(() => undefined)
+    }
     await api(`/ideas/${selectedId}/runs/${run.id}/cancel`, { method: 'POST' })
     stopPolling()
     await reloadDetail()
@@ -1435,6 +1512,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-node-sibling': closeNodeMenu(); void addSiblingNode(); break
       case 'idea-version': void previewVersion(el.getAttribute('data-id') ?? ''); break
       case 'idea-version-back': preview = null; renderBar(); renderSub(); renderDetail(); renderPlot(); break
+      case 'idea-chat-toggle': {
+        const el = q('idea-chat')
+        if (el !== null) el.style.display = el.style.display === 'none' ? '' : 'none'
+        break
+      }
       case 'idea-diff': void showDiff(); break
       case 'idea-diff-swap':
         if (diffState !== null) {
@@ -1481,6 +1563,12 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       return
     }
     if (form === null) return
+    if (key === 'team') {
+      teamId = target.value
+      if (selectedId !== '') void api(`/ideas/${selectedId}`, { method: 'PATCH', body: { agentTeamId: teamId } })
+      renderBar()
+      return
+    }
     if (key === 'ask') { askValue = target.value; return }
     if (key === 'form-title') form.title = target.value.slice(0, 60)
     if (key === 'form-brief') form.brief = target.value
@@ -1624,6 +1712,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
   function destroy(): void {
     stopPolling()
+    closeChatTimer()
+    chat?.destroy()
     disposeEngines()
     resizeObserver?.disconnect()
     if (mindSyncTimer !== 0) window.clearTimeout(mindSyncTimer)

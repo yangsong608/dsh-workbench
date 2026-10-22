@@ -1096,6 +1096,13 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       openModal,
       closeModal,
       dispatch: (projectPath: string, prompt: string) => dispatchToNewSession(projectPath, prompt),
+      agent: {
+        teams: () => agentPanel.teams().map(team => ({ id: team.id, name: team.name, memberCount: team.memberCount })),
+        dispatch: (input, handlers) => startAgentDispatch(input, handlers),
+        prompt: (sessionId, text) => sendToSession(sessionId, text),
+        stop: (dispatchId, sessionId) => stopAgentDispatch(dispatchId, sessionId),
+        openSession: (sessionId) => focusSession(sessionId),
+      },
       isDark: () => resolvedTheme() === 'dark',
       portalProjects: () => projectCards()
         .filter(card => card.path !== '' && card.path !== 'all' && card.path !== 'none')
@@ -4126,6 +4133,63 @@ ${common}
       throw new Error(`${String((cause as Error).message ?? cause)}（提示词已复制到剪贴板）`)
     }
   }
+  /* ------------------------------ 智能体团队会话适配 ------------------------------ */
+  interface AgentHandlers { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }
+  interface AgentDispatchInput { ideaId: string; runId: string; teamId: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }
+  const agentSessionOffs: Array<() => void> = []
+
+  /** 建派发 → 建会话 → 订阅事件 → 发送 kickoff；返回 dispatch/session 供页内会话展示。 */
+  async function startAgentDispatch(input: AgentDispatchInput, handlers: AgentHandlers): Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null> {
+    try {
+      const res = await fetch(`${API}/agents/dispatches`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) { toast(body?.message ?? `团队派发失败：HTTP ${res.status}`); return null }
+      const dispatch = body.dispatch
+      const sessionId = await createSessionIn(input.workspacePath)
+      await fetch(`${API}/agents/dispatches/${encodeURIComponent(String(dispatch.id))}`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, status: 'running' }),
+      }).catch(() => undefined)
+      const subscribe = dshCtx?.on
+      if (typeof subscribe === 'function') {
+        try {
+          const off = subscribe('session/event', (session: any, event: any) => {
+            const sid = session?.id ?? session?.sessionId
+            if (String(sid ?? '') === sessionId) handlers.event?.(event)
+          })
+          if (typeof off === 'function') agentSessionOffs.push(off)
+        } catch { /* 订阅失败时仍可发消息，只是没有流式 */ }
+      }
+      try {
+        await sendToSession(sessionId, String(body.kickoff ?? ''))
+      } catch (cause) {
+        toast(`会话已建但发送失败：${String((cause as Error).message ?? cause)}`)
+        await fetch(`${API}/agents/dispatches/${encodeURIComponent(String(dispatch.id))}`, {
+          method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'failed', error: String(cause) }),
+        }).catch(() => undefined)
+        return null
+      }
+      try {
+        const binding = dshSessions()?.binding?.(sessionId)
+        const snap = binding?.session?.getSnapshot?.()
+        if (Array.isArray(snap?.events)) handlers.history?.(snap.events)
+      } catch { /* 历史拿不到就只显示后续事件 */ }
+      handlers.status?.('running')
+      return { dispatchId: String(dispatch.id), sessionId, teamName: String(body.team?.name ?? ''), timeoutMs: Number(dispatch.timeoutMs) || 15 * 60 * 1000 }
+    } catch (cause) {
+      toast(`团队派发失败：${String((cause as Error).message ?? cause)}`)
+      return null
+    }
+  }
+
+  async function stopAgentDispatch(dispatchId: string, sessionId: string): Promise<void> {
+    try { await sendToSession(sessionId, '请主理人立即停止当前团队工作，保留已完成的结果，并用一句话说明已停止。') } catch { /* 会话已断开时只更新记录 */ }
+    await fetch(`${API}/agents/dispatches/${encodeURIComponent(dispatchId)}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'cancelled' }),
+    }).catch(() => undefined)
+  }
+
   function focusSession(sessionId: string): void {
     try {
       const nav = dshCtx?.get?.<any>('uiWorkspace')

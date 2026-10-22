@@ -84,6 +84,8 @@ check('客户端含灵感视图骨架', client.includes('idea-root') && client.i
 check('客户端集成导图与力导引擎', client.includes('MindElixir.iife.js') && client.includes('echarts.min.js') && client.includes('buildForceOption'))
 check('灵感含项目与方向切换', client.includes('idea-project-box') && client.includes('idea-direction') && client.includes('idea-project-save'))
 check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
+check('灵感含团队选择与页内会话', client.includes('idea-team') && client.includes('idea-chat') && client.includes('createAgentChat'))
+check('页内会话接入会话派发', client.includes('startAgentDispatch') && client.includes('agents/dispatches') && client.includes('session/event'))
 check('智能体团队宿主具备路由/种子/工具', host.includes('createAgentModule') && host.includes('产品研发') && host.includes('spawn_teammate') && host.includes('workbench_team_list'))
 check('门户含智能体团队区块', client.includes('portal-teams') && client.includes('agent-team-open') && client.includes('智能体团队'))
 check('团队/成员弹窗与权限动作', client.includes('agent-member-write') && client.includes('agent-member-save') && client.includes('fileWrite'))

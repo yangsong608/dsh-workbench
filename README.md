@@ -2,7 +2,7 @@
 
 把「时序」式个人工作台搬进 **DeepSeek Harness**：任务、计划、专注、复盘、记事本（AI 完善）、Bug、产品设计（导图 / 模块 / 业务 / 端 / Demo）、测试（AI 用例 / 实时 3D 执行 / Bug 回归 / 报告 / Docker）、定时新闻在同一块面板完成，数据落在本机 **SQLite**，主题跟随 DSH，兼容 **dsh-startup-moss** 与 **dsh-opencode-palette** 的换肤。
 
-> 版本：**1.7.1** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
+> 版本：**1.8.0** ｜ 形态：独立面板 + 侧栏入口 ｜ 数据：`~/.dsh/dsh-workbench.sqlite`
 
 | 看板（MOSS 550W 主题） | 日历 |
 | --- | --- |
@@ -588,6 +588,12 @@ node scripts/verify-bundle.mjs   # 16 项产物检查
 
 ## 十二、变更记录
 
+- **1.8.0（2026-10-23）**
+  - 灵感「页内会话」：右侧抽屉（320–560，可拖宽），生成时由主理人按 kickoff 建任务板与成员，实时渲染 `session/event`（用户/主理人/成员/工具/系统行），支持停止、重试、在完整会话打开。
+  - 灵感工具栏新增团队选择（写入 `ideas.agent_team_id`）；未选团队时退回原来的单会话派发。
+  - 派发状态机：`dispatching → running → done/partial/failed/timeout/cancelled`；15 分钟预算、同灵感并发互斥、失败/超时保留部分结果。
+  - 自检：`verify-agent-ui.mjs` 9 项、`verify-agent` 29 项、`verify-agent-host` 12 项、`verify-bundle` 74 项。
+  - 说明：成员/任务投影视图与记忆/知识在 1.9 继续；真实窗口内的流式与建队需人工验证（R0 结论）。
 - **1.7.1（2026-10-23）**
   - 新增「智能体团队」：门户功能区下方展示团队与成员，默认「产品研发」7 人（主理人/产品/架构/前端/后端/测试/评审），支持新建团队、新建/编辑智能体、按角色设置文件权限、加入/移出团队。
   - 宿主新增 `agent_*` 六张表与 `/agents` 系列接口、`workbench_team_list` 工具；派发记录与成员快照独立存储，不进整份任务快照。
