@@ -3363,19 +3363,38 @@ export function apply(ctx: any): void {
   }
   console.log(`[dsh-workbench] ${store.engine} 存储就绪：${store.file}`)
 
-  /* 灵感：独立表与独立端点，不进整份快照；JSON 兜底时不可用。 */
-  const ideaModule = typeof (store as any).connection === 'function'
-    ? createIdeaModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
-    : null
-  if (ideaModule !== null) ideaModule.registerTools(ctx)
-  else console.warn('[dsh-workbench] 灵感需要 SQLite，当前为 JSON 兜底存储：灵感入口将提示不可用')
+  /*
+   * 可选模块（灵感 / 智能体团队）必须彼此隔离：任意一个初始化失败都不能拖垮
+   * 主工作台的 /state，否则整个面板会显示「工作台数据读取失败」。
+   */
+  let ideaModule: ReturnType<typeof createIdeaModule> | null = null
+  try {
+    if (typeof (store as any).connection === 'function') {
+      ideaModule = createIdeaModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+    }
+  } catch (cause) {
+    console.warn('[dsh-workbench] 灵感模块初始化失败（其它功能不受影响）：', String(cause))
+  }
+  if (ideaModule !== null) {
+    try { ideaModule.registerTools(ctx) } catch (cause) { console.warn('[dsh-workbench] 灵感工具注册失败：', String(cause)) }
+  } else {
+    console.warn('[dsh-workbench] 灵感需要 SQLite，当前为 JSON 兜底存储：灵感入口将提示不可用')
+  }
 
   /* 智能体团队：与灵感同库不同表；无 SQLite 时禁用。 */
-  const agentModule = typeof (store as any).connection === 'function'
-    ? createAgentModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
-    : null
-  if (agentModule !== null) agentModule.registerTools(ctx)
-  else console.warn('[dsh-workbench] 智能体团队需要 SQLite，当前为 JSON 兜底存储：团队入口将提示不可用')
+  let agentModule: ReturnType<typeof createAgentModule> | null = null
+  try {
+    if (typeof (store as any).connection === 'function') {
+      agentModule = createAgentModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+    }
+  } catch (cause) {
+    console.warn('[dsh-workbench] 智能体团队初始化失败（主工作台不受影响）：', String(cause))
+  }
+  if (agentModule !== null) {
+    try { agentModule.registerTools(ctx) } catch (cause) { console.warn('[dsh-workbench] 团队工具注册失败：', String(cause)) }
+  } else {
+    console.warn('[dsh-workbench] 智能体团队需要 SQLite，当前为 JSON 兜底存储：团队入口将提示不可用')
+  }
 
   registerNewsTool(ctx, store)
   registerBugTool(ctx, store)
