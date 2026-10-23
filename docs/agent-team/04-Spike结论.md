@@ -27,3 +27,17 @@
 - [ ] Lead 按 kickoff 建出 7±1 成员、任务板非空
 - [ ] 成员调用 `workbench_idea_expand` 成功写节点
 - [ ] read 成员写文件被审批/拒绝（或确认仅软约束）
+
+---
+
+## 补充：v1.10 已验证项（2026-10-23）
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| S2 投影读取 | 通过 | `sessions.list.getSnapshot().projectionsBySession[id].values.agentTeam` 可用；chat 头部显示 `成员 N · 任务 done/total` |
+| 目录读取（模型/技能/工具） | 通过 | `/agents/options` 在宿主聚合 `llm.listProviders/listModels`、`skills.list`、`tools.schemas` |
+| MCP 服务发现 | 通过（以工具名为准） | `mcp__<server>__<tool>` 前缀解析 server 名 |
+| 右键菜单确认 | 通过（修复后） | 冒烟：打开输入框 → 点确定 → 弹窗关闭、节点写入 |
+| 功能绑定派发 | 通过 | host E2E：保存绑定 → 按 feature 自动选团队 → executors 与 kickoff 正确 |
+
+仍未验证（需真实会话）：7 人团队实际建队稳定性、成员写节点、read 成员写文件被拦。
