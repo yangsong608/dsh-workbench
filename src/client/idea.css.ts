@@ -34,8 +34,13 @@ export const IDEA_CSS = String.raw`
 .idea-canvas{display:flex;flex-direction:column;min-width:0;min-height:0;position:relative;background:var(--panel)}
 .idea-root{position:relative}
 .idea-team{height:26px;max-width:190px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text-2);font:inherit;font-size:11px;padding:0 6px;outline:0}
-.idea-chat{position:absolute;right:12px;top:52px;bottom:12px;width:360px;min-width:300px;max-width:560px;z-index:20;display:flex;flex-direction:column;overflow:hidden;resize:horizontal;
+.idea-chat{position:absolute;right:12px;top:52px;bottom:12px;width:360px;min-width:300px;max-width:560px;z-index:20;display:flex;flex-direction:column;overflow:hidden;
   background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 18px 46px rgba(16,16,28,.18)}
+/* 左缘拖拽手柄：CSS resize 的右下角手柄在这里实际拖不到 */
+.idea-chat-resizer{position:absolute;left:0;top:32px;bottom:12px;width:8px;cursor:col-resize;z-index:3;border-radius:12px 0 0 12px}
+.idea-chat-resizer::after{content:'';position:absolute;left:3px;top:50%;transform:translateY(-50%);width:2px;height:44px;border-radius:2px;background:var(--line)}
+.idea-chat-resizer:hover::after{background:var(--accent)}
+.idea-chat-empty{padding:24px 14px;color:var(--text-3);font-size:11.5px;line-height:1.7;text-align:center}
 .chat-head{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:11.5px;color:var(--text-2)}
 .chat-head b{color:var(--text);font-weight:650}
 .chat-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3)}
@@ -44,19 +49,54 @@ export const IDEA_CSS = String.raw`
 .chat-status.done{background:color-mix(in srgb,#0f9f6e 14%,transparent);color:#0b7a54}
 .chat-status.failed,.chat-status.timeout,.chat-status.cancelled{background:color-mix(in srgb,#d83b3b 12%,transparent);color:#b42323}
 .chat-count{font-size:10px;color:var(--text-3)}
-.chat-list{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--panel)}
-.chat-item{font-size:11.5px;line-height:1.6;color:var(--text-2);max-width:100%}
-.chat-item.user{align-self:flex-end;background:var(--accent-soft);color:var(--accent-ink);padding:6px 9px;border-radius:9px;max-width:86%}
-.chat-item.assistant{background:var(--panel-2);border:1px solid var(--line);padding:7px 9px;border-radius:9px}
-.chat-who{font-size:10px;color:var(--text-3);margin-bottom:2px}
-.chat-body{white-space:normal;word-break:break-word}
-.chat-body .chat-h{display:block;margin:4px 0 2px;color:var(--text)}
-.chat-body .chat-li{margin-left:2px}
-.chat-body pre{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:6px;overflow:auto;font-size:10.5px}
-.chat-body code{background:var(--bg);border-radius:4px;padding:0 3px;font-size:10.5px}
-.chat-item.tool{display:flex;gap:6px;align-items:baseline;font-size:10px;color:var(--text-3);border-left:2px solid var(--line);padding-left:7px}
-.chat-item.tool .chat-args{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chat-item.system{align-self:center;font-size:10px;color:var(--text-3);background:var(--panel-2);padding:2px 8px;border-radius:99px}
+.chat-list{flex:1;min-height:0;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:14px;background:var(--panel)}
+/* 每条消息占满可用宽度（自适应抽屉宽度），靠缩进与底色区分发言方 */
+.chat-turn{display:flex;flex-direction:column;gap:4px;min-width:0;max-width:100%}
+.chat-meta{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--text-3)}
+.chat-meta b{color:var(--text-2);font-weight:650;font-size:11px}
+.chat-body{font-size:12.5px;line-height:1.72;color:var(--text);word-break:break-word;min-width:0}
+.chat-body p{margin:0 0 8px}
+.chat-body p:last-child{margin-bottom:0}
+.chat-body ul,.chat-body ol{margin:0 0 8px;padding-left:18px}
+.chat-body li{margin:2px 0}
+.chat-body b.chat-h{display:block;margin:10px 0 4px;color:var(--text);font-size:12.5px}
+.chat-body .chat-li{margin-left:0}
+.chat-body pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow:auto;font-size:11px;line-height:1.6;margin:6px 0}
+.chat-body code{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
+.chat-body pre code{border:0;background:none;padding:0}
+.chat-body hr.chat-hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+.chat-body blockquote.chat-quote{margin:6px 0;padding:6px 10px;border-left:3px solid var(--line);color:var(--text-2);background:var(--panel-2);border-radius:0 6px 6px 0}
+/* 用户：右侧浅色气泡 */
+.chat-turn.user{align-items:flex-end}
+.chat-turn.user .chat-meta{justify-content:flex-end}
+.chat-user-body{background:var(--accent-soft);color:var(--accent-ink);border-radius:10px 10px 2px 10px;padding:8px 11px;max-width:88%}
+/* 助手：左对齐正文，无气泡（对齐 DSH 全宽叙述） */
+.chat-turn.assistant{padding-left:2px}
+/* 思考：可折叠一行 + 次级字号 */
+.chat-reasoning{border-left:2px solid var(--line);padding-left:10px;min-width:0}
+.chat-reasoning>summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:11.5px;color:var(--text-3)}
+.chat-reasoning>summary::-webkit-details-marker{display:none}
+.chat-reasoning>summary::before{content:'▸';font-size:10px;color:var(--text-3)}
+.chat-reasoning[open]>summary::before{content:'▾'}
+.chat-reason-preview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chat-reason-body{margin-top:6px;font-size:11.5px;line-height:1.7;color:var(--text-2)}
+/* 工具：卡片，带状态色 */
+.chat-tool{display:flex;flex-direction:column;gap:5px;border:1px solid var(--line);border-radius:9px;background:var(--panel-2);padding:8px 10px;min-width:0}
+.chat-tool.result.ok{border-left:3px solid #0f9f6e}
+.chat-tool.result.err{border-left:3px solid #d83b3b}
+.chat-tool-head{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-2);min-width:0}
+.chat-tool-head b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-time{margin-left:auto;font-size:10px;color:var(--text-3);flex:none}
+.chat-tool-body{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto}
+/* 类型标签 */
+.chat-tag{flex:none;font-size:10px;line-height:1;padding:3px 6px;border-radius:5px;background:var(--panel);border:1px solid var(--line);color:var(--text-3)}
+.chat-tag.think{background:color-mix(in srgb,#7c3aed 12%,transparent);border-color:transparent;color:#7c3aed}
+.chat-tag.tool{background:color-mix(in srgb,#2563eb 12%,transparent);border-color:transparent;color:#1d4ed8}
+.chat-tag.ok{background:color-mix(in srgb,#0f9f6e 14%,transparent);border-color:transparent;color:#0b7a54}
+.chat-tag.err{background:color-mix(in srgb,#d83b3b 12%,transparent);border-color:transparent;color:#b42323}
+.chat-tag.sys{background:var(--panel-2);color:var(--text-3)}
+/* 系统：居中细线 */
+.chat-turn.system{flex-direction:row;align-items:center;justify-content:center;gap:6px;font-size:10.5px;color:var(--text-3)}
 .chat-compose{display:flex;gap:6px;align-items:flex-end;padding:8px;border-top:1px solid var(--line)}
 .chat-compose textarea{flex:1;min-width:0;min-height:40px;max-height:120px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:inherit;font-size:11.5px;padding:6px 8px;outline:0;resize:vertical}
 .chat-compose textarea:focus{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
@@ -72,7 +112,9 @@ export const IDEA_CSS = String.raw`
 .idea-progress{height:36px;flex:0 0 36px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 7%,var(--panel)),var(--panel));font-size:10.5px;color:var(--text-2)}
 .idea-progress .bar{width:160px;height:4px;border-radius:999px;background:var(--panel-3);overflow:hidden}
 .idea-progress .bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#7a76ff,var(--accent))}
-.idea-plot{flex:1;position:relative;min-height:0;overflow:hidden;background:var(--panel)}
+.idea-plot{flex:1;position:relative;min-height:0;min-width:0;overflow:hidden;background:var(--panel)}
+/* mind-elixir 的容器必须有确定尺寸，否则首帧会按 0 宽排版 */
+.idea-plot .idea-mind{position:absolute;inset:0;width:100%;height:100%}
 .idea-plot.readonly{overflow:auto;background:var(--panel-2)}
 .idea-plot .map-container{width:100%;height:100%}
 .idea-plot .idea-svg{display:block;margin:0 auto}

@@ -3370,7 +3370,13 @@ export function apply(ctx: any): void {
   let ideaModule: ReturnType<typeof createIdeaModule> | null = null
   try {
     if (typeof (store as any).connection === 'function') {
-      ideaModule = createIdeaModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+      ideaModule = createIdeaModule({
+        db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX,
+        /* run 结束后同步关闭对应团队派发：否则它会一直挂在 running，让该灵感后续派发永远 409。 */
+        onRunClosed: (runId, status) => {
+          try { agentModule?.store.finishDispatchByRun(runId, status) } catch (cause) { console.warn('[dsh-workbench] 派发收尾失败：', String(cause)) }
+        },
+      })
     }
   } catch (cause) {
     console.warn('[dsh-workbench] 灵感模块初始化失败（其它功能不受影响）：', String(cause))

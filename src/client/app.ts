@@ -1102,6 +1102,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         prompt: (sessionId, text) => sendToSession(sessionId, text),
         stop: (dispatchId, sessionId) => stopAgentDispatch(dispatchId, sessionId),
         openSession: (sessionId) => focusSession(sessionId),
+        history: (sessionId) => readSessionEvents(sessionId),
       },
       isDark: () => resolvedTheme() === 'dark',
       portalProjects: () => projectCards()
@@ -4125,6 +4126,37 @@ ${common}
     }
     throw new Error('当前 DSH 不支持会话发送（缺少 retain 接口）')
   }
+  /**
+   * 读一个会话已有的事件快照（供灵感页内会话补历史）。
+   * 会话没绑定过时用 retain 临时拿一份，读完立刻 release；失败/超时返回空数组，不阻塞 UI。
+   */
+  async function readSessionEvents(sessionId: string): Promise<any[]> {
+    if (sessionId === '') return []
+    const sessions = dshSessions()
+    if (sessions === undefined) return []
+    const eventsOf = (ref: any): any[] => {
+      try {
+        const snap = ref?.binding?.session?.getSnapshot?.()
+        return Array.isArray(snap?.events) ? snap.events : []
+      } catch { return [] }
+    }
+    try {
+      const direct = sessions.binding?.(sessionId)
+      if (direct?.session !== undefined) return eventsOf(direct)
+      if (typeof sessions.retain !== 'function') return []
+      const ref = sessions.retain(sessionId, { source: 'gateway' })
+      try {
+        Promise.resolve(ref?.ready).catch(() => undefined)
+        await Promise.race([
+          Promise.resolve(ref?.ready),
+          new Promise(resolve => window.setTimeout(resolve, 3000)),
+        ])
+        return eventsOf(ref)
+      } finally {
+        try { ref?.release?.() } catch { /* ignore */ }
+      }
+    } catch { return [] }
+  }
   async function appendToExistingSession(sessionId: string, text: string): Promise<void> {
     try {
       await sendToSession(sessionId, text)
@@ -4164,10 +4196,28 @@ ${common}
   /** 建派发 → 建会话 → 订阅事件 → 发送 kickoff；返回 dispatch/session 供页内会话展示。 */
   async function startAgentDispatch(input: AgentDispatchInput, handlers: AgentHandlers): Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null> {
     try {
-      const res = await fetch(`${API}/agents/dispatches`, {
+      let res = await fetch(`${API}/agents/dispatches`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
       })
-      const body = await res.json().catch(() => ({}))
+      let body = await res.json().catch(() => ({}))
+      /* 409：上一次派发没被收尾。服务端会先做惰性收尾，仍然冲突时由用户确认是否顶掉旧任务。 */
+      if (res.status === 409) {
+        const old = body?.dispatch
+        const started = String(old?.startedAt ?? '')
+        const ok = typeof window.confirm === 'function'
+          ? window.confirm(`这个灵感还有一次团队执行未结束${started ? `（${started} 开始）` : ''}。\n\n是否停止它，用新任务取代？`)
+          : true
+        if (!ok) { toast('已取消：请先停止原来的团队任务'); return null }
+        if (old?.id !== undefined) {
+          await fetch(`${API}/agents/dispatches/${encodeURIComponent(String(old.id))}`, {
+            method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'cancelled', error: '被用户的新派发取代' }),
+          }).catch(() => undefined)
+        }
+        res = await fetch(`${API}/agents/dispatches`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...input, force: true }),
+        })
+        body = await res.json().catch(() => ({}))
+      }
       if (!res.ok) { toast(body?.message ?? `团队派发失败：HTTP ${res.status}`); return null }
       const dispatch = body.dispatch
       const sessionId = await createSessionIn(input.workspacePath)
@@ -5411,6 +5461,11 @@ ${lines}`
       if (act === 'portal-load') { void refreshPortal().then(() => toast('项目数据已刷新')); return }
       if (act === 'agent-team-open') { void agentPanel.openTeam(id); return }
       if (act === 'agent-team-new') { agentPanel.openTeamForm(); return }
+      if (act === 'agent-team-edit') {
+        const team = agentPanel.teams().find(item => item.id === id)
+        if (team !== undefined) agentPanel.openTeamForm(team)
+        return
+      }
       if (act === 'agent-team-save') { void agentPanel.createTeam(); return }
       if (act === 'agent-team-delete') { void agentPanel.deleteTeam(id); return }
       if (act === 'agent-member-new') { void agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? ''); return }

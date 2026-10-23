@@ -9,7 +9,16 @@ import { AGENT_LIMITS, defaultMembers, normalizeBindings, validateMember, type A
 
 type AnyMap = Record<string, any>
 
-const now = (): string => new Date().toISOString().replace('T', ' ').slice(0, 19)
+/**
+ * 本地时间字符串（与 idea-store / 主壳的 isoDateTime 一致）。
+ * 不能用 toISOString()：那是 UTC，配合 Date.parse（无时区按本地解析）会差 8 小时，
+ * 导致新建的派发被误判为「已超时」。
+ */
+const now = (): string => {
+  const d = new Date()
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agent_teams (
@@ -381,9 +390,54 @@ export class AgentStore {
     return rows.map(row => this.dispatchView(row, []))
   }
 
+  /**
+   * 找该灵感正在跑的派发。顺手做惰性收尾：
+   * 关联 run 已终态、或超过派发预算的 dispatch 会被标记结束，不再挡住下一次派发。
+   * （此前没有任何自动收尾，一条卡住的 dispatch 会让该灵感永久 409。）
+   */
   runningDispatchForIdea(ideaId: string): AnyMap | null {
-    const row = this.db.prepare("SELECT * FROM agent_dispatches WHERE idea_id = ? AND status IN ('dispatching','running') ORDER BY started_at DESC LIMIT 1").get(ideaId) as AnyMap | undefined
-    return row === undefined ? null : this.getDispatch(String(row.id))
+    const rows = this.db.prepare("SELECT * FROM agent_dispatches WHERE idea_id = ? AND status IN ('dispatching','running') ORDER BY started_at DESC").all(ideaId) as AnyMap[]
+    for (const row of rows) {
+      const runId = String(row.run_id ?? '')
+      /* 没有关联 run（老数据/独立部署）时无法判断死活，保守保留，交给用户停止或超时。 */
+      let run: AnyMap | undefined
+      let tableMissing = false
+      if (runId !== '') {
+        try {
+          run = this.db.prepare('SELECT status, finished_at FROM idea_runs WHERE id = ?').get(runId) as AnyMap | undefined
+        } catch { tableMissing = true }
+      }
+      if (runId !== '' && run !== undefined && ['done', 'failed', 'cancelled'].includes(String(run.status))) {
+        this.updateDispatch(String(row.id), {
+          status: run.status === 'done' ? 'done' : 'cancelled',
+          error: `关联运行已${run.status === 'done' ? '完成' : '结束'}（自动收尾）`,
+        })
+        continue
+      }
+      const budget = Number(row.timeout_ms) > 0 ? Number(row.timeout_ms) : 15 * 60 * 1000
+      const started = Date.parse(String(row.started_at ?? '').replace(' ', 'T'))
+      const age = Number.isFinite(started) ? Date.now() - started : 0
+      if (runId !== '' && run === undefined && !tableMissing && age > 120_000) {
+        /* 有 run_id 但查不到记录，且已存在 2 分钟以上：才算死单（避免刚创建、run 尚未落库的竞态）。 */
+        this.updateDispatch(String(row.id), { status: 'cancelled', error: '关联运行不存在（自动收尾）' })
+        continue
+      }
+      if (age > budget) {
+        this.updateDispatch(String(row.id), { status: 'timeout', error: '派发超时（自动收尾）' })
+        continue
+      }
+      return this.getDispatch(String(row.id))
+    }
+    return null
+  }
+
+  /** 运行结束时按 run_id 关闭对应派发（由灵感模块回调）。 */
+  finishDispatchByRun(runId: string, status: string): void {
+    if (runId === '') return
+    const row = this.db.prepare("SELECT id FROM agent_dispatches WHERE run_id = ? AND status IN ('dispatching','running') ORDER BY started_at DESC LIMIT 1").get(runId) as AnyMap | undefined
+    if (row === undefined) return
+    const next = status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'cancelled'
+    this.updateDispatch(String(row.id), { status: next })
   }
 
   appendEvent(dispatchId: string, kind: string, member: string, payload: unknown): void {

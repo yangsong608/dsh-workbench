@@ -4,8 +4,10 @@
  * 数据独立成表、独立端点，不进整份任务快照；团队成员与派发记录由工作台管理，
  * 真正的执行仍由 DSH 会话（Agent Teams）完成。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { zstdDecompressSync } from 'node:zlib'
 import { AgentStore } from './agent-store.js'
 import { KnowledgeIndex, KNOWLEDGE_LIMITS } from './knowledge.js'
 import {
@@ -65,6 +67,59 @@ function readJson(req: RouteRequest): Promise<any> {
 }
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/
+
+/**
+ * 会话日志是「多个独立 zstd 帧首尾相接」（每帧一批），Node 的 zstdDecompressSync 只解第一帧，
+ * 所以按 magic 切帧后逐帧解压再拼接。
+ */
+function zstdText(raw: Buffer): string {
+  const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const starts: number[] = []
+  let cursor = raw.indexOf(MAGIC)
+  while (cursor !== -1) { starts.push(cursor); cursor = raw.indexOf(MAGIC, cursor + 4) }
+  if (starts.length === 0) return ''
+  let text = ''
+  for (let i = 0; i < starts.length; i += 1) {
+    const slice = raw.subarray(starts[i], i + 1 < starts.length ? starts[i + 1] : raw.length)
+    try { text += zstdDecompressSync(slice).toString('utf8') } catch { /* 单帧损坏时跳过 */ }
+  }
+  return text
+}
+
+/**
+ * 从磁盘会话日志读事件（agent 释放后的兜底）。
+ * 日志位置：<DSH_HOME>/sessions/<工作区目录>/<sessionId>/session.v4.jsonl.zstd。
+ */
+function readSessionLog(_dataDir: string, sessionId: string): any[] {
+  try {
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(sessionId)) return []
+    const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+    const sessionsDir = join(home, 'sessions')
+    if (!existsSync(sessionsDir)) return []
+    for (const group of readdirSync(sessionsDir)) {
+      const dir = join(sessionsDir, group, sessionId)
+      if (!existsSync(dir)) continue
+      let file = ''
+      for (const name of readdirSync(dir)) {
+        if (name.startsWith('session') && name.endsWith('.jsonl.zstd')) { file = join(dir, name); break }
+        if (name.endsWith('.jsonl')) { file = join(dir, name); break }
+      }
+      if (file === '') continue
+      let text = ''
+      try {
+        const raw = readFileSync(file)
+        text = file.endsWith('.zstd') ? zstdText(raw) : raw.toString('utf8')
+      } catch { continue }
+      const events: any[] = []
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        try { events.push(JSON.parse(line)) } catch { /* 跳过坏行 */ }
+      }
+      if (events.length > 0) return events
+    }
+  } catch { /* 读不到就当没有 */ }
+  return []
+}
 
 export function createAgentModule(options: AgentModuleOptions): AgentModule {
   const store = new AgentStore(options.db)
@@ -204,7 +259,18 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
               : (team.members as AgentMember[]).filter(member => member.enabled)
             if (ideaId !== '') {
               const running = store.runningDispatchForIdea(ideaId)
-              if (running !== null) { send(res, 409, { ok: false, error: '这个灵感已有团队在执行', dispatch: running }); return true }
+              if (running !== null) {
+                /* force：用户确认「停掉旧的再派」时，把旧 dispatch 收尾后放行，避免永久 409。 */
+                if (body?.force === true) {
+                  store.updateDispatch(String(running.id), { status: 'cancelled', error: '被新的派发取代（force）' })
+                } else {
+                  send(res, 409, {
+                    ok: false, error: '这个灵感已有团队在执行', dispatch: running,
+                    retryWith: { body: 'force', value: true },
+                  })
+                  return true
+                }
+              }
             }
             const members = [lead, ...candidates.filter(member => member.id !== lead.id)]
             const timeoutMinutes = Math.min(120, Math.max(1, Math.round((Number(body?.timeoutMs) || AGENT_LIMITS.dispatchTimeoutMs) / 60000)))
@@ -363,6 +429,35 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
         /* MCP 工具名形如 mcp__<server>__<tool>，从中提取 server 名。 */
         const mcpServers = [...new Set(tools.filter(name => name.startsWith('mcp__')).map(name => name.split('__')[1]).filter(Boolean))].sort()
         send(res, 200, { ok: true, providers, skills, tools, mcpServers }); return true
+      }
+
+      /* ---------------- 会话事件（页内会话读取） ----------------
+       * 客户端订阅 session/event 在部分宿主版本里拿不到，改为宿主侧按 seq 读快照，
+       * 页内会话轮询这个接口，命令与对话都能稳定显示。
+       */
+      if (a === 'sessions' && b !== undefined && c === 'events') {
+        if (method !== 'GET') { fail(res, 405, '不支持的方法'); return true }
+        const sessionId = b
+        const since = Math.max(0, Number(url.searchParams.get('since') ?? 0) || 0)
+        /* ctx.agents 未 inject 时属性访问会抛错：用 get() 兜底并整体 try。 */
+        const agent = (() => {
+          try { return options.ctx?.get?.('agents')?.get?.(sessionId) ?? options.ctx?.agents?.get?.(sessionId) } catch { return undefined }
+        })()
+        const session = agent?.session
+        let all: any[] = []
+        if (session !== undefined && typeof session.snapshotEvents === 'function') {
+          try { all = Array.from(session.snapshotEvents(0) ?? []) } catch { all = [] }
+        }
+        /* agent 已释放（团队跑完/进程重启）时回落到磁盘会话日志，否则抽屉会重新变空白。 */
+        if (all.length === 0) all = readSessionLog(options.dataDir, sessionId)
+        if (all.length === 0) {
+          send(res, 200, { ok: true, events: [], total: 0, next: 0, available: false })
+          return true
+        }
+        const end = Math.min(all.length, since + 400)
+        const sliced = all.slice(since, end).map((event: any) => ({ type: event.type, seq: event.seq, time: event.time, data: event.data }))
+        send(res, 200, { ok: true, events: sliced, total: all.length, next: end, available: true })
+        return true
       }
 
       /* ---------------- 元信息 ---------------- */

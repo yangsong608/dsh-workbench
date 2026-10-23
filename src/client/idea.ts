@@ -34,6 +34,8 @@ export interface IdeaDeps {
     prompt: (sessionId: string, text: string) => Promise<void>
     stop: (dispatchId: string, sessionId: string) => Promise<void>
     openSession: (sessionId: string) => void
+    /** 读会话已有事件（打开抽屉时补历史，避免「生成完再打开是空白」）。 */
+    history?: (sessionId: string) => Promise<any[]>
   }
 }
 
@@ -97,11 +99,18 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   let diffState: { a: string; b: string } | null = null
   let askResolve: ((value: string | null) => void) | null = null
   let askValue = ''
+  /** askText 弹窗挂在 #wb-modal（不在 rootNode 内），事件需要临时挂到 shadow root 上。 */
+  let askDispose: (() => void) | null = null
   let teamId = ''
   let chat: ChatHandle | null = null
   let dispatchId = ''
   let dispatchSessionId = ''
   let dispatchTimer = 0
+  /** 派发早期到达、但 chat 实例还没创建时先缓存，打开抽屉时补渲染。 */
+  const pendingChatEvents: any[] = []
+  /** 页内会话说：轮询宿主事件的下标与定时器。 */
+  let chatPolling = 0
+  let chatSeq = 0
 
   /* ------------------------------ 引擎 ------------------------------ */
   let mind: any = null
@@ -235,6 +244,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   async function selectIdea(id: string): Promise<void> {
     if (id === selectedId && detail !== null) return
     stopPolling()
+    stopChatPolling()
+    chatSeq = 0
     closeChatTimer()
     dispatchId = ''
     dispatchSessionId = ''
@@ -463,7 +474,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     const head = node === undefined
       ? `<div class="idea-d-head"><div class="idea-eyebrow">Inspiration</div><div class="idea-d-title">${deps.esc(detail.idea.title)} <span class="idea-chip ${detail.idea.status === 'ready' ? 'ok' : detail.idea.status === 'generating' ? 'warn' : ''}">${statusLabel(detail.idea.status)}</span></div>
           <div class="idea-d-sub">${versions[0] ? `v${versions[0].seq} · ` : ''}${graphStats(draft.graph).nodes} 节点 · ${shortTime(detail.idea.updatedAt)}</div></div>`
-      : `<div class="idea-d-head"><div class="idea-eyebrow">${node.type === 'direction' ? 'Direction' : node.type === 'seed' ? 'Seed' : 'Idea'}</div>
+      : `<div class="idea-d-head"><div style="display:flex;align-items:center;gap:8px"><button class="btn tiny" data-idea-act="idea-back-overview">← 灵感概览</button><div class="idea-eyebrow" style="margin:0">${node.type === 'direction' ? 'Direction' : node.type === 'seed' ? 'Seed' : 'Idea'}</div></div>
           <div class="idea-d-title">${deps.esc(node.label)}</div>
           <div class="idea-d-sub">深度 ${node.depth ?? 0} · ${node.angle ? angleLabel(node.angle) : '无角度'} · ${node.status === 'dropped' ? '已放弃' : node.status === 'pending' ? '待验证' : '已采纳'}</div></div>`
     const body: string[] = []
@@ -649,6 +660,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     container.style.cssText = 'width:100%;height:100%'
     target.innerHTML = ''
     target.appendChild(container)
+    /* 首次进入灵感时容器可能还是 display:none / 尺寸为 0，mind-elixir 会按 0 宽度排版成乱图。
+       等两帧拿到真实尺寸再 init。 */
+    await waitForSize(target)
     mind = new mindCls({
       el: container,
       direction: mindDirection(mindCls),
@@ -659,6 +673,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       theme: deps.isDark() ? mindCls.DARK_THEME : mindCls.THEME,
     })
     mind.init(toMindElixir(draft.graph))
+    try { mind.toCenter?.() } catch { /* 旧版本没有 toCenter */ }
     mind.bus.addListener('operation', () => scheduleMindSync())
     return mind
   }
@@ -682,6 +697,20 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }, 450)
   }
 
+  /** 等容器拿到真实尺寸（最多 10 帧 ≈160ms），避免 mind-elixir 按 0 宽初始化。 */
+  function waitForSize(el: HTMLElement): Promise<void> {
+    return new Promise(resolve => {
+      let frames = 0
+      const tick = (): void => {
+        if (el.clientWidth > 40 && el.clientHeight > 40) { resolve(); return }
+        frames += 1
+        if (frames >= 10) { resolve(); return }
+        window.requestAnimationFrame(tick)
+      }
+      window.requestAnimationFrame(tick)
+    })
+  }
+
   async function renderTree(): Promise<void> {
     const instance = await ensureMind()
     if (instance === null) {
@@ -690,6 +719,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       return
     }
     try {
+      /* refresh 会按当前 getBoundingClientRect 重新测量容器；面板由隐藏切到显示后用它重排。 */
       instance.refresh(toMindElixir(draft.graph))
     } catch (cause) {
       console.warn('[dsh-workbench] 导图刷新失败', cause)
@@ -838,9 +868,23 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   async function generate(mode: 'diverge' | 'continue', targetNodeId = ''): Promise<void> {
     if (selectedId === '') { void openForm('create'); return }
-    if (busy !== '' || run?.status === 'running') return
+    if (busy !== '') return
+    if (run?.status === 'running') {
+      /* run 可能只是没收到收尾信号（浏览器刷新/派发被顶掉）：先看派发是否还活着，死了就自动清掉再继续。 */
+      const probe = await api(`/ideas/${selectedId}/runs/${run.id}`).catch(() => null)
+      const dispatch = probe?.body?.dispatch
+      const alive = dispatch !== undefined && dispatch !== null && ['dispatching', 'running'].includes(String(dispatch.status))
+      if (alive) { deps.toast('这个灵感正在生成中，可先点「停止」再发起'); return }
+      await api(`/ideas/${selectedId}/runs/${run.id}/cancel`, { method: 'POST' }).catch(() => null)
+      stopPolling()
+      await reloadDetail()
+      renderAll()
+    }
     busy = 'generate'
     try {
+      /* 先确保草稿已落盘：服务端 /runs 按库里的 draft 校验 targetNodeId，
+         刚手动新增的节点若还在防抖队列里，会误报「目标节点不存在」。 */
+      await persistGraph()
       const angles = anglesOfCurrent()
       const res = await api(`/ideas/${selectedId}/runs`, { method: 'POST', body: { kind: mode, targetNodeId, angles } })
       if (!res.ok) { deps.toast(`创建生成任务失败：${res.body?.message ?? res.status}`); return }
@@ -849,11 +893,14 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       const project = projects.find(p => p.id === detail?.idea?.projectId)
       const path = String(res.body.workspacePath || project?.workspacePath || '')
       if (deps.agent !== undefined) {
+        /* 先建好 chat 实例再派发：否则 kickoff 后立即到达的事件/历史会因 chat 还是 null 被丢掉。 */
+        ensureChat()
+        pendingChatEvents.length = 0
         const started = await deps.agent.dispatch(
           { ideaId: selectedId, runId: String(run?.id ?? ''), teamId: '', feature: mode === 'continue' ? 'idea.continue' : 'idea.diverge', goal: String(detail?.idea?.brief || detail?.idea?.title || ''), ideaTitle: String(detail?.idea?.title ?? ''), ideaBrief: String(detail?.idea?.brief ?? ''), workspacePath: path, timeoutMs: 15 * 60 * 1000 },
           {
-            event: event => chat?.ingest(event),
-            history: events => chat?.ingestMany(events),
+            event: event => { if (chat === null) pendingChatEvents.push(event); else chat.ingest(event) },
+            history: events => { if (chat === null) pendingChatEvents.push(...events); else chat.ingestMany(events) },
             status: (status, note) => chat?.setStatus(status, note),
             team: projection => chat?.setTeam(teamStateOf(projection)),
           },
@@ -876,9 +923,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }
   }
 
-  function openChat(teamName: string, timeoutMs: number): void {
+  function ensureChat(): ChatHandle | null {
     const el = q('idea-chat')
-    if (el === null) return
+    if (el === null) return null
     if (chat === null) {
       chat = createAgentChat(el, {
         esc: deps.esc, ic: deps.ic,
@@ -887,10 +934,29 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         onRetry: () => void generate('diverge'),
         onOpenSession: () => { if (dispatchSessionId !== '') deps.agent?.openSession(dispatchSessionId) },
       })
+      bindChatResizer(el)
     }
+    return chat
+  }
+
+  function openChat(teamName: string, timeoutMs: number): void {
+    const el = q('idea-chat')
+    if (el === null) return
+    if (ensureChat() === null) return
     el.style.display = ''
-    chat.open({ teamName: teamName === '' ? '智能体团队' : teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs })
-    chat.setStatus('running')
+    /* 派发早期到达但还没渲染的事件，打开抽屉时补进来 */
+    if (pendingChatEvents.length > 0) {
+      chat?.ingestMany(pendingChatEvents.splice(0, pendingChatEvents.length))
+    }
+    chat?.open({ teamName: teamName === '' ? '智能体团队' : teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs })
+    chat?.setStatus('running')
+    /* 补历史：重新打开抽屉、或事件订阅尚未生效时，也能看到已产生的消息（按 seq 去重） */
+    if (dispatchSessionId !== '' && typeof deps.agent?.history === 'function') {
+      void deps.agent.history(dispatchSessionId)
+        .then(events => { if (events.length > 0) chat?.ingestMany(events) })
+        .catch(() => undefined)
+    }
+    startChatPolling()
     if (dispatchTimer !== 0) window.clearTimeout(dispatchTimer)
     dispatchTimer = window.setTimeout(() => {
       chat?.setStatus('timeout', '超过派发预算')
@@ -898,8 +964,77 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }, timeoutMs)
   }
 
+  /**
+   * 轮询宿主侧会话事件。客户端 session/event 订阅在许多宿主版本里收不到宿主会话事件，
+   * 这是页内会话能稳定显示「命令 + 对话」的主通道。
+   */
+  function startChatPolling(): void {
+    if (chatPolling !== 0) return
+    if (dispatchSessionId === '') return
+    chatPolling = window.setInterval(() => { void pollChatEvents() }, 1500)
+    void pollChatEvents()
+  }
+
+  function stopChatPolling(): void {
+    if (chatPolling !== 0) { window.clearInterval(chatPolling); chatPolling = 0 }
+  }
+
+  async function pollChatEvents(): Promise<void> {
+    if (dispatchSessionId === '') { stopChatPolling(); return }
+    try {
+      /* 一次最多 400 条；有 next 就说明还没追平，立刻续拉，避免跳事件。 */
+      for (let round = 0; round < 8; round += 1) {
+        const res = await api(`/agents/sessions/${encodeURIComponent(dispatchSessionId)}/events?since=${chatSeq}`)
+        if (!res.ok) return
+        const events = Array.isArray(res.body?.events) ? res.body.events : []
+        if (events.length > 0) chat?.ingestMany(events)
+        if (Number(res.body?.available) === 0 || events.length === 0) break
+        const next = Number(res.body?.next ?? 0)
+        if (!Number.isFinite(next) || next <= chatSeq) break
+        chatSeq = next
+        if (events.length < 400) break
+      }
+    } catch { /* 网络抖动不终止轮询 */ }
+  }
+
   function closeChatTimer(): void {
     if (dispatchTimer !== 0) { window.clearTimeout(dispatchTimer); dispatchTimer = 0 }
+  }
+
+  /**
+   * 会话抽屉左缘拖拽调宽：CSS resize 的手柄在右下角且被圆角/阴影盖住，
+   * 实测拖不到，所以自己加一条可见的竖向手柄。
+   */
+  function bindChatResizer(el: HTMLElement): void {
+    const KEY = 'dsh-workbench.idea.chatWidth'
+    try {
+      const saved = Number(window.localStorage.getItem(KEY))
+      if (Number.isFinite(saved) && saved >= 300) el.style.width = `${Math.min(560, saved)}px`
+    } catch { /* 忽略 */ }
+    const handle = document.createElement('div')
+    handle.className = 'idea-chat-resizer'
+    handle.title = '拖动调整宽度'
+    el.appendChild(handle)
+    handle.addEventListener('pointerdown', (event: PointerEvent) => {
+      event.preventDefault()
+      const startX = event.clientX
+      const startWidth = el.getBoundingClientRect().width
+      handle.setPointerCapture(event.pointerId)
+      const move = (e: PointerEvent): void => {
+        /* 手柄在左侧：往左拖变宽 */
+        const next = Math.max(300, Math.min(560, startWidth + (startX - e.clientX)))
+        el.style.width = `${Math.round(next)}px`
+      }
+      const up = (): void => {
+        handle.removeEventListener('pointermove', move)
+        handle.removeEventListener('pointerup', up)
+        handle.removeEventListener('pointercancel', up)
+        try { window.localStorage.setItem(KEY, String(Math.round(el.getBoundingClientRect().width))) } catch { /* 忽略 */ }
+      }
+      handle.addEventListener('pointermove', move)
+      handle.addEventListener('pointerup', up)
+      handle.addEventListener('pointercancel', up)
+    })
   }
 
   async function stopRun(): Promise<void> {
@@ -911,6 +1046,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }
     await api(`/ideas/${selectedId}/runs/${run.id}/cancel`, { method: 'POST' })
     stopPolling()
+    stopChatPolling()
     await reloadDetail()
     renderAll()
   }
@@ -1224,9 +1360,14 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
 
   /* ------------------------------ 节点操作 ------------------------------ */
-  /** 应用内输入弹窗：Electron 不支持 window.prompt，所有文案输入都走这里。 */
+  /**
+   * 应用内输入弹窗：Electron 不支持 window.prompt，所有文案输入都走这里。
+   * 注意 #wb-modal 是 #wb-idea-root 的兄弟节点，本视图的 onClick/onInput 收不到弹窗内事件，
+   * 所以这里在 shadow root 上临时挂捕获监听，结束后在 finishAsk 里统一移除。
+   */
   function askText(title: string, initial = '', placeholder = ''): Promise<string | null> {
     askResolve?.(null)
+    askDispose?.()
     askValue = initial
     return new Promise(resolve => {
       askResolve = resolve
@@ -1236,13 +1377,64 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
           <button class="btn" data-idea-act="idea-ask-cancel">取消</button>
           <button class="btn-primary" data-idea-act="idea-ask-ok">确定</button>
         </div></div></div>`)
-      window.setTimeout(() => q<HTMLInputElement>('idea-ask-input')?.focus(), 0)
+      const scope = rootNode.getRootNode() as Document | ShadowRoot
+      const onModalClick = (event: Event): void => {
+        const target = event.target as HTMLElement | null
+        const btn = target?.closest('[data-idea-act]') as HTMLElement | null
+        if (btn !== null) {
+          const act = btn.getAttribute('data-idea-act') ?? ''
+          if (act === 'idea-ask-ok' || act === 'idea-ask-cancel') {
+            event.preventDefault()
+            event.stopPropagation()
+            finishAsk(act === 'idea-ask-ok' ? askValue.trim() : null)
+          }
+          return
+        }
+        /* 点遮罩（overlay 自身）等同取消 */
+        const overlay = target?.closest('[data-act="overlay"]')
+        if (overlay !== null && overlay === target) {
+          event.preventDefault()
+          event.stopPropagation()
+          finishAsk(null)
+        }
+      }
+      const onModalInput = (event: Event): void => {
+        const el = event.target as HTMLInputElement | null
+        if (el?.id === 'idea-ask-input') askValue = el.value
+      }
+      const onModalKey = (event: Event): void => {
+        const key = (event as KeyboardEvent).key
+        if (key === 'Enter' && (event.target as HTMLElement | null)?.id === 'idea-ask-input') {
+          event.preventDefault()
+          event.stopPropagation()
+          finishAsk(askValue.trim())
+        } else if (key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          finishAsk(null)
+        }
+      }
+      scope.addEventListener('click', onModalClick, true)
+      scope.addEventListener('input', onModalInput, true)
+      scope.addEventListener('keydown', onModalKey, true)
+      askDispose = () => {
+        scope.removeEventListener('click', onModalClick, true)
+        scope.removeEventListener('input', onModalInput, true)
+        scope.removeEventListener('keydown', onModalKey, true)
+        askDispose = null
+      }
+      window.setTimeout(() => {
+        const input = (scope as Document | ShadowRoot).querySelector<HTMLInputElement>('#idea-ask-input')
+        input?.focus()
+        input?.select()
+      }, 0)
     })
   }
 
   function finishAsk(value: string | null): void {
     const resolve = askResolve
     askResolve = null
+    askDispose?.()
     deps.closeModal()
     resolve?.(value)
   }
@@ -1343,7 +1535,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (node.id === draft.graph.rootId) { deps.toast('根节点没有同级'); return }
     const parentId = node.parentId ?? draft.graph.rootId
     const label = await askText('新增同级节点', '', '一句话点子（≤24 字）')
-    if (label === null || label.trim() === '') return
+    if (label === null) return
+    if (label.trim() === '') { deps.toast('名称不能为空'); return }
     const id = `m-${Math.random().toString(36).slice(2, 8)}`
     const index = draft.graph.nodes.findIndex(n => n.id === node.id)
     const next = draft.graph.nodes.slice()
@@ -1388,6 +1581,17 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     target.querySelectorAll('.idea-menu').forEach(node => node.remove())
   }
 
+  /**
+   * mind-elixir 给节点容器的属性是 data-nodeid="me<style 节点 id>"，
+   * 而图里的 id 不含前缀。这里按「精确命中优先、去 me 前缀次之」还原成图 id。
+   */
+  function graphIdOf(raw: string): string {
+    if (raw === '') return ''
+    if (nodeById(draft.graph, raw) !== undefined) return raw
+    if (raw.startsWith('me') && nodeById(draft.graph, raw.slice(2)) !== undefined) return raw.slice(2)
+    return raw
+  }
+
   function onPlotContext(event: Event): void {
     if (view !== 'tree' || preview !== null) return
     const e = event as MouseEvent
@@ -1395,7 +1599,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     const nodeEl = target?.closest('[data-nodeid]') as HTMLElement | null
     e.preventDefault()
     if (nodeEl === null) { closeNodeMenu(); return }
-    const id = nodeEl.getAttribute('data-nodeid') ?? ''
+    const id = graphIdOf(nodeEl.getAttribute('data-nodeid') ?? '')
     if (id === '') return
     selectedNode = id
     renderDetail()
@@ -1410,7 +1614,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (nodeEl === null) return
     event.preventDefault()
     event.stopPropagation()
-    const id = nodeEl.getAttribute('data-nodeid') ?? ''
+    const id = graphIdOf(nodeEl.getAttribute('data-nodeid') ?? '')
     if (id === '') return
     selectedNode = id
     renderDetail()
@@ -1433,7 +1637,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (!parent) return
     if ((parent.depth ?? 0) + 1 > 4) { deps.toast('已经到第 4 层，不能再往下加了'); return }
     const label = await askText('新增子节点', '', '一句话点子（≤24 字）')
-    if (label === null || label.trim() === '') return
+    if (label === null) return
+    if (label.trim() === '') { deps.toast('名称不能为空'); return }
     const id = `m-${Math.random().toString(36).slice(2, 8)}`
     const depth = (parent.depth ?? 0) + 1
     draft.graph = {
@@ -1465,6 +1670,12 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       }
     }
     if (menuNode !== '' && (target?.closest('.idea-menu') === null)) closeNodeMenu()
+    /* 点画布空白 = 退出节点选中，回到灵感概览（节点本身没有 data-idea-act） */
+    if (el === null && selectedNode !== '' && target?.closest('#idea-plot') !== null && target?.closest('[data-nodeid]') === null) {
+      selectedNode = ''
+      renderDetail()
+      return
+    }
     if (el === null) return
     const act = el.getAttribute('data-idea-act') ?? ''
     event.preventDefault()
@@ -1515,6 +1726,13 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-node-edit': closeNodeMenu(); void editNodeLabel(); break
       case 'idea-node-add': closeNodeMenu(); void addChildNode(); break
       case 'idea-node-sibling': closeNodeMenu(); void addSiblingNode(); break
+      case 'idea-back-overview': {
+        selectedNode = ''
+        closeNodeMenu()
+        renderDetail()
+        renderPlot()
+        break
+      }
       case 'idea-version': void previewVersion(el.getAttribute('data-id') ?? ''); break
       case 'idea-version-back': preview = null; renderBar(); renderSub(); renderDetail(); renderPlot(); break
       case 'idea-chat-toggle': {
@@ -1561,6 +1779,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     const target = event.target as HTMLInputElement | HTMLTextAreaElement | null
     if (target === null) return
     const key = target.getAttribute('data-idea-input') ?? ''
+    /* 输入弹窗不依赖 form 状态，必须放在 form === null 早退之前 */
+    if (key === 'ask') { askValue = target.value; return }
     if (key === 'search') {
       query = target.value
       if (searchTimer !== 0) window.clearTimeout(searchTimer)
@@ -1568,7 +1788,6 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       return
     }
     if (form === null) return
-    if (key === 'ask') { askValue = target.value; return }
     if (key === 'form-title') form.title = target.value.slice(0, 60)
     if (key === 'form-brief') form.brief = target.value
     if (key === 'form-text') form.text = target.value
@@ -1698,6 +1917,14 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   function show(): void {
     host.style.display = ''
     void ensure()
+    /* 面板刚由隐藏切到显示时尺寸还是 0：等两帧再让导图按真实尺寸重排，避免首屏乱图。 */
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (host.style.display === 'none') return
+        if (mind !== null) { try { mind.refresh(toMindElixir(draft.graph)) } catch { /* ignore */ } }
+        else void renderPlot()
+      })
+    })
   }
   function hide(): void {
     host.style.display = 'none'
@@ -1711,7 +1938,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   }
   function destroy(): void {
     stopPolling()
+    stopChatPolling()
     closeChatTimer()
+    askDispose?.()
     chat?.destroy()
     disposeEngines()
     resizeObserver?.disconnect()

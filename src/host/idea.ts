@@ -32,6 +32,8 @@ export interface IdeaModuleOptions {
   db: any
   dataDir: string
   prefix: string
+  /** run 结束（finalize / cancel / 工具收尾）时回调，让团队派发同步收尾，避免长期占着 409。 */
+  onRunClosed?: (runId: string, status: 'done' | 'failed' | 'cancelled') => void
 }
 
 export interface IdeaModule {
@@ -244,6 +246,7 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
               if (Number.isFinite(started) && Date.now() - started > 10 * 60 * 1000) {
                 store.updateRun(latest.id, { status: 'failed', error: '超时未回写', finished: true, message: '生成超时（10 分钟）' })
                 store.setStatus(ideaId, 'draft')
+                options.onRunClosed?.(String(latest.id), 'failed')
               }
             }
             send(res, 200, {
@@ -437,16 +440,24 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           if (c !== undefined && d === undefined && method === 'GET') {
             const run = store.getRun(c)
             if (!run || run.ideaId !== ideaId) { fail(res, 404, 'run_not_found'); return true }
-            send(res, 200, { ok: true, run, draft: store.getDraft(ideaId) }); return true
+            /* 带上团队派发状态：前端据此区分「真在跑」与「run 卡住但派发早没了」。 */
+            let dispatch: any = null
+            try {
+              const row = options.db.prepare('SELECT id, status, started_at, session_id FROM agent_dispatches WHERE run_id = ? ORDER BY started_at DESC LIMIT 1').get(String(c))
+              if (row !== undefined) dispatch = { id: row.id, status: row.status, startedAt: row.started_at, sessionId: row.session_id }
+            } catch { /* 表不存在时忽略 */ }
+            send(res, 200, { ok: true, run, dispatch, draft: store.getDraft(ideaId) }); return true
           }
           if (c !== undefined && d === 'finalize' && method === 'POST') {
             const body = await readJson(req)
             const run = store.finalizeRun(c, body ?? {})
+            if (run?.status === 'done') options.onRunClosed?.(c, 'done')
             send(res, 200, { ok: true, run, draft: store.getDraft(ideaId) }); return true
           }
           if (c !== undefined && d === 'cancel' && method === 'POST') {
             const run = store.updateRun(c, { status: 'failed', error: '用户已停止', finished: true, message: '已停止' })
             store.setStatus(ideaId, 'draft')
+            options.onRunClosed?.(c, 'cancelled')
             send(res, 200, { ok: true, run }); return true
           }
           fail(res, 405, 'method_not_allowed'); return true
@@ -521,7 +532,10 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           const run = store.getRun(runId)
           if (!run || run.ideaId !== ideaId) return { ok: false, error: 'run 不存在或不属于该灵感' }
           const draft = store.getDraft(ideaId)
-          const patch = normalizeGraph({ rootId: draft.graph.rootId, nodes: args?.nodes, edges: args?.edges }, {})
+          /* 分批写入：本批 parentId / edges 允许指向已有图里的节点（方向节点），
+             否则会被当成悬空引用改挂到根，点子与方向平级。 */
+          const knownIds = draft.graph.nodes.map(node => node.id)
+          const patch = normalizeGraph({ rootId: draft.graph.rootId, nodes: args?.nodes, edges: args?.edges }, { knownIds })
           if (patch.graph.nodes.length <= 1) return { ok: false, error: '没有可写入的节点' }
           const merged = mergeGraph(draft.graph, patch, args?.targetNodeId)
           const saved = store.setDraft(ideaId, merged.graph, undefined)
@@ -533,6 +547,7 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
           if (args?.final === true) {
             const finished = store.finalizeRun(runId, { summary: args?.summary, inputDigest: inputDigest(store.listInputs(ideaId)) })
             versionId = finished?.versionId ?? undefined
+            if (finished?.status === 'done') options.onRunClosed?.(runId, 'done')
             if (issues.length > 0) store.updateRun(runId, { log: pushRunLog(store.getRun(runId)?.log, issues.map(i => `${i.code}：${i.message}`).join('；')) })
           }
           return { ok: true, added: patch.graph.nodes.length - 1, nodes: merged.graph.nodes.length, rev: saved.rev, versionId: versionId ?? null, issues }
@@ -573,8 +588,11 @@ export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null 
             log,
             ...(status === 'failed' ? { finished: true, error: String(args?.message ?? '生成失败') } : {}),
           })
-          if (status === 'failed') store.setStatus(ideaId, 'draft')
-          if (status === 'done') store.finalizeRun(runId, { summary: args?.message, inputDigest: inputDigest(store.listInputs(ideaId)) })
+          if (status === 'failed') { store.setStatus(ideaId, 'draft'); options.onRunClosed?.(runId, 'failed') }
+          if (status === 'done') {
+            store.finalizeRun(runId, { summary: args?.message, inputDigest: inputDigest(store.listInputs(ideaId)) })
+            options.onRunClosed?.(runId, 'done')
+          }
           return { ok: true, run: store.getRun(runId) }
         } catch (cause: any) {
           return { ok: false, error: String(cause?.message ?? cause) }

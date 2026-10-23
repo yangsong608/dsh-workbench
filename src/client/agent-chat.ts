@@ -3,8 +3,17 @@
  * 只做展示与输入，不持有会话生命周期（由 app.ts 的 sessions 适配层负责）。
  */
 
-export type ChatKind = 'user' | 'assistant' | 'tool' | 'system'
-export interface ChatItem { kind: ChatKind; who: string; text: string; at: number }
+export type ChatKind = 'user' | 'assistant' | 'reasoning' | 'tool-call' | 'tool-result' | 'system'
+export interface ChatItem {
+  kind: ChatKind
+  who: string
+  text: string
+  at: number
+  /** 工具结果是否失败；reasoning 是否可折叠。 */
+  failed?: boolean
+  /** 工具调用 id：把 call 与 result 配成一对显示。 */
+  callId?: string
+}
 export interface ChatMeta { teamName: string; dispatchId: string; sessionId: string; timeoutMs: number }
 
 export interface TeamState { members: number; tasksDone: number; tasksTotal: number }
@@ -50,7 +59,26 @@ function textOf(message: any): string {
   return typeof message?.text === 'string' ? message.text.trim() : ''
 }
 
-/** 极简 Markdown：仅标题/列表/行内代码/代码块/链接；先 esc 再替换，避免注入。 */
+/** 只取思考块（模型只输出 reasoning 时也不能整条丢掉）。 */
+function reasoningOf(message: any): string {
+  const blocks = Array.isArray(message?.content) ? message.content : []
+  const parts = blocks
+    .filter((block: any) => block?.type === 'reasoning' && typeof block.text === 'string')
+    .map((block: any) => String(block.text))
+  return parts.join('\n').trim()
+}
+
+/** turn/end 的 reason 在 v4 日志里是对象（如 {kind:'completed'}），兼容字符串与对象。 */
+function reasonText(reason: unknown): string {
+  if (typeof reason === 'string') return reason
+  if (reason !== null && typeof reason === 'object') {
+    const kind = (reason as any).kind ?? (reason as any).type ?? (reason as any).reason
+    return kind === undefined ? '' : String(kind)
+  }
+  return ''
+}
+
+/** 轻量 Markdown：标题/列表/引用/分割线/行内代码/代码块/粗体；先 esc 再替换，避免注入。 */
 export function renderMarkdown(text: string, esc: (v: unknown) => string): string {
   const lines = esc(text).split('\n')
   const out: string[] = []
@@ -60,12 +88,19 @@ export function renderMarkdown(text: string, esc: (v: unknown) => string): strin
     if (inCode) { out.push(`${line}\n`); continue }
     const heading = /^(#{1,4})\s+(.*)$/.exec(line)
     if (heading) { out.push(`<b class="chat-h">${heading[2]}</b>`); continue }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push('<hr class="chat-hr">'); continue }
+    const quote = /^&gt;\s?(.*)$/.exec(line)
+    if (quote) { out.push(`<blockquote class="chat-quote">${quote[1]}</blockquote>`); continue }
     const bullet = /^[-*]\s+(.*)$/.exec(line)
     if (bullet) { out.push(`<div class="chat-li">• ${bullet[1]}</div>`); continue }
+    const ordered = /^(\d+)[.)]\s+(.*)$/.exec(line)
+    if (ordered) { out.push(`<div class="chat-li">${ordered[1]}. ${ordered[2]}</div>`); continue }
     out.push(line === '' ? '<div class="chat-gap"></div>' : `<div>${line}</div>`)
   }
   if (inCode) out.push('</code></pre>')
-  return out.join('').replace(/`([^`]+)`/g, '<code>$1</code>')
+  return out.join('')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
 }
 
 /** 事件 → 聊天项；未知事件返回 null。 */
@@ -79,22 +114,37 @@ export function chatItemOf(event: any): ChatItem | null {
   }
   if (type === 'assistant/message') {
     const text = textOf(data?.message)
-    if (text === '') return null
-    const who = String(data?.message?.source?.name ?? data?.message?.source?.agentName ?? '主理人')
-    return { kind: 'assistant', who, text, at }
+    if (text !== '') {
+      const who = String(data?.message?.source?.name ?? data?.message?.source?.agentName ?? '主理人')
+      return { kind: 'assistant', who, text, at }
+    }
+    /* 只有思考块时也展示，否则「模型在思考」阶段抽屉一直空白 */
+    const think = reasoningOf(data?.message)
+    if (think !== '') return { kind: 'reasoning', who: '思考', text: think, at }
+    return null
   }
   if (type === 'tool/call') {
     const name = String(data?.name ?? '工具')
-    const args = String(data?.arguments ?? '').slice(0, 160)
-    return { kind: 'tool', who: name, text: args, at }
+    /* 命令类工具直接把 command 摘出来；其余保留完整参数供展开查看 */
+    let args = String(data?.arguments ?? '')
+    let brief = args
+    try {
+      const parsed = JSON.parse(args)
+      brief = String(parsed?.command ?? parsed?.description ?? parsed?.path ?? parsed?.query ?? args)
+    } catch { /* 非 JSON 就原样展示 */ }
+    return { kind: 'tool-call', who: name, text: brief.slice(0, 600), at, callId: String(data?.callId ?? '') }
   }
   if (type === 'tool/result') {
     const message = data?.message ?? {}
     const failed = message?.isError === true || Boolean(data?.reason)
-    return { kind: 'tool', who: failed ? '工具失败' : '工具完成', text: failed ? String(data?.reason ?? '执行失败').slice(0, 200) : textOf(message).slice(0, 200), at }
+    const body = failed ? reasonText(data?.reason) || '执行失败' : textOf(message)
+    return {
+      kind: 'tool-result', who: failed ? '工具失败' : '工具完成', text: body.slice(0, 1200), at, failed,
+      callId: String(message?.toolCallId ?? message?.source?.callId ?? ''),
+    }
   }
   if (type === 'turn/end') {
-    const reason = String(data?.reason ?? '')
+    const reason = reasonText(data?.reason)
     if (reason === 'aborted') return { kind: 'system', who: '系统', text: '本轮被中止', at }
     if (reason !== '' && reason !== 'completed') return { kind: 'system', who: '系统', text: `本轮结束：${reason}`, at }
     return null
@@ -138,22 +188,58 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     if (note !== '') statusEl.title = note
   }
 
+  /** 每条消息按类型渲染：用户气泡 / 助手正文 / 思考折叠 / 工具卡片 / 系统提示。 */
   function itemHtml(item: ChatItem): string {
-    const body = renderMarkdown(item.text, deps.esc)
-    if (item.kind === 'tool') {
-      return `<div class="chat-item tool"><span class="chat-who">${deps.esc(item.who)}</span><span class="chat-args">${deps.esc(item.text)}</span></div>`
+    const time = new Date(item.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    if (item.kind === 'user') {
+      return `<div class="chat-turn user"><div class="chat-meta"><b>你</b><span>${time}</span></div>
+        <div class="chat-body chat-user-body">${renderMarkdown(item.text, deps.esc)}</div></div>`
     }
-    if (item.kind === 'system') return `<div class="chat-item system">${deps.esc(item.text)}</div>`
-    return `<div class="chat-item ${item.kind}"><div class="chat-who">${deps.esc(item.who)}</div><div class="chat-body">${body}</div></div>`
+    if (item.kind === 'assistant') {
+      return `<div class="chat-turn assistant"><div class="chat-meta"><b>${deps.esc(item.who)}</b><span>${time}</span></div>
+        <div class="chat-body">${renderMarkdown(item.text, deps.esc)}</div></div>`
+    }
+    if (item.kind === 'reasoning') {
+      const preview = item.text.replace(/\s+/g, ' ').slice(0, 80)
+      return `<details class="chat-reasoning"><summary><span class="chat-tag think">思考</span><span class="chat-reason-preview">${deps.esc(preview)}…</span></summary>
+        <div class="chat-body chat-reason-body">${renderMarkdown(item.text, deps.esc)}</div></details>`
+    }
+    if (item.kind === 'tool-call') {
+      return `<div class="chat-tool call"><div class="chat-tool-head"><span class="chat-tag tool">调用</span><b>${deps.esc(item.who)}</b><span class="chat-time">${time}</span></div>
+        <pre class="chat-tool-body">${deps.esc(item.text)}</pre></div>`
+    }
+    if (item.kind === 'tool-result') {
+      const cls = item.failed === true ? 'err' : 'ok'
+      const label = item.failed === true ? '失败' : '完成'
+      return `<div class="chat-tool result ${cls}"><div class="chat-tool-head"><span class="chat-tag ${cls}">${label}</span><b>${deps.esc(item.who)}</b><span class="chat-time">${time}</span></div>
+        <pre class="chat-tool-body">${deps.esc(item.text)}</pre></div>`
+    }
+    return `<div class="chat-turn system"><span class="chat-tag sys">${deps.esc(item.who)}</span><span>${deps.esc(item.text)}</span></div>`
   }
 
+  /** 相邻的 call/result 归到一组，视觉上是一个工具块。 */
   function append(item: ChatItem): void {
     items.push(item)
     if (items.length > 500) items = items.slice(-500)
     const wrap = document.createElement('div')
     wrap.innerHTML = itemHtml(item)
     list.appendChild(wrap.firstElementChild ?? wrap)
-    list.scrollTop = list.scrollHeight
+    const stick = list.scrollTop + list.clientHeight >= list.scrollHeight - 80
+    if (stick) list.scrollTop = list.scrollHeight
+    paintEmpty()
+  }
+
+  /** 空状态：避免抽屉打开后一片空白，看不出是没输出还是没接上 */
+  function paintEmpty(): void {
+    const empty = list.querySelector('.idea-chat-empty')
+    if (items.length > 0) { if (empty !== null) empty.remove(); return }
+    if (empty !== null) return
+    const div = document.createElement('div')
+    div.className = 'idea-chat-empty'
+    div.textContent = status === 'running' || status === 'dispatching'
+      ? '已连接会话，等待输出…（团队正在规划，通常十几秒后出现第一条）'
+      : '还没有会话内容。点「生成」后这里会实时显示团队消息。'
+    list.appendChild(div)
   }
 
   host.addEventListener('click', event => {
@@ -187,6 +273,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     host.style.display = ''
     title.textContent = `页内会话 · ${next.teamName}`
     paintStatus()
+    paintEmpty()
   }
 
   function close(): void {
@@ -194,19 +281,27 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     host.style.display = 'none'
   }
 
+  /** 事件按 seq 去重：读历史 + 订阅实时可能拿到同一批事件。 */
+  const seenSeq = new Set<number>()
+
   return {
     open: openDrawer,
     close,
     isOpen: () => open,
     ingest(event) {
+      const seq = Number(event?.seq)
+      if (Number.isFinite(seq)) {
+        if (seenSeq.has(seq)) return
+        seenSeq.add(seq)
+      }
       const item = chatItemOf(event)
       if (item !== null) append(item)
     },
     ingestMany(events) { for (const event of events) this.ingest(event) },
-    setStatus(next, nextNote = '') { status = next; note = nextNote; paintStatus() },
+    setStatus(next, nextNote = '') { status = next; note = nextNote; paintStatus(); paintEmpty() },
     setCounts(nextRunning, nextTotal) { running = nextRunning; total = nextTotal; paintStatus() },
     setTeam(state) { team = state; paintStatus() },
-    clear() { items = []; list.innerHTML = '' },
-    destroy() { host.innerHTML = ''; items = [] },
+    clear() { items = []; seenSeq.clear(); list.innerHTML = ''; paintEmpty() },
+    destroy() { host.innerHTML = ''; items = []; seenSeq.clear() },
   }
 }

@@ -144,15 +144,18 @@ function asArray(value: unknown): unknown[] {
  * - tree 边按 parentId 补全，成环或悬空的节点挂回根；
  * - depth 由根 BFS 重算，超过 4 层的节点丢弃；
  * - relate 边两端必须存在、不能自连、去重。
+ *
+ * knownIds：把「当前已有图」的节点 id 视为已知。分批写入时补丁只带本批节点，
+ * 但 parentId / edges 常常指向上一批的方向节点；不传它会把这些引用当悬空而改挂根。
  */
-export function normalizeGraph(raw: unknown, options: { title?: string } = {}): NormalizedGraph {
+export function normalizeGraph(raw: unknown, options: { title?: string; knownIds?: Iterable<string> } = {}): NormalizedGraph {
   const issues: GraphIssue[] = []
   const fallback = emptyGraph(options.title ?? '新的灵感')
   if (raw === null || typeof raw !== 'object') return { graph: fallback, issues }
 
   const input = raw as Partial<IdeaGraph>
   const cleaned: IdeaGraphNode[] = []
-  const seen = new Set<string>()
+  const seen = new Set<string>(options.knownIds ?? [])
 
   for (const item of asArray(input.nodes)) {
     if (item === null || typeof item !== 'object') continue
@@ -254,7 +257,14 @@ export function normalizeGraph(raw: unknown, options: { title?: string } = {}): 
   }
   for (const node of cleaned) {
     if (node.id === rootId) continue
-    if (parentOf(node.id) === undefined) treeParent.set(node.id, rootId)
+    if (parentOf(node.id) === undefined) {
+      const wanted = node.parentId
+      /* parentId 指向一个确实不存在的节点：挂回根，但要说出来（此前是静默挂根，结构坏了没人知道） */
+      if (wanted !== null && wanted !== undefined && wanted !== '' && !seen.has(wanted)) {
+        issues.push({ code: 'PARENT_MISSING', message: `父节点「${wanted}」不存在，已把「${node.label}」挂回根`, id: node.id })
+      }
+      treeParent.set(node.id, rootId)
+    }
   }
 
   /* ---- depth：BFS，超深丢弃 ---- */
@@ -267,6 +277,19 @@ export function normalizeGraph(raw: unknown, options: { title?: string } = {}): 
   const depth = new Map<string, number>([[rootId, 0]])
   const queue: string[] = [rootId]
   const dropped = new Set<string>()
+  /*
+   * 补丁的父级可能落在「已知但不本批」的既有节点上（knownIds）。
+   * 从 root 走不到这些节点，但它们是合法的：作为额外入口保留，深度先取 2（点子层），
+   * mergeGraph 之后会对合并图全量 normalize，届时再按真实父链重算。
+   */
+  const cleanedIds = new Set(cleaned.map(node => node.id))
+  for (const [child, parent] of treeParent) {
+    if (parent === rootId || cleanedIds.has(parent)) continue
+    if (seen.has(parent)) {
+      depth.set(child, Math.min(2, IDEA_LIMITS.depth))
+      queue.push(child)
+    }
+  }
   while (queue.length > 0) {
     const current = queue.shift() as string
     const d = depth.get(current) ?? 0

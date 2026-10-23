@@ -88,6 +88,36 @@ console.log('\n[2] 继续发散：只追加不动既有')
   check('新节点挂到父级', merged.graph.nodes.find(n => n.id === 'n1')?.parentId === 'd1b')
 }
 
+/* ---------------- 2b. 跨批写入：parentId / 关联边指向既有节点 ---------------- */
+console.log('\n[2b] 分批写入保持跨批父子与关联边')
+{
+  let base = host.emptyGraph('跨批')
+  const batch = (nodes, edges = []) => host.normalizeGraph(
+    { rootId: base.rootId, nodes, edges },
+    { knownIds: base.nodes.map(n => n.id) },
+  )
+  base = host.mergeGraph(base, batch([
+    { id: 'd1', type: 'direction', label: '用户与场景', parentId: 'root', angle: 'users' },
+    { id: 'd2', type: 'direction', label: '痛点与机会', parentId: 'root', angle: 'pain' },
+  ])).graph
+  base = host.mergeGraph(base, batch([
+    { id: 'n1', type: 'idea', label: '点子1', parentId: 'd1' },
+    { id: 'n2', type: 'idea', label: '点子2', parentId: 'd1' },
+  ], [{ from: 'n1', to: 'd2', kind: 'relate' }])).graph
+
+  check('跨批 parentId 保留（点子挂在方向下）', base.nodes.find(n => n.id === 'n1')?.parentId === 'd1')
+  check('跨批关联边保留', base.edges.some(e => e.kind === 'relate' && e.from === 'n1' && e.to === 'd2'))
+  check('同批节点仍正常入图', base.nodes.filter(n => n.type === 'idea').length === 2)
+
+  const cont = host.mergeGraph(base, batch([{ id: 'n3', type: 'idea', label: '子方向', parentId: 'n1' }])).graph
+  check('继续发散挂到目标节点', cont.nodes.find(n => n.id === 'n3')?.parentId === 'n1')
+
+  const orphan = host.mergeGraph(base, batch([{ id: 'n4', type: 'idea', label: '孤儿', parentId: 'ghost' }]))
+  check('父节点不存在时挂根并上报 PARENT_MISSING',
+    orphan.graph.nodes.find(n => n.id === 'n4')?.parentId === 'root'
+    && orphan.issues.some(i => i.code === 'PARENT_MISSING'))
+}
+
 /* ---------------- 3. diffGraphs ---------------- */
 console.log('\n[3] 版本差异')
 {

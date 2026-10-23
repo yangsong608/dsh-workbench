@@ -105,6 +105,7 @@ export function createAgentPanel(deps: AgentPanelDeps) {
         <select id="agent-add-select"><option value="">选择已有智能体…</option>${available.map(member => `<option value="${deps.esc(member.id)}">${deps.esc(member.name)}（${roleLabel(member.role)}）</option>`).join('')}</select>
         <button class="btn tiny" data-act="agent-member-add" data-team="${deps.esc(team.id)}">添加</button>
         <button class="btn tiny" data-act="agent-member-new" data-team="${deps.esc(team.id)}">＋ 新建智能体</button>
+        <button class="btn tiny" data-act="agent-team-edit" data-id="${deps.esc(team.id)}">编辑团队</button>
         <span style="margin-left:auto"></span>
         <button class="btn tiny danger" data-act="agent-team-delete" data-id="${deps.esc(team.id)}">删除团队</button>
       </div>
@@ -206,12 +207,14 @@ export function createAgentPanel(deps: AgentPanelDeps) {
     renderPortalRefresh?.()
   }
 
-  function openTeamForm(): void {
-    deps.openModal(`<div class="agent-modal"><h3>新建团队</h3>
-      <div class="m-field"><label>团队名称</label><input id="agent-team-name" maxlength="40" placeholder="例如：产品研发"></div>
-      <div class="m-field"><label>说明</label><input id="agent-team-desc" maxlength="200" placeholder="这个团队负责什么"></div>
-      <div class="m-field"><label>默认工作区（可选）</label><input id="agent-team-ws" maxlength="500" placeholder="/Users/you/work/project"></div>
-      <div class="agent-foot"><span class="note">创建后进入团队详情添加成员</span><div class="right"><button class="btn" data-act="agent-close">取消</button><button class="btn-primary" data-act="agent-team-save">创建</button></div></div></div>`)
+  function openTeamForm(team?: { id: string; name: string; desc: string; defaultWorkspace: string }): void {
+    const editing = team !== undefined
+    deps.openModal(`<div class="agent-modal"><h3>${editing ? '编辑团队' : '新建团队'}</h3>
+      <div id="agent-team-id" data-id="${editing ? deps.esc(team.id) : ''}" style="display:none"></div>
+      <div class="m-field"><label>团队名称</label><input id="agent-team-name" maxlength="40" value="${editing ? deps.esc(team.name) : ''}" placeholder="例如：产品研发"></div>
+      <div class="m-field"><label>说明</label><input id="agent-team-desc" maxlength="200" value="${editing ? deps.esc(team.desc ?? '') : ''}" placeholder="这个团队负责什么"></div>
+      <div class="m-field"><label>默认工作区（可选）</label><input id="agent-team-ws" maxlength="500" value="${editing ? deps.esc(team.defaultWorkspace ?? '') : ''}" placeholder="/Users/you/work/project"></div>
+      <div class="agent-foot"><span class="note">${editing ? '改名只影响显示与后续派发，不影响已有记录' : '创建后进入团队详情添加成员'}</span><div class="right"><button class="btn" data-act="agent-close">取消</button><button class="btn-primary" data-act="agent-team-save">${editing ? '保存' : '创建'}</button></div></div></div>`)
   }
 
   function mockText(value: string, hint: string): string {
@@ -335,15 +338,18 @@ export function createAgentPanel(deps: AgentPanelDeps) {
 
   async function createTeam(): Promise<void> {
     const val = (id: string): string => (deps.q<HTMLInputElement>(id)?.value ?? '').trim()
-    const res = await fetch(`${deps.api}/agents/teams`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: val('agent-team-name'), desc: val('agent-team-desc'), defaultWorkspace: val('agent-team-ws') }),
-    })
-    if (!res.ok) { deps.toast('创建失败'); return }
+    const name = val('agent-team-name')
+    if (name === '') { deps.toast('先填团队名称'); return }
+    const editing = deps.q<HTMLElement>('agent-team-id')?.getAttribute('data-id') ?? ''
+    const body = { name, desc: val('agent-team-desc'), defaultWorkspace: val('agent-team-ws') }
+    const res = editing === ''
+      ? await fetch(`${deps.api}/agents/teams`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      : await fetch(`${deps.api}/agents/teams/${encodeURIComponent(editing)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    if (!res.ok) { deps.toast(editing === '' ? '创建失败' : '保存失败'); return }
     deps.closeModal()
     await load()
     renderPortalRefresh?.()
-    deps.toast('团队已创建，进入团队添加成员')
+    deps.toast(editing === '' ? '团队已创建，进入团队添加成员' : '团队信息已更新')
   }
 
   async function deleteTeam(id: string): Promise<void> {
