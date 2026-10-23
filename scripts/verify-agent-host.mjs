@@ -42,6 +42,9 @@ check('团队详情含成员权限', detail.body.team.members.length === 7 && de
 
 const created = await call('POST', '/agents/members', { member: { name: '合规', role: 'custom', fileWrite: 'read', intro: '合规' } })
 check('新建成员', created.status === 200 && created.body.member.id.startsWith('am-'))
+const detailMembers = detail.body.team.members
+const productId = detailMembers.find((m) => m.role === 'product').id
+const qaId = detailMembers.find((m) => m.role === 'qa').id
 const added = await call('POST', `/agents/teams/${team.id}/members`, { memberId: created.body.member.id })
 check('成员加入团队', added.body.team.memberCount === 8)
 const edited = await call('PATCH', `/agents/members/${created.body.member.id}`, { member: { name: '合规', intro: '合规审查（改）', fileWrite: 'read', tools: ['write'], skills: ['office'], mcp: ['filesystem'], concurrency: 2, provider: 'deepseek-official', model: 'deepseek-chat' } })
@@ -87,6 +90,17 @@ check('知识检索命中', search.status === 200 && search.body.hits.length >= 
 const injected = await call('POST', '/agents/dispatches', { ideaId: 'idea-2', runId: 'run-2', teamId: team.id, goal: '交付复盘', ideaTitle: '交付证据', ideaBrief: '', workspacePath: ws })
 const kickoff = String(injected.body.kickoff ?? '')
 check('派发自动注入记忆与知识', kickoff.includes('交付口径必须与 PPT 一致') && kickoff.includes('spec.md'))
+/* 功能绑定：只绑定「产品」「测试」给 idea.diverge */
+const bound = await call('PATCH', `/agents/teams/${team.id}`, { bindings: { 'idea.diverge': [productId, qaId] } })
+check('团队保存功能绑定', bound.status === 200 && Array.isArray(bound.body.team.bindings['idea.diverge']) && bound.body.team.bindings['idea.diverge'].length === 2)
+const autoDispatch = await call('POST', '/agents/dispatches', { ideaId: 'idea-3', runId: 'run-3', feature: 'idea.diverge', goal: '发散', ideaTitle: 'T', ideaBrief: '' })
+check('按功能自动选团队', autoDispatch.status === 200 && autoDispatch.body.team.id === team.id)
+check('候选执行人来自绑定', autoDispatch.body.executors.length === 2 && autoDispatch.body.executors.every((e) => ['产品', '测试'].includes(e.name)))
+check('kickoff 包含候选执行人', String(autoDispatch.body.kickoff).includes('候选执行人') && String(autoDispatch.body.kickoff).includes('产品'))
+
+const options = await call('GET', '/agents/options')
+check('可选项目录接口', options.status === 200 && Array.isArray(options.body.providers) && Array.isArray(options.body.skills) && Array.isArray(options.body.tools) && Array.isArray(options.body.mcpServers))
+
 const toolNames = ['workbench_memory_search', 'workbench_memory_write', 'workbench_knowledge_search']
 check('记忆/知识工具已注册', toolNames.every(name => tools[name] !== undefined))
 

@@ -5,7 +5,7 @@
  * 不进整份任务快照（PUT /state）。
  */
 import { randomUUID } from 'node:crypto'
-import { AGENT_LIMITS, defaultMembers, validateMember, type AgentMember, type DispatchStatus } from './agent-model.js'
+import { AGENT_LIMITS, defaultMembers, normalizeBindings, validateMember, type AgentMember, type DispatchStatus } from './agent-model.js'
 
 type AnyMap = Record<string, any>
 
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS agent_teams (
   desc TEXT NOT NULL DEFAULT '',
   is_default INTEGER NOT NULL DEFAULT 0,
   default_workspace TEXT NOT NULL DEFAULT '',
+  bindings_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -132,8 +133,19 @@ export class AgentStore {
   constructor(db: any) {
     this.db = db
     this.db.exec(SCHEMA)
+    this.migrateColumns()
     this.migrateFts()
     this.seedDefault()
+  }
+
+  /** 旧库补列（bindings_json 等）。 */
+  private migrateColumns(): void {
+    try {
+      const teamCols = (this.db.prepare('PRAGMA table_info(agent_teams)').all() as AnyMap[]).map(col => String(col.name))
+      if (!teamCols.includes('bindings_json')) {
+        this.db.exec("ALTER TABLE agent_teams ADD COLUMN bindings_json TEXT NOT NULL DEFAULT '{}'")
+      }
+    } catch (cause) { console.warn('[dsh-workbench] agent_teams 补列失败：', String(cause)) }
   }
 
   /** FTS5 不可用时降级为 LIKE（本机验证可用，仍做保护）。 */
@@ -192,6 +204,7 @@ export class AgentStore {
       desc: String(row.desc ?? ''),
       isDefault: Number(row.is_default) === 1,
       defaultWorkspace: String(row.default_workspace ?? ''),
+      bindings: parseJson<Record<string, string[]>>(row.bindings_json, {}),
       memberCount: Number((this.db.prepare('SELECT COUNT(*) AS n FROM agent_team_members WHERE team_id = ?').get(row.id) as AnyMap)?.n ?? 0),
       members,
     }
@@ -229,14 +242,17 @@ export class AgentStore {
     const desc = String(input?.desc ?? '').trim().slice(0, AGENT_LIMITS.teamDesc)
     const workspace = String(input?.defaultWorkspace ?? '').trim().slice(0, 500)
     const ts = now()
-    const exists = this.db.prepare('SELECT id FROM agent_teams WHERE id = ?').get(id) as AnyMap | undefined
+    const exists = this.db.prepare('SELECT id, bindings_json FROM agent_teams WHERE id = ?').get(id) as AnyMap | undefined
+    const bindings = input?.bindings === undefined
+      ? String(exists?.bindings_json ?? '{}')
+      : JSON.stringify(normalizeBindings(input.bindings))
     if (exists !== undefined) {
-      this.db.prepare('UPDATE agent_teams SET name=?, desc=?, default_workspace=?, updated_at=? WHERE id=?').run(name, desc, workspace, ts, id)
+      this.db.prepare('UPDATE agent_teams SET name=?, desc=?, default_workspace=?, bindings_json=?, updated_at=? WHERE id=?').run(name, desc, workspace, bindings, ts, id)
     } else {
       const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM agent_teams').get() as AnyMap)?.n ?? 0)
       if (count >= AGENT_LIMITS.teams) throw new Error(`最多 ${AGENT_LIMITS.teams} 个团队`)
-      this.db.prepare('INSERT INTO agent_teams(id,name,desc,is_default,default_workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
-        .run(id, name, desc, 0, workspace, ts, ts)
+      this.db.prepare('INSERT INTO agent_teams(id,name,desc,is_default,default_workspace,bindings_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run(id, name, desc, 0, workspace, bindings, ts, ts)
     }
     return this.getTeam(id) ?? {}
   }

@@ -23,6 +23,8 @@ export interface AgentModuleOptions {
   db: any
   dataDir: string
   prefix: string
+  /** 宿主 Context：用于读取 DSH 的模型/技能/MCP/工具目录，供成员配置选择。 */
+  ctx?: any
 }
 
 export interface AgentModule {
@@ -183,15 +185,28 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           if (method === 'POST') {
             const body = await readJson(req)
             const ideaId = String(body?.ideaId ?? '')
-            const teamId = String(body?.teamId ?? '')
+            const feature = String(body?.feature ?? 'idea.diverge')
+            let teamId = String(body?.teamId ?? '')
+            /* 未显式指定团队时，按功能绑定自动选团队（门户里配置，灵感页不再选）。 */
+            if (teamId === '') {
+              const bound = store.listTeams().find(row => Array.isArray((row.bindings ?? {})[feature]) && (row.bindings ?? {})[feature].length > 0)
+              if (bound !== undefined) teamId = String(bound.id)
+            }
             if (ideaId === '' && body?.allowNoIdea !== true) { fail(res, 400, 'ideaId 不能为空'); return true }
             const team = store.getTeam(teamId)
             if (team === null) { fail(res, 404, '团队不存在'); return true }
+            const boundIds: string[] = Array.isArray(team.bindings?.[feature]) ? team.bindings[feature] : []
+            const lead = (team.members as AgentMember[]).find(member => member.role === 'lead' && member.enabled)
+            if (lead === undefined) { fail(res, 400, '团队缺少主理人'); return true }
+            /* 绑定成员即候选执行人；未绑定则退回全体成员（主理人仍为调度人）。 */
+            const candidates = boundIds.length > 0
+              ? (team.members as AgentMember[]).filter(member => boundIds.includes(member.id) && member.enabled)
+              : (team.members as AgentMember[]).filter(member => member.enabled)
             if (ideaId !== '') {
               const running = store.runningDispatchForIdea(ideaId)
               if (running !== null) { send(res, 409, { ok: false, error: '这个灵感已有团队在执行', dispatch: running }); return true }
             }
-            const members = (team.members as AgentMember[]).filter(member => member.enabled)
+            const members = [lead, ...candidates.filter(member => member.id !== lead.id)]
             const timeoutMinutes = Math.min(120, Math.max(1, Math.round((Number(body?.timeoutMs) || AGENT_LIMITS.dispatchTimeoutMs) / 60000)))
             const workspacePath = String(body?.workspacePath ?? team.defaultWorkspace ?? '')
             const injectedMemory = typeof body?.memory === 'string' ? body.memory : injectMemory(teamId, workspacePath)
@@ -209,6 +224,8 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
               timeoutMinutes,
               memory: injectedMemory !== '' ? injectedMemory : undefined,
               knowledge: injectedKnowledge !== '' ? injectedKnowledge : undefined,
+              executors: candidates.map(member => member.name),
+              featureLabel: feature,
             })
             const dispatch = store.createDispatch({
               ideaId, runId: body?.runId, teamId, goal: body?.goal,
@@ -216,7 +233,12 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
               timeoutMs: timeoutMinutes * 60000, memberCount: members.length, kickoff,
               members: members.map(member => ({ id: member.id, name: member.name, handle: member.handle, fileWrite: member.fileWrite })),
             })
-            send(res, 200, { ok: true, dispatch, kickoff, team }); return true
+            send(res, 200, {
+              ok: true, dispatch, kickoff, team,
+              feature,
+              lead: { id: lead.id, name: lead.name, handle: lead.handle },
+              executors: candidates.map(member => ({ id: member.id, name: member.name, handle: member.handle })),
+            }); return true
           }
           fail(res, 405, '不支持的方法'); return true
         }
@@ -305,6 +327,42 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           send(res, 200, { ok: true, hits }); return true
         }
         fail(res, 404, '未知接口'); return true
+      }
+
+      /* ---------------- 可选项目录（读 DSH 真实配置） ---------------- */
+      if (a === 'options') {
+        const providers: any[] = []
+        try {
+          const llm = options.ctx?.llm
+          if (llm !== undefined && typeof llm.listProviders === 'function') {
+            for (const provider of llm.listProviders()) {
+              let models: string[] = []
+              try { models = (await llm.listModels(provider.id)).map((model: any) => String(model.id)) } catch { models = [] }
+              providers.push({ id: String(provider.id), name: String(provider.name ?? provider.id), models })
+            }
+          }
+        } catch (cause) { console.warn('[dsh-workbench] 读取模型目录失败：', String(cause)) }
+
+        let skills: any[] = []
+        try {
+          const registry = options.ctx?.skills
+          if (registry !== undefined && typeof registry.list === 'function') {
+            const rows = await registry.list({})
+            skills = rows.map((skill: any) => ({ name: String(skill.name), description: String(skill.description ?? ''), source: String(skill.source ?? '') }))
+          }
+        } catch (cause) { console.warn('[dsh-workbench] 读取技能目录失败：', String(cause)) }
+
+        let tools: string[] = []
+        try {
+          const registry = options.ctx?.tools
+          if (registry !== undefined && typeof registry.schemas === 'function') {
+            tools = registry.schemas().map((schema: any) => String(schema.name)).sort()
+          }
+        } catch (cause) { console.warn('[dsh-workbench] 读取工具目录失败：', String(cause)) }
+
+        /* MCP 工具名形如 mcp__<server>__<tool>，从中提取 server 名。 */
+        const mcpServers = [...new Set(tools.filter(name => name.startsWith('mcp__')).map(name => name.split('__')[1]).filter(Boolean))].sort()
+        send(res, 200, { ok: true, providers, skills, tools, mcpServers }); return true
       }
 
       /* ---------------- 元信息 ---------------- */

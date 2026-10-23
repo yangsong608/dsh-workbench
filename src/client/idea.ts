@@ -30,7 +30,7 @@ export interface IdeaDeps {
   /** 智能体团队（页内会话）。缺省时退回传统单会话派发。 */
   agent?: {
     teams: () => Array<{ id: string; name: string; memberCount: number }>
-    dispatch: (input: { ideaId: string; runId: string; teamId: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }, handlers: { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }) => Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null>
+    dispatch: (input: { ideaId: string; runId: string; teamId: string; feature?: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }, handlers: { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }) => Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null>
     prompt: (sessionId: string, text: string) => Promise<void>
     stop: (dispatchId: string, sessionId: string) => Promise<void>
     openSession: (sessionId: string) => void
@@ -264,7 +264,6 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       draft = { rev: Number(detail.idea?.draftRev ?? 0), graph: EMPTY_GRAPH }
     }
     run = detail.run
-    teamId = String(detail.idea?.agentTeamId ?? '')
     if (run?.status === 'running') startPolling()
   }
 
@@ -400,10 +399,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (bar === null) return
     const hasIdea = detail !== null
     const stats = graphStats(draft.graph)
-    const agentTeams = deps.agent?.teams?.() ?? []
-    const teamOptions = `<option value="">不使用团队</option>` + agentTeams.map(team => `<option value="${deps.esc(team.id)}"${team.id === teamId ? ' selected' : ''}>${deps.esc(team.name)}（${team.memberCount}）</option>`).join('')
     bar.innerHTML = `
-      ${deps.agent ? `<select class="idea-team" id="idea-team" data-idea-input="team" title="用智能体团队执行">${teamOptions}</select>` : ''}
       <span class="idea-seg">
         <button class="${view === 'tree' ? 'on' : ''}" data-idea-act="idea-view" data-view="tree">思维导图</button>
         <button class="${view === 'force' ? 'on' : ''}" data-idea-act="idea-view" data-view="force">力导图</button>
@@ -852,9 +848,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       renderSub()
       const project = projects.find(p => p.id === detail?.idea?.projectId)
       const path = String(res.body.workspacePath || project?.workspacePath || '')
-      if (teamId !== '' && deps.agent !== undefined) {
+      if (deps.agent !== undefined) {
         const started = await deps.agent.dispatch(
-          { ideaId: selectedId, runId: String(run?.id ?? ''), teamId, goal: String(detail?.idea?.brief || detail?.idea?.title || ''), ideaTitle: String(detail?.idea?.title ?? ''), ideaBrief: String(detail?.idea?.brief ?? ''), workspacePath: path, timeoutMs: 15 * 60 * 1000 },
+          { ideaId: selectedId, runId: String(run?.id ?? ''), teamId: '', feature: mode === 'continue' ? 'idea.continue' : 'idea.diverge', goal: String(detail?.idea?.brief || detail?.idea?.title || ''), ideaTitle: String(detail?.idea?.title ?? ''), ideaBrief: String(detail?.idea?.brief ?? ''), workspacePath: path, timeoutMs: 15 * 60 * 1000 },
           {
             event: event => chat?.ingest(event),
             history: events => chat?.ingestMany(events),
@@ -893,7 +889,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       })
     }
     el.style.display = ''
-    chat.open({ teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs })
+    chat.open({ teamName: teamName === '' ? '智能体团队' : teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs })
     chat.setStatus('running')
     if (dispatchTimer !== 0) window.clearTimeout(dispatchTimer)
     dispatchTimer = window.setTimeout(() => {
@@ -1287,9 +1283,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   async function setNodeStatus(status: 'kept' | 'dropped' | 'pending'): Promise<void> {
     const node = nodeById(draft.graph, selectedNode)
-    if (!node) return
+    if (!node) { deps.toast('先选中一个节点'); return }
     node.status = status
     renderDetail()
+    renderList()
+    deps.toast(status === 'kept' ? `已采纳「${node.label}」` : status === 'dropped' ? `已放弃「${node.label}」` : '已标记待验证')
     await persistGraph()
   }
 
@@ -1353,6 +1351,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     draft.graph = { ...draft.graph, nodes: next, edges: draft.graph.edges.concat([{ from: parentId, to: id, kind: 'tree' }]) }
     selectedNode = id
     renderAll()
+    deps.toast(`已新增同级「${label.trim().slice(0, 24)}」`)
     void persistGraph()
   }
 
@@ -1443,14 +1442,20 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       edges: draft.graph.edges.concat([{ from: parent.id, to: id, kind: 'tree' }]),
     }
     renderAll()
+    deps.toast(`已新增「${label.trim().slice(0, 24)}」`)
     void persistGraph()
   }
 
   /* ------------------------------ 事件 ------------------------------ */
   function onClick(event: Event): void {
     const target = event.target as HTMLElement | null
+    const el = target?.closest('[data-idea-act]') as HTMLElement | null
     const appAct = target?.closest('[data-act]') as HTMLElement | null
-    if (askResolve !== null && appAct !== null) {
+    /*
+     * 注意顺序：弹窗内按钮也位于 [data-act="overlay"] 之下，必须先看 data-idea-act。
+     * 否则点“确定”会被当成点遮罩而取消（新增节点点击确认没反应就是这个原因）。
+     */
+    if (askResolve !== null && el === null && appAct !== null) {
       const act = appAct.getAttribute('data-act')
       if (act === 'overlay' || act === 'close-modal') {
         event.preventDefault()
@@ -1460,7 +1465,6 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       }
     }
     if (menuNode !== '' && (target?.closest('.idea-menu') === null)) closeNodeMenu()
-    const el = target?.closest('[data-idea-act]') as HTMLElement | null
     if (el === null) return
     const act = el.getAttribute('data-idea-act') ?? ''
     event.preventDefault()
@@ -1564,12 +1568,6 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       return
     }
     if (form === null) return
-    if (key === 'team') {
-      teamId = target.value
-      if (selectedId !== '') void api(`/ideas/${selectedId}`, { method: 'PATCH', body: { agentTeamId: teamId } })
-      renderBar()
-      return
-    }
     if (key === 'ask') { askValue = target.value; return }
     if (key === 'form-title') form.title = target.value.slice(0, 60)
     if (key === 'form-brief') form.brief = target.value

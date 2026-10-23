@@ -4135,7 +4135,7 @@ ${common}
   }
   /* ------------------------------ 智能体团队会话适配 ------------------------------ */
   interface AgentHandlers { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void; team?: (projection: any) => void }
-  interface AgentDispatchInput { ideaId: string; runId: string; teamId: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }
+  interface AgentDispatchInput { ideaId: string; runId: string; teamId: string; feature?: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }
   const agentSessionOffs: Array<() => void> = []
 
   /** 读 Lead 会话的 agentTeam 投影；读不到返回 null（由事件解析降级）。 */
@@ -5413,10 +5413,10 @@ ${lines}`
       if (act === 'agent-team-new') { agentPanel.openTeamForm(); return }
       if (act === 'agent-team-save') { void agentPanel.createTeam(); return }
       if (act === 'agent-team-delete') { void agentPanel.deleteTeam(id); return }
-      if (act === 'agent-member-new') { agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? ''); return }
+      if (act === 'agent-member-new') { void agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? ''); return }
       if (act === 'agent-member-edit') {
         const member = agentPanel.members().find(item => item.id === id)
-        if (member !== undefined) agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? '', member)
+        if (member !== undefined) void agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? '', member)
         return
       }
       if (act === 'agent-member-save') { void agentPanel.saveMember(actEl.getAttribute('data-team') ?? '', id); return }
@@ -5424,6 +5424,15 @@ ${lines}`
       if (act === 'agent-member-write') { void agentPanel.toggleWrite(actEl.getAttribute('data-team') ?? '', id); return }
       if (act === 'agent-member-add') { void agentPanel.addMemberToTeam(actEl.getAttribute('data-team') ?? ''); return }
       if (act === 'agent-close') { closeModal(); return }
+      if (act === 'agent-toggle-option') {
+        agentPanel.toggleOption(actEl.getAttribute('data-field') ?? '', actEl.getAttribute('data-value') ?? '')
+        return
+      }
+      if (act === 'agent-binding-toggle') {
+        void agentPanel.toggleBinding(actEl.getAttribute('data-team') ?? '', actEl.getAttribute('data-feature') ?? '', actEl.getAttribute('data-member') ?? '')
+        return
+      }
+      if (act === 'agent-refresh-catalog') { void agentPanel.loadCatalog().then(() => agentPanel.openMemberForm(actEl.getAttribute('data-team') ?? '')); return }
       if (act === 'agent-memory-open') { void agentPanel.openMemoryModal(); return }
       if (act === 'agent-memory-add') { void agentPanel.addMemory(); return }
       if (act === 'agent-memory-del') { void agentPanel.deleteMemory(id); return }

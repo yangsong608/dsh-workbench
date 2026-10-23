@@ -987,6 +987,20 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .agent-add-row select{height:26px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);color:var(--text-2);font:inherit;font-size:11px;padding:0 6px;max-width:220px}
 .agent-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .agent-empty{padding:16px;text-align:center;color:var(--text-3);font-size:11px;border:1px dashed var(--line);border-radius:9px}
+.agent-multi{display:flex;flex-wrap:wrap;gap:4px;max-height:104px;overflow:auto;padding:4px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2)}
+.agent-multi-item{font-size:10.5px;padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text-2);cursor:pointer;line-height:1.4}
+.agent-multi-item:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
+.agent-multi-item.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent-ink);font-weight:600}
+.agent-bind{margin:2px 0 10px;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel-2)}
+.agent-bind-head{font-size:11px;font-weight:650;color:var(--text);margin-bottom:7px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.agent-bind-head small{font-weight:400;color:var(--text-3);font-size:10px}
+.agent-bind-row{display:flex;align-items:flex-start;gap:8px;padding:4px 0;border-top:1px dashed var(--line)}
+.agent-bind-row:first-of-type{border-top:0}
+.agent-bind-label{flex:0 0 130px;font-size:10.5px;color:var(--text-2);padding-top:3px}
+.agent-bind-label small{color:var(--text-3);font-size:9.5px}
+.agent-bind-chips{display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0}
+.agent-bind-chip{font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text-3);cursor:pointer}
+.agent-bind-chip.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent-ink);font-weight:600}
 .portal-group-head h3{margin:0;font-size:12.5px;font-weight:650;display:flex;align-items:center;gap:7px;flex:0 0 auto}
 .portal-group-dot{width:7px;height:7px;border-radius:2px;background:var(--accent);flex:0 0 auto}
 .portal-group[data-group="rd"] .portal-group-dot{background:#0891b2}

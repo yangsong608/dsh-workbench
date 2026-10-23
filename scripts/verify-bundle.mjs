@@ -84,6 +84,8 @@ check('客户端含灵感视图骨架', client.includes('idea-root') && client.i
 check('客户端集成导图与力导引擎', client.includes('MindElixir.iife.js') && client.includes('echarts.min.js') && client.includes('buildForceOption'))
 check('灵感含项目与方向切换', client.includes('idea-project-box') && client.includes('idea-direction') && client.includes('idea-project-save'))
 check('灵感版本可回滚与删除', client.includes('idea-version-rollback') && client.includes('idea-version-delete') && host.includes('rollback'))
+check('团队按功能绑定执行人', host.includes('idea.diverge') && host.includes('executors') && client.includes('agent-binding-toggle') && client.includes('候选执行人'))
+check('成员配置读取 DSH 目录', host.includes('modelCatalog') === false && host.includes('listProviders') && client.includes('agents/options') && client.includes('agent-multi'))
 check('团队弹窗与成员配置字段', client.includes('modal-wide') && client.includes('agent-concurrency') && client.includes('portal-sec-actions'))
 check('页内会话读 agentTeam 投影', client.includes('teamStateOf') && client.includes('projectionsBySession') && client.includes('agentTeam'))
 check('记忆与知识接口/工具', host.includes('=== "memory"') && host.includes('=== "knowledge"') && host.includes('workbench_memory_search') && host.includes('workbench_knowledge_search'))

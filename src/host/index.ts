@@ -3385,7 +3385,7 @@ export function apply(ctx: any): void {
   let agentModule: ReturnType<typeof createAgentModule> | null = null
   try {
     if (typeof (store as any).connection === 'function') {
-      agentModule = createAgentModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX })
+      agentModule = createAgentModule({ db: (store as any).connection(), dataDir: dataDir(), prefix: PREFIX, ctx })
     }
   } catch (cause) {
     console.warn('[dsh-workbench] 智能体团队初始化失败（主工作台不受影响）：', String(cause))
