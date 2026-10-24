@@ -466,8 +466,10 @@ class SqliteStore {
         .run(graphJson, productGraphToV1(graph), now, row.id)
       const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM product_map_versions WHERE map_id = ?').get(row.id) as any)?.n ?? 0)
       if (count === 0) {
+        const versionId = `mv-${randomUUID().slice(0, 12)}`
         this.db.prepare('INSERT INTO product_map_versions(id, map_id, seq, label, source, source_ref, summary, graph_json, node_count, edge_count, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(`mv-${randomUUID().slice(0, 12)}`, row.id, 1, 'v1 迁移', 'migration', '', '从 v1 导图迁移', graphJson, graph.nodes.length, graph.edges.length, now)
+          .run(versionId, row.id, 1, 'v1 迁移', 'migration', '', '从 v1 导图迁移', graphJson, graph.nodes.length, graph.edges.length, now)
+        this.db.prepare('UPDATE product_maps SET current_version_id=? WHERE id=?').run(versionId, row.id)
       }
     }
   }
@@ -1209,6 +1211,7 @@ CREATE TABLE IF NOT EXISTS products (
     this.syncFirstMapMirror(productId)
     const saved = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(id) as any
     this.writeMapFile(productId, saved)
+    this.cleanInboundRefs(productId, id, graph)
     return toProductMap(saved)
   }
 
@@ -1226,6 +1229,24 @@ CREATE TABLE IF NOT EXISTS products (
       return true
     })
     return edges.length === graph.edges.length ? graph : { ...graph, edges }
+  }
+
+  /** 入向跨图引用清理：本图删掉节点后，其他导图指向 <mapId>:<nodeId> 的引用一并移除，不留悬空。 */
+  private cleanInboundRefs(productId: string, mapId: string, graph: ProductMapGraph): void {
+    try {
+      const alive = new Set(graph.nodes.map(n => n.id))
+      const others = this.db.prepare('SELECT * FROM product_maps WHERE product_id = ? AND id <> ?').all(productId, mapId) as any[]
+      for (const other of others) {
+        const g = mapGraphOf(other)
+        const edges = g.edges.filter(e => !(e.kind === 'relate' && String(e.to).startsWith(`${mapId}:`) && !alive.has(String(e.to).slice(mapId.length + 1))))
+        if (edges.length !== g.edges.length) {
+          const next = { ...g, edges }
+          this.db.prepare('UPDATE product_maps SET graph_json=?, mindmap=?, draft_rev=draft_rev+1, updated_at=? WHERE id=?')
+            .run(JSON.stringify(next), productGraphToV1(next), isoDateTimeSeconds(), other.id)
+          this.writeMapFile(productId, { id: other.id, graph_json: JSON.stringify(next), mindmap: productGraphToV1(next) })
+        }
+      }
+    } catch (cause) { console.warn(`[dsh-workbench] 入向引用清理失败：${String(cause)}`) }
   }
 
   /** 草稿保存：乐观并发（rev 不一致抛 draft_conflict，携带当前草稿）。 */
@@ -1249,6 +1270,7 @@ CREATE TABLE IF NOT EXISTS products (
     this.syncFirstMapMirror(row.product_id)
     const saved = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(mapId) as any
     this.writeMapFile(row.product_id, saved)
+    this.cleanInboundRefs(row.product_id, mapId, graph)
     return { rev: next, map: toProductMap(saved) }
   }
 
@@ -1309,6 +1331,7 @@ CREATE TABLE IF NOT EXISTS products (
     this.syncFirstMapMirror(row.product_id)
     const saved = this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(mapId) as any
     this.writeMapFile(row.product_id, saved)
+    this.cleanInboundRefs(row.product_id, mapId, graph)
     return this.mapVersionRow(this.db.prepare('SELECT * FROM product_map_versions WHERE id = ?').get(id))
   }
 
@@ -1356,6 +1379,10 @@ CREATE TABLE IF NOT EXISTS products (
     if (count <= 1) throw new Error('至少保留一张导图')
     this.db.prepare('DELETE FROM product_maps WHERE id = ?').run(mapId)
     this.db.prepare('DELETE FROM product_map_versions WHERE map_id = ?').run(mapId)
+    /* 归属清理：模块/笔记/Demo 失去导图归属（置空 map_id，而不是留下悬空 id） */
+    for (const table of ['modules', 'product_demos', 'notes']) {
+      this.db.prepare(`UPDATE ${table} SET map_id = '' WHERE map_id = ?`).run(mapId)
+    }
     /* 跨图引用级联清理：其他导图里指向本图的引用边一并移除，不留悬空。 */
     const others = this.db.prepare('SELECT * FROM product_maps WHERE product_id = ?').all(row.product_id) as any[]
     for (const other of others) {
@@ -1365,6 +1392,8 @@ CREATE TABLE IF NOT EXISTS products (
         const next = { ...graph, edges }
         this.db.prepare('UPDATE product_maps SET graph_json=?, mindmap=?, draft_rev=draft_rev+1, updated_at=? WHERE id=?')
           .run(JSON.stringify(next), productGraphToV1(next), isoDateTimeSeconds(), other.id)
+        /* 同步文件镜像，避免工作区里留着指向已删导图的悬空引用 */
+        this.writeMapFile(row.product_id, { id: other.id, graph_json: JSON.stringify(next), mindmap: productGraphToV1(next) })
       }
     }
     this.syncFirstMapMirror(row.product_id)
@@ -1387,6 +1416,7 @@ CREATE TABLE IF NOT EXISTS products (
     }
     this.db.prepare('DELETE FROM product_demos WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM product_demo_progress WHERE product_id = ?').run(id)
+    this.db.prepare('DELETE FROM product_map_versions WHERE map_id IN (SELECT id FROM product_maps WHERE product_id = ?)').run(id)
     this.db.prepare('DELETE FROM product_maps WHERE product_id = ?').run(id)
     this.db.prepare('DELETE FROM products WHERE id = ?').run(id)
   }
@@ -2067,11 +2097,13 @@ class JsonStore {
         map.updatedAt = map.updatedAt ?? now
       }
       if (!this.productMapVersions.some(v => v.mapId === map.id)) {
-        this.productMapVersions.push({
+        const version = {
           id: `mv-${randomUUID().slice(0, 12)}`, mapId: map.id, seq: 1, label: 'v1 迁移',
           source: 'migration', sourceRef: '', summary: '从 v1 导图迁移',
           graph: map.graph, nodeCount: map.graph.nodes.length, edgeCount: map.graph.edges.length, createdAt: now,
-        })
+        }
+        this.productMapVersions.push(version)
+        if (!map.currentVersionId) map.currentVersionId = version.id
       }
     }
   }
@@ -2090,6 +2122,20 @@ class JsonStore {
       return true
     })
     return edges.length === graph.edges.length ? graph : { ...graph, edges }
+  }
+  /** 入向跨图引用清理：本图删掉节点后，其他导图指向 <mapId>:<nodeId> 的引用一并移除。 */
+  private cleanInboundRefsJson(productId: string, mapId: string, graph: ProductMapGraph): void {
+    const alive = new Set(graph.nodes.map(n => n.id))
+    for (const other of this.productMaps.filter(m => m.productId === productId && m.id !== mapId)) {
+      const g = this.jsonMapGraph(other)
+      const edges = g.edges.filter(e => !(e.kind === 'relate' && String(e.to).startsWith(`${mapId}:`) && !alive.has(String(e.to).slice(mapId.length + 1))))
+      if (edges.length !== g.edges.length) {
+        other.graph = { ...g, edges }
+        other.mindmap = productGraphToV1(other.graph)
+        other.graphRev = Number(other.graphRev ?? 0) + 1
+        this.writeProductMapFile(other)
+      }
+    }
   }
   listProductMaps(productId: string): any[] {
     return this.productMaps.filter(m => m.productId === productId).sort((a, b) => a.sortOrder - b.sortOrder)
@@ -2132,6 +2178,7 @@ class JsonStore {
     }
     this.syncFirstMapMirror(productId)
     this.writeProductMapFile(map)
+    this.cleanInboundRefsJson(map.productId, map.id, map.graph)
     this.persistNews()
     return map
   }
@@ -2153,6 +2200,7 @@ class JsonStore {
     map.updatedAt = isoDateTimeSeconds()
     this.syncFirstMapMirror(map.productId)
     this.writeProductMapFile(map)
+    this.cleanInboundRefsJson(map.productId, map.id, map.graph)
     this.persistNews()
     return { rev: map.graphRev, map }
   }
@@ -2185,6 +2233,7 @@ class JsonStore {
     map.updatedAt = version.createdAt
     this.syncFirstMapMirror(map.productId)
     this.writeProductMapFile(map)
+    this.cleanInboundRefsJson(map.productId, map.id, map.graph)
     this.persistNews()
     return version
   }
@@ -2222,7 +2271,10 @@ class JsonStore {
     if (this.listProductMaps(map.productId).length <= 1) throw new Error('至少保留一张导图')
     this.productMaps = this.productMaps.filter(m => m.id !== mapId)
     this.productMapVersions = this.productMapVersions.filter(v => v.mapId !== mapId)
-    /* 跨图引用级联清理 */
+    /* 归属清理 + 跨图引用级联清理 */
+    for (const item of [...this.modules, ...this.productDemos, ...this.notes]) {
+      if (item.mapId === mapId) item.mapId = ''
+    }
     for (const other of this.productMaps.filter(m => m.productId === map.productId)) {
       const graph = this.jsonMapGraph(other)
       const edges = graph.edges.filter(e => !(e.kind === 'relate' && String(e.to).startsWith(`${mapId}:`)))
@@ -2230,6 +2282,7 @@ class JsonStore {
         other.graph = { ...graph, edges }
         other.mindmap = productGraphToV1(other.graph)
         other.graphRev = Number(other.graphRev ?? 0) + 1
+        this.writeProductMapFile(other)
       }
     }
     this.syncFirstMapMirror(map.productId)
@@ -2262,6 +2315,8 @@ class JsonStore {
       try { rmSync(join(product.workspacePath, '.dsh-workbench', 'products', id), { recursive: true, force: true }) } catch { /* ignore */ }
     }
     this.productDemos = this.productDemos.filter(d => d.productId !== id)
+    const doomedMaps = new Set(this.productMaps.filter(m => m.productId === id).map(m => m.id))
+    this.productMapVersions = this.productMapVersions.filter(v => !doomedMaps.has(v.mapId))
     this.productMaps = this.productMaps.filter(m => m.productId !== id)
     this.demoProgress = this.demoProgress.filter(p => p.productId !== id)
     this.products = this.products.filter(p => p.id !== id)

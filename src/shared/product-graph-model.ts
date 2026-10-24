@@ -598,28 +598,43 @@ export function productGraphToMarkdown(graph: ProductMapGraph): string {
   return lines.join('\n')
 }
 
-/** Markdown 大纲 → 图（缩进或 - 层级；（需求）（模块）（业务）标记定 kind）。 */
+/** Markdown 大纲 → 图（缩进或 - 层级；（需求）（模块）（业务）标记定 kind；首行 # 标题即根）。 */
 export function parseOutlineToProductGraph(raw: string, title: string): NormalizedProductGraph {
   const rows = raw.split('\n').map(line => line.replace(/\t/g, '  '))
   type Row = { depth: number; label: string; kind: ProductNodeKind }
   const parsed: Row[] = []
+  let rootLabel = ''
   for (const line of rows) {
+    /* 导出的「## 关联」段在最后，其后都是 relate 记录（- A ↔ B），回读时整段跳过 */
+    if (/^\s*##\s*关联\s*$/.test(line)) break
     const match = line.match(/^(\s*)(?:[-*+]\s+|#{1,6}\s+)?(.*)$/)
     if (!match) continue
     const labelRaw = match[2].trim()
-    if (labelRaw === '' || labelRaw === '## 关联') continue
+    if (labelRaw === '' || labelRaw.includes('↔')) continue
+    const indent = match[1].replace(/\t/g, '  ').length
+    const depth = Math.floor(indent / 2)
+    /* 首行 # 标题视为根标题（导出格式如此），不另起一层同名节点 */
+    if (rootLabel === '' && depth === 0 && /^\s*#{1,6}\s+/.test(line)) { rootLabel = labelRaw; continue }
     const kind: ProductNodeKind = /（需求）|\(需求\)|\[需求\]/.test(labelRaw)
       ? 'requirement'
       : /（模块）|\(模块\)/.test(labelRaw) ? 'module'
         : /（业务）|\(业务\)/.test(labelRaw) ? 'business' : 'feature'
-    const label = labelRaw.replace(/（需求）|\(需求\)|\[需求\]|（模块）|\(模块\)|（业务）|\(业务\)/g, '').trim()
-    const indent = match[1].replace(/\t/g, '  ').length
-    parsed.push({ depth: Math.floor(indent / 2), label, kind })
+    const label = labelRaw
+      .replace(/（需求）|\(需求\)|\[需求\]|（模块）|\(模块\)|（业务）|\(业务\)/g, '')
+      .split(' —— ')[0]
+      .trim()
+    parsed.push({ depth, label, kind })
   }
-  const fallback = emptyProductGraph(title)
-  if (parsed.length === 0) return { graph: fallback, issues: [{ code: 'OUTLINE_EMPTY', message: '没有解析到大纲内容' }] }
+  const name = rootLabel !== '' ? rootLabel : title
+  const fallback = emptyProductGraph(name)
+  if (parsed.length === 0) {
+    return {
+      graph: rootLabel === '' ? fallback : { ...fallback, nodes: [{ ...fallback.nodes[0], label: clampText(rootLabel, PRODUCT_GRAPH_LIMITS.label, true) || fallback.nodes[0].label }] },
+      issues: rootLabel === '' ? [{ code: 'OUTLINE_EMPTY', message: '没有解析到大纲内容' }] : [],
+    }
+  }
   const rootId = 'root'
-  const nodes: ProductMapNode[] = [{ id: rootId, label: title, kind: 'root', parentId: null, depth: 0, status: 'kept' }]
+  const nodes: ProductMapNode[] = [{ id: rootId, label: name, kind: 'root', parentId: null, depth: 0, status: 'kept' }]
   const stack: Array<{ id: string; depth: number }> = [{ id: rootId, depth: -1 }]
   let index = 0
   for (const row of parsed) {
@@ -630,7 +645,7 @@ export function parseOutlineToProductGraph(raw: string, title: string): Normaliz
     nodes.push({ id, label: row.label, kind: row.kind, parentId: parent.id, status: 'kept' })
     stack.push({ id, depth: row.depth })
   }
-  return normalizeProductGraph({ v: 2, rootId, nodes, edges: [] }, { title })
+  return normalizeProductGraph({ v: 2, rootId, nodes, edges: [] }, { title: name })
 }
 
 /* ------------------------------ 灵感导入 ------------------------------ */

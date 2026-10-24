@@ -391,6 +391,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productChart: any = null
   let productMindLoading: Promise<void> | null = null
   let productMindSyncTimer = 0
+  /** 草稿保存串行链：并发提交同一 rev 会假 409 并回写覆盖，排队后后者带上前者返回的 rev。 */
+  let productPersistChain: Promise<void> = Promise.resolve()
   let ctxMenuOpen = false
   let productPicked = new Set<string>()
   let productStyle = 'clean'
@@ -3167,10 +3169,14 @@ ${lines}
     target.appendChild(hint)
   }
 
-  /* ---- 草稿保存（乐观并发；rev 冲突时以宿主草稿为准并提示） ---- */
-  async function persistProductGraph(): Promise<void> {
+  /* ---- 草稿保存（乐观并发 + 串行链；rev 冲突时以宿主草稿为准并提示） ---- */
+  function persistProductGraph(): Promise<void> {
     const map = activeMap()
-    if (map === undefined) return
+    if (map === undefined) return Promise.resolve()
+    productPersistChain = productPersistChain.then(() => sendMapDraft(map))
+    return productPersistChain
+  }
+  async function sendMapDraft(map: ProductMap): Promise<void> {
     try {
       const res = await fetch(`${API}/products/maps/draft`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -3348,7 +3354,8 @@ ${lines}
   /** 导图卡片的版本徽标。 */
   function mapVersionSeq(map: ProductMap): string {
     const seq = productMapVersions.find(v => v.mapId === map.id && v.id === map.currentVersionId)?.seq
-    return seq === undefined ? '无版本' : `v${seq}`
+    if (seq !== undefined) return `v${seq}`
+    return map.currentVersionId !== undefined && map.currentVersionId !== '' ? '已存档' : '无版本'
   }
   function mapSourceLabel(map: ProductMap): string {
     if (map.source === 'idea') return `灵感导入${map.sourceRef ? ` · ${map.sourceRef.slice(0, 18)}` : ''}`
@@ -3765,10 +3772,9 @@ ${common}
         body: JSON.stringify({ version: { mapId: map.id, graph, source: 'outline', label: '大纲导入', summary: `导入 ${graph.nodes.length - 1} 个节点` } }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      map.graph = graph
-      map.graphRev += 1
       closeModal()
-      await loadMapVersions()
+      /* createMapVersion 会写草稿并递增 draft_rev：重新拉取，避免本地 rev 错位触发假冲突 */
+      await loadProductMaps()
       renderContent()
       toast(`已导入 ${graph.nodes.length - 1} 个节点`)
     } catch (cause) { toast(`导入失败：${String((cause as Error).message ?? cause)}`) }
@@ -3848,6 +3854,8 @@ ${common}
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ version: { mapId: map.id, graph: map.graph, source: archiveSource, label: archiveLabel, summary: `导入 ${map.graph.nodes.length - 1} 个节点` } }),
           })
+          /* 存档会递增 draft_rev：重新拉取，避免本地 rev 错位 */
+          await loadProductMaps()
         }
       }
       productMapScopeAll = false
@@ -3999,7 +4007,8 @@ ${common}
         body: JSON.stringify({ version: { mapId: map.id, graph: map.graph, source: 'manual', label: `v${(productMapVersions[0]?.seq ?? 0) + 1} 存档`, summary: `手动存档 · ${map.graph.nodes.length} 节点` } }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      await loadMapVersions()
+      /* 存档会写草稿并递增 draft_rev：必须回拉，否则下一次编辑带旧 rev 必 409 被覆盖 */
+      await loadProductMaps()
       renderContent()
       toast('已存档版本')
     } catch (cause) { toast(`存档失败：${String((cause as Error).message ?? cause)}`) }

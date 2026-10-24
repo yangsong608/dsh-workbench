@@ -49,6 +49,17 @@ console.log('· 图模型（shared/product-graph-model）')
     && outline.graph.nodes.find(n => n.label === '一键登录')?.kind === 'requirement'
     && outline.graph.nodes.find(n => n.label === '订单')?.kind === 'business')
 
+  // 导出 → 回读往返：根标题不重复、关联段不产生垃圾节点、detail 后缀不污染 label
+  const roundSrc = model.emptyProductGraph('往返产品')
+  roundSrc.nodes.push({ id: 'f1', label: '登录', kind: 'feature', parentId: 'root', status: 'kept', detail: '支持手机验证码' })
+  roundSrc.edges.push({ from: 'root', to: 'f1', kind: 'tree' })
+  roundSrc.edges.push({ from: 'f1', to: 'f1', kind: 'relate', label: '依赖' })
+  const exported = model.productGraphToMarkdown(roundSrc)
+  const reimported = model.parseOutlineToProductGraph(exported, '往返产品')
+  check('导出→回读：根标题不重复', reimported.graph.nodes.filter(n => n.label === '往返产品').length === 1)
+  check('导出→回读：关联段不产生垃圾节点', !reimported.graph.nodes.some(n => n.label.includes('↔') || n.label === '关联'))
+  check('导出→回读：detail 后缀不污染 label', reimported.graph.nodes.some(n => n.label === '登录'))
+
   const ideaGraph = {
     rootId: 'root',
     nodes: [
@@ -161,10 +172,30 @@ const extGraph = {
 const extRes = await call('PUT', '/products/maps/draft', { mapId: map.id, graph: extGraph })
 const extEdges = extRes.body?.map?.graph?.edges?.filter(e => e.kind === 'relate') ?? []
 check('跨图引用：合法保留 / 目标不存在被剪除', extEdges.length === 1 && extEdges[0].to === `${map2.id}:${map2.graph.rootId}`)
+await call('POST', '/modules', { module: { productId: product.id, mapId: map2.id, name: '归属模块', kind: 'module' } })
 await call('DELETE', `/products/maps/${map2.id}`)
 const afterDelete = await call('GET', `/products/maps?productId=${product.id}`)
 const cleaned = afterDelete.body?.maps?.find(m => m.id === map.id)
 check('删除目标导图级联清理跨图引用', !(cleaned?.graph?.edges ?? []).some(e => String(e.to).startsWith(`${map2.id}:`)))
+const modsRes = await call('GET', `/modules?productId=${product.id}`)
+check('删除导图后模块失去归属（map_id 置空）', (modsRes.body?.modules ?? []).some(m => m.name === '归属模块' && (m.mapId ?? '') === ''))
+
+// 7b. 入向跨图引用清理：删除被引用节点后，其他导图的引用一并移除
+{
+  const map3Res = await call('POST', '/products/maps', { map: { productId: product.id, name: '引用图', graph: model.emptyProductGraph('引用图') } })
+  const map3 = map3Res.body?.map
+  const refGraph = { ...map3.graph, edges: [{ from: map3.graph.rootId, to: `${map.id}:pn-a`, kind: 'relate' }] }
+  await call('PUT', '/products/maps/draft', { mapId: map3.id, graph: refGraph })
+  const cur = (await call('GET', `/products/maps?productId=${product.id}`)).body.maps.find(m => m.id === map.id)
+  const without = {
+    ...cur.graph,
+    nodes: cur.graph.nodes.filter(n => n.id !== 'pn-a'),
+    edges: cur.graph.edges.filter(e => e.from !== 'pn-a' && e.to !== 'pn-a'),
+  }
+  await call('PUT', '/products/maps/draft', { mapId: map.id, graph: without })
+  const check3 = (await call('GET', `/products/maps?productId=${product.id}`)).body.maps.find(m => m.id === map3.id)
+  check('删除节点后入向跨图引用一并清理', !(check3.graph.edges ?? []).some(e => String(e.to) === `${map.id}:pn-a`))
+}
 
 // 6. v1 旧库迁移：先造 v1 数据再加载
 const dbFile2 = join(tmp, 'workbench-v1.sqlite')
@@ -197,6 +228,19 @@ const oldMap = migrated.body?.maps?.[0]
 check('v1 旧库自动迁移：mindmap → v2 且 id 保留', oldMap?.graph?.nodes?.some(n => n.id === 'legacy-f1') && oldMap?.graph?.v === 2)
 const migratedVersions = await call2('GET', `/products/maps/versions?mapId=map-old`)
 check('迁移自动存档 v1 版本', (migratedVersions.body?.versions ?? []).some(v => v.source === 'migration'))
+check('迁移版本成为当前版本', oldMap?.currentVersionId === (migratedVersions.body?.versions ?? []).find(v => v.source === 'migration')?.id)
+
+// 7. 删除产品级联清理版本行（防孤儿）
+{
+  const pRes = await call('POST', '/products', { product: { name: '待删产品', workspacePath: tmp } })
+  const p = pRes.body?.product
+  const mRes = await call('GET', `/products/maps?productId=${p.id}`)
+  const m = mRes.body?.maps?.[0]
+  await call('POST', '/products/maps/versions', { version: { mapId: m.id, graph: m.graph, source: 'manual', label: 'v1' } })
+  await call('DELETE', `/products/${p.id}`)
+  const after = await call('GET', `/products/maps/versions?mapId=${m.id}`)
+  check('删除产品级联清理导图版本', (after.body?.versions ?? []).length === 0)
+}
 
 console.log(`\n${passed}/${passed + failed} 通过`)
 rmSync(tmp, { recursive: true, force: true })
