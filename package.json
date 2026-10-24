@@ -30,6 +30,7 @@
     "bundle": "pnpm run bundle:host && pnpm run bundle:client",
     "bundle:host": "tsdown -c src/host/tsdown.config.ts",
     "bundle:client": "tsdown -c src/client/tsdown.config.ts",
+    "sync:smoke": "node scripts/sync-smoke.mjs",
     "verify": "node scripts/verify-bundle.mjs"
   },
   "devDependencies": {

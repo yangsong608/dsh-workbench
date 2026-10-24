@@ -19,6 +19,7 @@ import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createIdeaModule, buildIdeaPrompt } from './idea.js'
 import { createAgentModule } from './agent.js'
+import { syncDelta, syncMeta, syncPush, writeTombstone, type SyncHooks } from './sync.js'
 import {
   clampText as clampGraphText, normalizeProductGraph, parseExternalRef, productGraphBytes,
   productGraphFromV1, productGraphToV1, PRODUCT_GRAPH_LIMITS, type ProductMapGraph,
@@ -345,12 +346,19 @@ CREATE TABLE IF NOT EXISTS news_items (
   hash TEXT NOT NULL,
   UNIQUE(topic_id, hash)
 );
+CREATE TABLE IF NOT EXISTS tombstones (
+  entity TEXT NOT NULL,
+  id TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  PRIMARY KEY(entity, id)
+);
 CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id);
 CREATE INDEX IF NOT EXISTS idx_logs_task ON logs(task_id);
 CREATE INDEX IF NOT EXISTS idx_news_items_topic ON news_items(topic_id, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(pinned DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tombstones_time ON tombstones(deleted_at);
 `
 
 class SqliteStore {
@@ -489,6 +497,11 @@ class SqliteStore {
     this.db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
   }
 
+  /** 快照写入前先记下旧 id 集合，用于识别「原有但新快照里不存在」的删除项。 */
+  private idsOf(table: string): string[] {
+    return (this.db.prepare(`SELECT id FROM ${table}`).all() as any[]).map(row => String(row.id))
+  }
+
   /** 读整份状态（一次组装，任务内嵌子待办/附件/记录）。 */
   readState(): State & { revision: number } {
     const spaces = this.db.prepare('SELECT * FROM spaces ORDER BY sort, created_at').all()
@@ -548,11 +561,21 @@ class SqliteStore {
 
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      /* 先读旧 id：整份快照是「全清重插」，只有对比旧集合才能识别删除项并记墓碑。 */
+      const oldTaskIds = this.idsOf('tasks')
+      const oldSubtaskIds = this.idsOf('subtasks')
+      const oldFocusIds = this.idsOf('focus_sessions')
+      const oldSpaceIds = this.idsOf('spaces')
+      const newSubtaskIds = new Set<string>()
+      const newFocusIds = new Set<string>()
+      const newSpaceIds = new Set<string>()
+
       this.db.exec('DELETE FROM subtasks; DELETE FROM attachments; DELETE FROM logs; DELETE FROM tasks; DELETE FROM spaces; DELETE FROM focus_sessions; DELETE FROM settings;')
       const insSpace = this.db.prepare('INSERT INTO spaces(id, name, color, sort, created_at, updated_at) VALUES(?,?,?,?,?,?)')
       spaces.forEach((space, index) => {
         const id = str(space?.id)
         if (id === '') return
+        newSpaceIds.add(id)
         insSpace.run(id, str(space.name, id), str(space.color, '#5b5bd6'), index, now, now)
       })
 
@@ -588,6 +611,7 @@ class SqliteStore {
         list(task.subtasks).slice(0, 500).forEach((sub, i) => {
           const sid = str(sub?.id)
           if (sid === '') return
+          newSubtaskIds.add(sid)
           insSub.run(sid, id, str(sub.title, '子待办'), sub.done ? 1 : 0,
             sub.start ? str(sub.start) : null, sub.end ? str(sub.end) : null, sub.note ? str(sub.note) : null, i)
         })
@@ -605,6 +629,7 @@ class SqliteStore {
       list(state.focus).slice(0, 50_000).forEach((f, i) => {
         const id = str(f?.id, `focus:${i}`)
         const taskId = str(f.taskId)
+        newFocusIds.add(id)
         insFocus.run(id, taskIds.has(taskId) ? taskId : null, str(f.startedAt, now), Math.max(0, Math.round(num(f.minutes))), f.completed === false ? 0 : 1)
       })
 
@@ -613,6 +638,13 @@ class SqliteStore {
       for (const [key, value] of Object.entries(settings)) {
         insSetting.run(str(key).slice(0, 120), JSON.stringify(value))
       }
+
+      /* 删除记账：旧有而新快照中不存在的 id 写墓碑（同一事务内，失败一起回滚）。 */
+      const deletedAt = isoDateTimeSeconds()
+      for (const id of oldTaskIds) if (!taskIds.has(id)) writeTombstone(this.db, 'tasks', id, deletedAt)
+      for (const id of oldSubtaskIds) if (!newSubtaskIds.has(id)) writeTombstone(this.db, 'subtasks', id, deletedAt)
+      for (const id of oldFocusIds) if (!newFocusIds.has(id)) writeTombstone(this.db, 'focus_sessions', id, deletedAt)
+      for (const id of oldSpaceIds) if (!newSpaceIds.has(id)) writeTombstone(this.db, 'spaces', id, deletedAt)
 
       this.revision += 1
       this.writeMeta('revision', String(this.revision))
@@ -663,6 +695,7 @@ class SqliteStore {
     try {
       this.db.prepare('DELETE FROM news_items WHERE topic_id = ?').run(id)
       this.db.prepare('DELETE FROM news_topics WHERE id = ?').run(id)
+      writeTombstone(this.db, 'news_topics', id)
       this.db.exec('COMMIT')
     } catch (cause) {
       try { this.db.exec('ROLLBACK') } catch { /* ignore */ }
@@ -1041,6 +1074,7 @@ CREATE TABLE IF NOT EXISTS products (
     const moved = Number((this.db.prepare('SELECT COUNT(*) AS n FROM notes WHERE notebook_id = ?').get(id) as any)?.n ?? 0)
     this.db.prepare('UPDATE notes SET notebook_id = ? WHERE notebook_id = ?').run(other.id, id)
     this.db.prepare('DELETE FROM notebooks WHERE id = ?').run(id)
+    writeTombstone(this.db, 'notebooks', id)
     return { ok: true, moved, notebookId: other.id }
   }
 
@@ -1079,6 +1113,7 @@ CREATE TABLE IF NOT EXISTS products (
     const row = this.db.prepare('SELECT file_path FROM notes WHERE id = ?').get(id) as any
     if (row?.file_path) removeFile(String(row.file_path))
     this.db.prepare('DELETE FROM notes WHERE id = ?').run(id)
+    if (row !== undefined) writeTombstone(this.db, 'notes', id)
   }
 
   getExportConfig(): { exportDir: string; defaultExportDir: string } {
@@ -3889,6 +3924,31 @@ export function apply(ctx: any): void {
           })
           send(res, 200, result)
           return
+        }
+        /* ---------- 增量同步（P1-1）：游标增量 + 墓碑 + 条目级写入 ---------- */
+        if (path === '/sync/meta' || path === '/sync/delta' || path === '/sync/push') {
+          if (store.engine !== 'sqlite') {
+            send(res, 501, { error: 'sync_requires_sqlite', message: '增量同步依赖 node:sqlite 存储；当前为 JSON 兜底' })
+            return
+          }
+          const db = (store as any).connection()
+          if (method === 'GET' && path === '/sync/meta') {
+            send(res, 200, syncMeta(db))
+            return
+          }
+          if (method === 'GET' && path === '/sync/delta') {
+            send(res, 200, syncDelta(db, {
+              since: url.searchParams.get('since'),
+              entity: url.searchParams.get('entity'),
+              limit: url.searchParams.get('limit'),
+            }))
+            return
+          }
+          if (method === 'POST' && path === '/sync/push') {
+            const body = await readJson(req)
+            send(res, 200, await serialized(() => syncPush(db, body, store as unknown as SyncHooks)))
+            return
+          }
         }
         if (method === 'GET' && path === '/news') {
           send(res, 200, store.listNews())
