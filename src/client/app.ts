@@ -3156,6 +3156,25 @@ ${lines}
       return
     }
     productChart = ns.init(target, null, { renderer: 'canvas' })
+    /* 点击跨图引用伪节点 → 跳到目标导图并选中目标节点（设计验收「可跳转」） */
+    productChart.on('click', (params: any) => {
+      if (params?.dataType !== 'node' || typeof params.data?.id !== 'string' || productMapPreview !== null) return
+      const id = String(params.data.id)
+      const sep = id.indexOf(':')
+      if (sep > 0) {
+        const targetMap = id.slice(0, sep)
+        const targetNode = id.slice(sep + 1)
+        if (productMaps.some(m => m.id === targetMap)) {
+          productMapSelected = targetMap
+          productNodeSelected = targetNode
+          productMapScopeAll = false
+          void loadMapVersions().then(() => renderContent())
+          toast('已跳到引用的导图')
+        }
+        return
+      }
+      productNodeSelected = id
+    })
     productChart.setOption(buildProductForceOption(graph, { dark: resolvedTheme() === 'dark' }), true)
     const legend = document.createElement('div')
     legend.className = 'pm-force-legend'
@@ -3245,7 +3264,7 @@ ${lines}
       const rail = `<aside class="pm-maps">
         <div class="pm-maps-head"><b>导图</b><span>${productMaps.length}</span><button class="icon-btn" data-act="pm-map-new" title="新建导图（自建 / 导入 / 从灵感）">${ic('plus', 13)}</button></div>
         ${productMaps.length === 0 ? `<div class="pm-maps-empty">${productMapsReady ? '还没有导图，点 + 新建（自建 / 导入大纲 / 从灵感选择）' : '多导图不可用（宿主未更新）'}</div>` : productMaps.map(map => `<div class="pm-map${map.id === productMapSelected ? ' active' : ''}" data-act="pm-map-select" data-id="${map.id}" title="${esc(map.description || map.name)}">
-          <b>${esc(map.name)}</b><small>${mapNodeCount(map)} 节点 · ${productNoteListOfMap(map.id).length} 笔记 · ${mapVersionSeq(map)}</small>
+          <b>${esc(map.name)}</b><small>${mapNodeCount(map)} 节点 · ${productNoteListOfMap(map.id).length} 笔记 · ${mapVersionSeq(map)}${mapRefCount(map) === '' ? '' : ` · ${mapRefCount(map)}`}</small>
           <small class="pm-map-src">${mapSourceLabel(map)}</small>
           <span class="pm-map-ops"><button class="icon-btn" data-act="pm-map-rename" data-id="${map.id}" title="重命名">${ic('edit', 11)}</button><button class="icon-btn" data-act="pm-map-delete" data-id="${map.id}" title="删除导图">${ic('trash', 11)}</button></span>
         </div>`).join('')}
@@ -3362,6 +3381,18 @@ ${lines}
     if (map.source === 'outline') return '大纲导入'
     if (map.source === 'ai') return 'AI 生成'
     return '自建'
+  }
+  /** 跨图引用计数：引用 = 本图指向他图；被引用 = 他图指向本图（「互为补充」的量化）。 */
+  function mapRefCount(map: ProductMap): string {
+    const graph = map.graph
+    if (graph === undefined || !Array.isArray(graph.edges)) return ''
+    const out = externalEdges(graph).length
+    let inbound = 0
+    for (const other of productMaps) {
+      if (other.id === map.id || other.graph === undefined || !Array.isArray(other.graph.edges)) continue
+      inbound += externalEdges(other.graph).filter(e => String(e.to).startsWith(`${map.id}:`)).length
+    }
+    return out === 0 && inbound === 0 ? '' : `引用 ${out} · 被引用 ${inbound}`
   }
   function mapSourceText(source: string): string {
     return source === 'idea' ? '灵感导入' : source === 'outline' ? '大纲导入' : source === 'ai' ? 'AI'
