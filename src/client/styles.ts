@@ -788,6 +788,28 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .demo-progress-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#fff));transition:width .3s}
 .demo-progress-log{font-size:9.5px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;margin-top:4px}
 .demo-progress-log i{font-style:normal;color:var(--text-3);opacity:.7;margin-right:6px}
+/* 导图画布（mind-elixir / ECharts 双引擎）与版本面板 */
+.pm-plot-wrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-height:460px;height:calc(100vh - 300px);position:relative}
+.pm-plot{width:100%;height:100%;min-height:456px;position:relative}
+.pm-mind{width:100%;height:100%}
+.pm-force-legend{position:absolute;left:10px;top:10px;display:flex;gap:9px;font-size:9.5px;color:var(--text-3);background:color-mix(in srgb,var(--panel) 88%,transparent);border:1px solid var(--line);border-radius:8px;padding:4px 8px;pointer-events:none}
+.pm-force-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:3px;vertical-align:middle}
+.pm-force-legend i.ext{background:repeating-linear-gradient(45deg,var(--text-3),var(--text-3) 2px,transparent 2px,transparent 4px)}
+.pm-force-hint{position:absolute;right:10px;bottom:8px;font-size:9px;color:var(--text-3);background:color-mix(in srgb,var(--panel) 88%,transparent);border:1px solid var(--line);border-radius:8px;padding:3px 8px;pointer-events:none}
+.pm-preview-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));background:var(--accent-soft);border-radius:9px;margin-bottom:7px;font-size:10.5px}
+.pm-preview-bar b{color:var(--text)}
+.pm-preview-bar span{color:var(--text-3);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pm-engine-seg{flex-shrink:0}
+.pm-versions{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.pm-version{border:1px solid transparent;border-radius:7px;padding:5px 7px;cursor:pointer;position:relative}
+.pm-version:hover{background:var(--hover)}
+.pm-version.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}
+.pm-version b{display:block;font-size:10px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pm-version small{display:block;font-size:8.5px;color:var(--text-3);margin-top:1px}
+.pm-version .pm-map-ops .icon-btn{opacity:0;transition:opacity .15s}
+.pm-version:hover .pm-map-ops .icon-btn{opacity:1}
+.pm-map-src{color:var(--text-3);opacity:.85}
+.diff-list{margin:4px 0 0;padding-left:16px;font-size:10.5px;color:var(--text-2);max-height:120px;overflow:auto}
 @media (max-width:1000px){.product-note-list{grid-template-columns:1fr}.product-demo-layout{grid-template-columns:190px minmax(0,1fr)}.product-ws{max-width:220px}}
 
 /* ---------- test ---------- */

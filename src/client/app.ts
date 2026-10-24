@@ -8,6 +8,12 @@
 import { WORKBENCH_CSS } from './styles'
 import { createIdeaView, type IdeaViewHandle } from './idea'
 import { createAgentPanel } from './agent-panel'
+import {
+  buildProductForceOption, emptyProductGraph, externalEdges, fromMindElixir, normalizeProductGraph,
+  parseOutlineToProductGraph, productGraphFromIdea, productGraphFromV1, productGraphToMarkdown, diffProductGraphs,
+  PRODUCT_KIND_COLOR, PRODUCT_KIND_LABEL, toMindElixir,
+  type IdeaLikeGraph, type ProductMapGraph, type ProductMapNode, type ProductNodeKind,
+} from '../shared/product-graph-model'
 
 const API = '/workbench-api'
 
@@ -68,17 +74,24 @@ interface TestRun {
   id: string; projectId: string; name: string; status: 'running' | 'passed' | 'failed' | 'blocked'
   results: TestResult[]; summary: Record<string, number>; deployLog: string; createdAt: string; finishedAt: string | null
 }
-interface ProductNode {
-  id: string; label: string; type: 'root' | 'feature' | 'requirement'; parentId: string | null; note?: string
-}
+/** 导图节点（v2 图模型，kind 对齐模块四级；见 shared/product-graph-model）。 */
+type ProductNode = ProductMapNode
 interface Product {
   id: string; name: string; description: string; workspacePath: string; notebookId: string
   mindmap: string; styles: string[]; createdAt: string; updatedAt: string
 }
-/** 一张导图：一个产品可有多张（按业务线 / 版本 / 端拆），设计笔记、模块、灵感、Demo 都挂在导图下。 */
+/** 一张导图：一个产品可有多张（互为补充），每张导图有独立版本序列。 */
 interface ProductMap {
   id: string; productId: string; name: string; description: string
-  mindmap: string; sortOrder?: number; createdAt: string; updatedAt: string
+  mindmap: string
+  graph: ProductMapGraph
+  graphRev: number; currentVersionId: string
+  source: string; sourceRef: string; summary: string
+  sortOrder?: number; createdAt: string; updatedAt: string
+}
+interface ProductMapVersion {
+  id: string; mapId: string; seq: number; label: string; source: string; sourceRef: string
+  summary: string; nodeCount: number; edgeCount: number; createdAt: string; graph?: ProductMapGraph
 }
 /** 门户「项目」：以 DSH 工作区为聚合法，把产品 / Bug 项目 / 测试项目收在同一张卡上。 */
 interface ProjectCard {
@@ -369,8 +382,15 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productMapsReady = false
   let productTab: 'map' | 'notes' | 'modules' | 'demo' = 'map'
   let productNodeSelected: string | null = null
-  const productNodeCollapsed = new Set<string>()
-  let productMapZoom = 1
+  /** 画布引擎：mind-elixir（编辑）/ ECharts 力导（关系）。 */
+  let productMapEngine: 'tree' | 'force' = 'tree'
+  /** 当前导图的版本序列（参照灵感：存档 / 对比 / 回滚 / 只读预览）。 */
+  let productMapVersions: ProductMapVersion[] = []
+  let productMapPreview: ProductMapVersion | null = null
+  let productMind: any = null
+  let productChart: any = null
+  let productMindLoading: Promise<void> | null = null
+  let productMindSyncTimer = 0
   let ctxMenuOpen = false
   let productPicked = new Set<string>()
   let productStyle = 'clean'
@@ -923,7 +943,10 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     })
     if (ui.view === 'notes') bindNotes()
     if (ui.view === 'bugs') bindBugs()
-    if (ui.view === 'product') bindProduct()
+    if (ui.view === 'product') {
+      bindProduct()
+      if (productTab === 'map') void mountProductCanvas()
+    }
     if (ui.view === 'test') bindTests()
   }
 
@@ -2951,21 +2974,28 @@ ${lines}
   function productOf(id: string | null | undefined): Product | undefined {
     return products.find(p => p.id === id)
   }
-  function productNodes(product: Product | undefined): ProductNode[] {
-    if (!product) return []
-    try {
-      const parsed = JSON.parse(mapMindmap() || '{"nodes":[]}') as { nodes?: ProductNode[] }
-      return Array.isArray(parsed.nodes) ? parsed.nodes : []
-    } catch { return [] }
+  /** 当前导图的 v2 图（旧数据就地转换）；「全部导图」时退回产品镜像（旧版单导图）。 */
+  function mapGraph(): ProductMapGraph {
+    const map = activeMap()
+    if (map !== undefined) {
+      if (map.graph !== undefined && Array.isArray(map.graph.nodes)) return map.graph
+      return productGraphFromV1(map.mindmap || '{"nodes":[]}', map.name).graph
+    }
+    const product = productOf(productSelected)
+    return productGraphFromV1(product?.mindmap || '{"nodes":[]}', product?.name ?? '产品').graph
   }
-  function productNodeById(product: Product | undefined, id: string | null | undefined): ProductNode | undefined {
-    return productNodes(product).find(n => n.id === id)
+  function productNodes(_product?: Product | undefined): ProductNode[] {
+    return mapGraph().nodes
   }
-  function productFeatureNodes(product: Product | undefined): ProductNode[] {
-    return productNodes(product).filter(n => n.type !== 'root')
+  function productNodeById(_product: Product | undefined, id: string | null | undefined): ProductNode | undefined {
+    if (!id) return undefined
+    return mapGraph().nodes.find(n => n.id === id)
   }
-  function productDefaultPicked(product: Product | undefined): Set<string> {
-    return new Set(productFeatureNodes(product).filter(n => n.type === 'feature').map(n => n.id))
+  function productFeatureNodes(_product?: Product | undefined): ProductNode[] {
+    return productNodes().filter(n => n.kind !== 'root')
+  }
+  function productDefaultPicked(_product?: Product | undefined): Set<string> {
+    return new Set(productFeatureNodes().filter(n => n.kind === 'feature').map(n => n.id))
   }
   function productSelectedFeatures(product: Product | undefined): ProductNode[] {
     return productFeatureNodes(product).filter(n => productPicked.has(n.id))
@@ -2993,234 +3023,190 @@ ${lines}
     if (productMapScopeAll || productMapSelected === '') return '全部导图'
     return activeMap()?.name ?? '当前导图'
   }
-  const MAP_W = 174
-  const MAP_H = 42
-  type MapLayout = 'right' | 'bilateral' | 'down' | 'radial'
-  const MAP_LAYOUTS: Array<{ id: MapLayout; label: string; hint: string }> = [
-    { id: 'right', label: '右向', hint: '右向树：从左往右逐层展开' },
-    { id: 'bilateral', label: '双翼', hint: '左右双翼：根节点居中，分支分列两侧' },
-    { id: 'down', label: '纵向', hint: '组织架构：自上而下分层' },
-    { id: 'radial', label: '环形', hint: '环形导图：各分支按叶子数分角度' },
-  ]
-  function mapLayoutMode(): MapLayout {
-    const value = db.settings.mapLayout
-    return value === 'bilateral' || value === 'down' || value === 'radial' ? value : 'right'
-  }
-  function productChildrenMap(nodes: ProductNode[]): Map<string, ProductNode[]> {
-    const children = new Map<string, ProductNode[]>()
-    for (const node of nodes) {
-      const key = node.parentId ?? ''
-      const list = children.get(key) ?? []
-      list.push(node)
-      children.set(key, list)
-    }
-    return children
-  }
-  function productRootOf(nodes: ProductNode[]): ProductNode | undefined {
-    return nodes.find(n => n.type === 'root') ?? nodes.find(n => n.parentId === null) ?? nodes[0]
-  }
-  interface MapGeometry {
-    width: number
-    height: number
-    places: Map<string, { x: number; y: number }>
-    edges: Array<{ from: string; to: string; d: string }>
-  }
-  /** 四种布局共用一套「父子边 + 节点左上角」几何，支持折叠。 */
-  function productMapGeometry(nodes: ProductNode[], mode: MapLayout): MapGeometry {
-    const children = productChildrenMap(nodes)
-    const root = productRootOf(nodes)
-    const places = new Map<string, { x: number; y: number }>()
-    const edges: Array<{ from: string; to: string; d: string }> = []
-    if (root === undefined) return { width: 560, height: 220, places, edges }
-    const kidsOf = (node: ProductNode): ProductNode[] => productNodeCollapsed.has(node.id) ? [] : (children.get(node.id) ?? [])
-    const leafCount = (node: ProductNode): number => {
-      const kids = kidsOf(node)
-      return kids.length === 0 ? 1 : kids.reduce((sum, kid) => sum + leafCount(kid), 0)
-    }
-    if (mode === 'right') {
-      let cursor = 24
-      const place = (node: ProductNode, depth: number): void => {
-        const kids = kidsOf(node)
-        const x = 24 + depth * 220
-        if (kids.length === 0) {
-          places.set(node.id, { x, y: cursor })
-          cursor += MAP_H + 16
-          return
-        }
-        for (const kid of kids) place(kid, depth + 1)
-        const ys = kids.map(kid => places.get(kid.id)?.y ?? 0)
-        places.set(node.id, { x, y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) })
-      }
-      place(root, 0)
-    } else if (mode === 'down') {
-      let cursor = 24
-      const place = (node: ProductNode, depth: number): { min: number; max: number } => {
-        const kids = kidsOf(node)
-        const y = 24 + depth * 96
-        if (kids.length === 0) {
-          const x = cursor
-          cursor += MAP_W + 22
-          places.set(node.id, { x, y })
-          return { min: x, max: x }
-        }
-        const spans = kids.map(kid => place(kid, depth + 1))
-        const min = Math.min(...spans.map(span => span.min))
-        const max = Math.max(...spans.map(span => span.max))
-        places.set(node.id, { x: Math.round((min + max) / 2), y })
-        return { min, max }
-      }
-      place(root, 0)
-    } else if (mode === 'bilateral') {
-      const branches = kidsOf(root)
-      const cut = Math.ceil(branches.length / 2)
-      const gap = 56
-      const step = 220
-      const placeSide = (side: 1 | -1, list: ProductNode[]): void => {
-        let cursor = 24
-        const xOf = (depth: number): number => {
-          const distance = MAP_W / 2 + gap + (depth - 1) * step
-          return side === 1 ? Math.round(distance) : Math.round(-distance - MAP_W)
-        }
-        const place = (node: ProductNode, depth: number): void => {
-          const kids = kidsOf(node)
-          const x = xOf(depth)
-          if (kids.length === 0) {
-            places.set(node.id, { x, y: cursor })
-            cursor += MAP_H + 16
-            return
-          }
-          for (const kid of kids) place(kid, depth + 1)
-          const ys = kids.map(kid => places.get(kid.id)?.y ?? 0)
-          places.set(node.id, { x, y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) })
-        }
-        for (const branch of list) place(branch, 1)
-      }
-      placeSide(1, branches.slice(0, cut))
-      placeSide(-1, branches.slice(cut))
-      const ys = Array.from(places.values()).map(point => point.y)
-      const top = ys.length > 0 ? Math.min(...ys) : 24
-      const bottom = ys.length > 0 ? Math.max(...ys) + MAP_H : 24 + MAP_H
-      places.set(root.id, { x: Math.round(-MAP_W / 2), y: Math.round((top + bottom) / 2 - MAP_H / 2) })
-    } else {
-      const branches = kidsOf(root)
-      const total = Math.max(1, branches.reduce((sum, branch) => sum + leafCount(branch), 0))
-      places.set(root.id, { x: Math.round(-MAP_W / 2), y: Math.round(-MAP_H / 2) })
-      let angle = -Math.PI / 2
-      const placeAngular = (node: ProductNode, depth: number, start: number, span: number): void => {
-        const radius = depth * 236
-        const theta = start + span / 2
-        places.set(node.id, { x: Math.round(Math.cos(theta) * radius - MAP_W / 2), y: Math.round(Math.sin(theta) * radius - MAP_H / 2) })
-        const kids = kidsOf(node)
-        if (kids.length === 0) return
-        const weight = Math.max(1, kids.reduce((sum, kid) => sum + leafCount(kid), 0))
-        let cursor = start
-        for (const kid of kids) {
-          const share = span * (leafCount(kid) / weight)
-          placeAngular(kid, depth + 1, cursor, share)
-          cursor += share
-        }
-      }
-      for (const branch of branches) {
-        const span = 2 * Math.PI * (leafCount(branch) / total)
-        placeAngular(branch, 1, angle, span)
-        angle += span
-      }
-    }
-    let minX = Infinity
-    let minY = Infinity
-    let maxX = -Infinity
-    let maxY = -Infinity
-    for (const point of places.values()) {
-      minX = Math.min(minX, point.x); minY = Math.min(minY, point.y)
-      maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y)
-    }
-    if (!Number.isFinite(minX)) return { width: 560, height: 220, places, edges }
-    const dx = 24 - minX
-    const dy = 24 - minY
-    for (const [id, point] of places) places.set(id, { x: point.x + dx, y: point.y + dy })
-    for (const node of nodes) {
-      for (const kid of kidsOf(node)) {
-        const from = places.get(node.id)
-        const to = places.get(kid.id)
-        if (from === undefined || to === undefined) continue
-        let d = ''
-        if (mode === 'down') {
-          const x1 = from.x + MAP_W / 2
-          const y1 = from.y + MAP_H
-          const x2 = to.x + MAP_W / 2
-          const y2 = to.y
-          const mid = (y1 + y2) / 2
-          d = `M${x1} ${y1} C${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
-        } else if (mode === 'radial') {
-          const x1 = from.x + MAP_W / 2
-          const y1 = from.y + MAP_H / 2
-          const x2 = to.x + MAP_W / 2
-          const y2 = to.y + MAP_H / 2
-          d = `M${x1} ${y1} Q${(x1 + x2) / 2} ${(y1 + y2) / 2} ${x2} ${y2}`
-        } else {
-          const rightward = to.x + MAP_W / 2 >= from.x + MAP_W / 2
-          const x1 = rightward ? from.x + MAP_W : from.x
-          const y1 = from.y + MAP_H / 2
-          const x2 = rightward ? to.x : to.x + MAP_W
-          const y2 = to.y + MAP_H / 2
-          const mid = (x1 + x2) / 2
-          d = `M${x1} ${y1} C${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
-        }
-        edges.push({ from: node.id, to: kid.id, d })
-      }
-    }
-    return {
-      width: Math.max(560, maxX + dx + MAP_W + 24),
-      height: Math.max(240, maxY + dy + MAP_H + 24),
-      places,
-      edges,
-    }
-  }
-  /** 按根分支取色（XMind 彩色分支效果）。 */
-  function productBranchColor(product: Product | undefined, node: ProductNode): string {
-    const nodes = productNodes(product)
-    let cur: ProductNode | undefined = node
-    while (cur?.parentId) cur = nodes.find(n => n.id === cur?.parentId)
-    const kids = nodes.filter(n => n.parentId === (cur?.id ?? '') && n.type !== 'root')
-    const index = Math.max(0, kids.findIndex(k => {
-      let c: ProductNode | undefined = node
-      while (c?.parentId && c.parentId !== cur?.id) c = nodes.find(n => n.id === c?.parentId)
-      return c?.id === k.id
-    }))
-    return ['#2563eb', '#0f9f6e', '#d97706', '#7c3aed', '#db2777', '#0891b2'][index % 6]
-  }
+  /* ------------------------------ 画布：mind-elixir（编辑）/ ECharts（关系） ------------------------------ */
   function escapeAttr(value: string): string { return esc(value) }
-  function renderProductMap(product: Product): string {
-    const nodes = productNodes(product)
-    if (nodes.length === 0) return '<div class="notes-empty small">导图为空，点「新增功能」开始。快捷键：Tab 加子节点、Enter 加同级、F2 重命名、Delete 删除；节点上右键有完整菜单。</div>'
-    const mode = mapLayoutMode()
-    const layout = productMapGeometry(nodes, mode)
-    const children = productChildrenMap(nodes)
-    const edges = layout.edges.map(edge => {
-      const child = productNodeById(product, edge.to)
-      return `<path d="${edge.d}" class="pm-edge" style="stroke:${child === undefined ? 'var(--line-strong)' : productBranchColor(product, child)}"/>`
-    }).join('')
-    const cards = nodes.map(node => {
-      const pos = layout.places.get(node.id)
-      if (pos === undefined) return ''
-      const active = productNodeSelected === node.id
-      const typeLabel = node.type === 'root' ? '产品' : node.type === 'feature' ? '功能' : '需求'
-      const kids = children.get(node.id) ?? []
-      const collapsed = productNodeCollapsed.has(node.id)
-      const color = node.type === 'root' ? 'var(--accent)' : productBranchColor(product, node)
-      const toggle = kids.length > 0
-        ? `<g class="pm-fold" data-product-node-fold="${node.id}" transform="translate(${160},${15})"><circle r="8" class="pm-fold-circle"/><text y="4" text-anchor="middle" class="pm-fold-mark">${collapsed ? '+' : '−'}</text><title>${collapsed ? '展开' : '折叠'}（${kids.length} 个子节点）</title></g>`
-        : ''
-      return `<g class="pm-node ${node.type}${active ? ' active' : ''}" data-product-node="${node.id}" transform="translate(${pos.x},${pos.y})">
-        <rect width="174" height="42" rx="9" style="stroke:${color}"/>
-        <text x="10" y="17" class="pm-type">${typeLabel}${collapsed && kids.length > 0 ? ` · ${kids.length}` : ''}</text>
-        <text x="10" y="33" class="pm-label" title="${esc(node.label)}">${esc(node.label.slice(0, 18))}</text>
-        ${toggle}
-      </g>`
-    }).join('')
-    const width = Math.round(layout.width * productMapZoom)
-    const height = Math.round(layout.height * productMapZoom)
-    return `<div class="pm-canvas pm-layout-${mode}" data-pm-canvas><svg viewBox="0 0 ${layout.width} ${layout.height}" width="${width}" height="${height}" style="width:${width}px;height:${height}px">${edges}${cards}</svg></div>`
+
+  async function loadVendorScript(src: string, id: string): Promise<void> {
+    const exists = document.getElementById(id) as HTMLScriptElement | null
+    if (exists !== null) {
+      if (exists.dataset.loaded === '1') return
+      await new Promise<void>((resolve, reject) => {
+        exists.addEventListener('load', () => resolve(), { once: true })
+        exists.addEventListener('error', () => reject(new Error('加载失败')), { once: true })
+      })
+      return
+    }
+    await new Promise<void>((resolve, reject) => {
+      const el = document.createElement('script')
+      el.id = id
+      el.src = src
+      el.async = true
+      el.onload = () => { el.dataset.loaded = '1'; resolve() }
+      el.onerror = () => reject(new Error(`加载失败：${src}`))
+      document.head.appendChild(el)
+    })
+  }
+
+  /** mind-elixir 的 data-nodeid 可能带 me 前缀，按「精确命中优先、去前缀次之」还原图 id。 */
+  function productGraphIdOf(raw: string): string {
+    if (raw === '') return ''
+    const graph = mapGraph()
+    if (graph.nodes.some(n => n.id === raw)) return raw
+    if (raw.startsWith('me') && graph.nodes.some(n => n.id === raw.slice(2))) return raw.slice(2)
+    return raw
+  }
+
+  function renderProductMap(_product: Product): string {
+    const preview = productMapPreview
+    const banner = preview === null ? '' : `<div class="pm-preview-bar"><b>只读预览 v${preview.seq} · ${esc(preview.label)}</b><span>${esc(preview.summary || preview.source)} · ${preview.nodeCount} 节点</span>
+      <button class="btn tiny" data-act="pm-version-rollback" data-id="${preview.id}">回滚到此版本</button>
+      <button class="btn tiny" data-act="pm-version-delete" data-id="${preview.id}">删除此版本</button>
+      <button class="btn tiny" data-act="pm-version-back">退出预览</button></div>`
+    return `${banner}<div class="pm-plot-wrap"><div id="pm-plot" class="pm-plot"></div></div>`
+  }
+
+  /** 等容器拿到真实尺寸（最多 10 帧），避免 mind-elixir 按 0 宽初始化成乱图。 */
+  function waitForPlotSize(el: HTMLElement): Promise<void> {
+    return new Promise(resolve => {
+      let frames = 0
+      const tick = (): void => {
+        if (el.clientWidth > 40 && el.clientHeight > 40) { resolve(); return }
+        frames += 1
+        if (frames >= 10) { resolve(); return }
+        window.requestAnimationFrame(tick)
+      }
+      window.requestAnimationFrame(tick)
+    })
+  }
+
+  function disposeProductEngines(): void {
+    if (productMind !== null) { try { productMind.destroy() } catch { /* ignore */ } productMind = null }
+    if (productChart !== null) { try { productChart.dispose() } catch { /* ignore */ } productChart = null }
+  }
+
+  /** 挂载画布：每次渲染后调用（renderContent 会重建 DOM，实例必须跟着重建）。 */
+  async function mountProductCanvas(): Promise<void> {
+    const target = $id('pm-plot')
+    if (target === null) return
+    disposeProductEngines()
+    const preview = productMapPreview
+    if (preview !== null || productMapEngine === 'force') {
+      await renderProductForce(target, preview?.graph ?? mapGraph())
+      return
+    }
+    await renderProductTree(target)
+  }
+
+  async function renderProductTree(target: HTMLElement): Promise<void> {
+    if (productMindLoading === null) {
+      productMindLoading = (async () => {
+        await loadVendorScript(`${API}/assets/vendor/mind-elixir/MindElixir.iife.js`, 'dsh-wb-mind-elixir')
+        if (shadow.getElementById('dsh-wb-mind-css') === null) {
+          const link = document.createElement('link')
+          link.id = 'dsh-wb-mind-css'
+          link.rel = 'stylesheet'
+          link.href = `${API}/assets/vendor/mind-elixir/MindElixir.css`
+          shadow.appendChild(link)
+        }
+      })()
+    }
+    try { await productMindLoading } catch (cause) {
+      console.warn('[dsh-workbench] 导图编辑器加载失败：', cause)
+      target.innerHTML = '<div class="notes-empty small">导图编辑器（mind-elixir）加载失败，请刷新重试。</div>'
+      return
+    }
+    const ns = (window as any).MindElixir
+    const cls = ns?.default ?? ns
+    if (typeof cls !== 'function') {
+      target.innerHTML = '<div class="notes-empty small">mind-elixir 未就绪</div>'
+      return
+    }
+    target.innerHTML = ''
+    const container = document.createElement('div')
+    container.className = 'pm-mind'
+    container.style.cssText = 'width:100%;height:100%'
+    target.appendChild(container)
+    await waitForPlotSize(target)
+    const dark = resolvedTheme() === 'dark'
+    productMind = new cls({
+      el: container,
+      direction: cls.RIGHT,
+      toolBar: false,
+      keypress: true,
+      contextMenu: false,
+      overflowHidden: false,
+      theme: dark ? cls.DARK_THEME : cls.THEME,
+    })
+    productMind.init(toMindElixir(mapGraph()))
+    try { productMind.toCenter?.() } catch { /* 旧版本没有 toCenter */ }
+    productMind.bus.addListener('operation', () => scheduleProductMindSync())
+  }
+
+  async function renderProductForce(target: HTMLElement, graph: ProductMapGraph): Promise<void> {
+    try { await loadVendorScript(`${API}/assets/vendor/echarts.min.js`, 'dsh-wb-echarts') } catch (cause) {
+      console.warn('[dsh-workbench] 力导图引擎加载失败：', cause)
+      target.innerHTML = '<div class="notes-empty small">关系图（ECharts）加载失败，请刷新重试。</div>'
+      return
+    }
+    const ns = (window as any).echarts
+    if (typeof ns?.init !== 'function') {
+      target.innerHTML = '<div class="notes-empty small">ECharts 未就绪</div>'
+      return
+    }
+    productChart = ns.init(target, null, { renderer: 'canvas' })
+    productChart.setOption(buildProductForceOption(graph, { dark: resolvedTheme() === 'dark' }), true)
+    const legend = document.createElement('div')
+    legend.className = 'pm-force-legend'
+    legend.innerHTML = [...new Set(graph.nodes.map(n => n.kind))].map(kind =>
+      `<span><i style="background:${PRODUCT_KIND_COLOR[kind]}"></i>${PRODUCT_KIND_LABEL[kind]}</span>`).join('')
+      + (externalEdges(graph).length > 0 ? '<span><i class="ext"></i>跨图引用</span>' : '')
+    target.appendChild(legend)
+    const hint = document.createElement('div')
+    hint.className = 'pm-force-hint'
+    hint.textContent = '悬停高亮相邻 · 拖动节点 · 滚轮缩放 · 虚线 = 关联 / 跨图引用'
+    target.appendChild(hint)
+  }
+
+  /* ---- 草稿保存（乐观并发；rev 冲突时以宿主草稿为准并提示） ---- */
+  async function persistProductGraph(): Promise<void> {
+    const map = activeMap()
+    if (map === undefined) return
+    try {
+      const res = await fetch(`${API}/products/maps/draft`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mapId: map.id, graph: map.graph, rev: map.graphRev }),
+      })
+      const data = await res.json().catch(() => ({})) as any
+      if (res.status === 409 && data.current) {
+        Object.assign(map, data.current)
+        toast('导图已在别处更新，已重新载入')
+        renderContent()
+        return
+      }
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      map.graphRev = Number(data.rev ?? map.graphRev)
+      if (data.map) Object.assign(map, data.map)
+    } catch (cause) {
+      toast(`导图保存失败：${String((cause as Error).message ?? cause)}`)
+    }
+  }
+
+  /** mind-elixir 编辑防抖同步：结构/文案变化 → 回写图 → 落草稿。 */
+  function scheduleProductMindSync(): void {
+    if (productMindSyncTimer !== 0) window.clearTimeout(productMindSyncTimer)
+    productMindSyncTimer = window.setTimeout(() => {
+      productMindSyncTimer = 0
+      if (productMind === null) return
+      const map = activeMap()
+      if (map === undefined || productMapPreview !== null) return
+      try {
+        const data = productMind.getData()
+        map.graph = fromMindElixir(data, map.graph)
+        void persistProductGraph()
+      } catch (cause) {
+        console.warn('[dsh-workbench] 导图同步失败', cause)
+      }
+    }, 450)
   }
   function renderProduct(): string {
     const product = productOf(productSelected)
@@ -3251,32 +3237,33 @@ ${lines}
     let body = ''
     if (productTab === 'map') {
       const rail = `<aside class="pm-maps">
-        <div class="pm-maps-head"><b>导图</b><span>${productMaps.length}</span><button class="icon-btn" data-act="pm-map-new" title="新建导图">${ic('plus', 13)}</button></div>
-        ${productMaps.length === 0 ? `<div class="pm-maps-empty">${productMapsReady ? '还没有导图，点 + 新建' : '多导图不可用（宿主未更新）'}</div>` : productMaps.map(map => `<div class="pm-map${map.id === productMapSelected ? ' active' : ''}" data-act="pm-map-select" data-id="${map.id}" title="${esc(map.description || map.name)}">
-          <b>${esc(map.name)}</b><small>${mapNodeCount(map)} 节点 · ${productNoteListOfMap(map.id).length} 笔记</small>
+        <div class="pm-maps-head"><b>导图</b><span>${productMaps.length}</span><button class="icon-btn" data-act="pm-map-new" title="新建导图（自建 / 导入 / 从灵感）">${ic('plus', 13)}</button></div>
+        ${productMaps.length === 0 ? `<div class="pm-maps-empty">${productMapsReady ? '还没有导图，点 + 新建（自建 / 导入大纲 / 从灵感选择）' : '多导图不可用（宿主未更新）'}</div>` : productMaps.map(map => `<div class="pm-map${map.id === productMapSelected ? ' active' : ''}" data-act="pm-map-select" data-id="${map.id}" title="${esc(map.description || map.name)}">
+          <b>${esc(map.name)}</b><small>${mapNodeCount(map)} 节点 · ${productNoteListOfMap(map.id).length} 笔记 · ${mapVersionSeq(map)}</small>
+          <small class="pm-map-src">${mapSourceLabel(map)}</small>
           <span class="pm-map-ops"><button class="icon-btn" data-act="pm-map-rename" data-id="${map.id}" title="重命名">${ic('edit', 11)}</button><button class="icon-btn" data-act="pm-map-delete" data-id="${map.id}" title="删除导图">${ic('trash', 11)}</button></span>
         </div>`).join('')}
+        ${productMapSelected === '' ? '' : renderVersionPanel()}
       </aside>`
+      const engineSeg = `<div class="mini-seg pm-engine-seg" title="画布引擎">
+        <button data-act="pm-engine" data-mode="tree" class="${productMapEngine === 'tree' && productMapPreview === null ? 'active' : ''}">编辑</button>
+        <button data-act="pm-engine" data-mode="force" class="${productMapEngine === 'force' && productMapPreview === null ? 'active' : ''}">关系</button>
+      </div>`
       body = `<div class="pm-map-wrap">${rail}<div class="pm-map-main"><div class="product-map-toolbar">
+        ${engineSeg}
         <button class="btn" data-act="product-node-new" data-type="feature">${ic('plus', 12)}新增功能</button>
         <button class="btn" data-act="product-node-new" data-type="requirement">${ic('plus', 12)}新增需求</button>
         <button class="btn" data-act="product-node-child">${ic('corner', 12)}加子节点</button>
         <button class="btn" data-act="product-node-sibling">${ic('plus', 12)}加同级</button>
         <button class="btn" data-act="product-node-edit">${ic('edit', 12)}编辑节点</button>
-        <button class="icon-btn" data-act="product-node-delete" title="删除节点（Delete）">${ic('trash', 13)}</button>
+        <button class="icon-btn" data-act="product-node-delete" title="删除节点（Del）">${ic('trash', 13)}</button>
         <span class="pm-sep"></span>
-        <div class="mini-seg pm-layout-seg" title="导图布局">${MAP_LAYOUTS.map(layout => `<button data-act="pm-layout" data-mode="${layout.id}" class="${mapLayoutMode() === layout.id ? 'active' : ''}" title="${escapeAttr(layout.hint)}">${layout.label}</button>`).join('')}</div>
-        <span class="pm-sep"></span>
-        <button class="btn" data-act="pm-collapse-all">全部折叠</button>
-        <button class="btn" data-act="pm-expand-all">全部展开</button>
-        <span class="pm-sep"></span>
-        <button class="icon-btn" data-act="pm-zoom-out" title="缩小">−</button>
-        <span class="pm-zoom-val">${Math.round(productMapZoom * 100)}%</span>
-        <button class="icon-btn" data-act="pm-zoom-in" title="放大">＋</button>
-        <button class="btn" data-act="pm-zoom-reset">100%</button>
+        <button class="btn" data-act="pm-version-archive">${ic('layers', 12)}存档版本</button>
+        <button class="btn" data-act="pm-version-diff">版本对比</button>
         <span class="pm-sep"></span>
         <button class="btn" data-act="pm-export-outline">${ic('download', 12)}导出大纲</button>
         <button class="btn" data-act="pm-import-outline">${ic('upload', 12)}导入大纲</button>
+        <button class="btn" data-act="pm-import-idea">${ic('spark', 12)}从灵感导入</button>
         <span class="product-hint">${ic('folder', 11)} ${esc(productMapSelected !== '' ? `.dsh-workbench/products/${product.id}/maps/${productMapSelected}.json` : 'mindmap.json → ' + (product.workspacePath || '未关联工作区'))}</span>
       </div>${renderProductMap(product)}</div></div>`
     } else if (productTab === 'notes') {
@@ -3329,16 +3316,16 @@ ${lines}
       productMapSelected = productMaps[0].id
     }
     if (productMaps.length === 0) productMapSelected = ''
+    if (productMapPreview !== null && productMapPreview.mapId !== productMapSelected) productMapPreview = null
+    await loadMapVersions()
   }
   /** 当前导图；'' 表示「全部导图」。 */
   function activeMap(): ProductMap | undefined {
     return productMapSelected === '' ? undefined : productMaps.find(map => map.id === productMapSelected)
   }
-  /** 导图 JSON 的来源：选中导图，否则回退产品镜像（兼容旧数据）。 */
+  /** 导图 JSON（v2 图）：AI 提示词与导入导出统一用它。 */
   function mapMindmap(): string {
-    const map = activeMap()
-    if (map !== undefined) return map.mindmap
-    return productOf(productSelected)?.mindmap ?? '{"nodes":[]}'
+    return JSON.stringify(mapGraph())
   }
   function mapScopeId(): string { return productMapSelected }
   function mapScoped<T extends { mapId?: string }>(items: T[]): T[] {
@@ -3352,10 +3339,53 @@ ${lines}
     return notes.filter(n => n.notebookId === product.notebookId && n.mapId === mapId)
   }
   function mapNodeCount(map: ProductMap): number {
+    if (map.graph !== undefined && Array.isArray(map.graph.nodes)) return map.graph.nodes.length
     try {
       const parsed = JSON.parse(map.mindmap || '{"nodes":[]}') as { nodes?: unknown[] }
       return Array.isArray(parsed.nodes) ? parsed.nodes.length : 0
     } catch { return 0 }
+  }
+  /** 导图卡片的版本徽标。 */
+  function mapVersionSeq(map: ProductMap): string {
+    const seq = productMapVersions.find(v => v.mapId === map.id && v.id === map.currentVersionId)?.seq
+    return seq === undefined ? '无版本' : `v${seq}`
+  }
+  function mapSourceLabel(map: ProductMap): string {
+    if (map.source === 'idea') return `灵感导入${map.sourceRef ? ` · ${map.sourceRef.slice(0, 18)}` : ''}`
+    if (map.source === 'outline') return '大纲导入'
+    if (map.source === 'ai') return 'AI 生成'
+    return '自建'
+  }
+  function mapSourceText(source: string): string {
+    return source === 'idea' ? '灵感导入' : source === 'outline' ? '大纲导入' : source === 'ai' ? 'AI'
+      : source === 'rollback' ? '回滚' : source === 'migration' ? '迁移' : '手工'
+  }
+  /** 版本面板（参照灵感右侧版本区：只读预览 / 回滚 / 删除）。 */
+  function renderVersionPanel(): string {
+    return `<div class="pm-versions">
+      <div class="pm-maps-head"><b>版本</b><span>${productMapVersions.length}</span></div>
+      ${productMapVersions.length === 0 ? '<div class="pm-maps-empty">「存档版本」后出现历史</div>' : productMapVersions.slice(0, 12).map(v => `<div class="pm-version${productMapPreview?.id === v.id ? ' active' : ''}">
+        <b>v${v.seq} · ${esc(v.label)}</b><small>${mapSourceText(v.source)} · ${v.nodeCount} 节点 · ${(v.createdAt ?? '').slice(5, 16)}</small>
+        <span class="pm-map-ops">
+          <button class="icon-btn" data-act="pm-version-preview" data-id="${v.id}" title="只读预览">${ic('play', 11)}</button>
+          <button class="icon-btn" data-act="pm-version-rollback" data-id="${v.id}" title="回滚到此版本">${ic('refresh', 11)}</button>
+          <button class="icon-btn" data-act="pm-version-delete" data-id="${v.id}" title="删除版本">${ic('trash', 11)}</button>
+        </span>
+      </div>`).join('')}
+    </div>`
+  }
+  /** 拉取当前导图的版本序列。 */
+  async function loadMapVersions(): Promise<void> {
+    if (productMapSelected === '') { productMapVersions = []; return }
+    try {
+      const res = await fetch(`${API}/products/maps/versions?mapId=${encodeURIComponent(productMapSelected)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { versions?: ProductMapVersion[] }
+      productMapVersions = Array.isArray(data.versions) ? data.versions : []
+    } catch (cause) {
+      productMapVersions = []
+      console.warn('[dsh-workbench] 版本清单读取失败：', cause)
+    }
   }
 
   async function loadProducts(silent = false): Promise<void> {
@@ -3403,7 +3433,7 @@ ${lines}
     const nodes = productNodes(product)
     const picked = productSelectedFeatures(product)
     const focus = scope === 'feature' ? picked : productFeatureNodes(product)
-    const features = focus.map(n => `- ${n.id} [${n.type === 'feature' ? '功能' : '需求'}] ${n.label}`).join('\n')
+    const features = focus.map(n => `- ${n.id} [${kindLabel(n.kind)}] ${n.label}`).join('\n')
     const theme = themeOf(productStyle)
     const kind = opts?.kind ?? 'page'
     const platform = opts?.platform ?? 'all'
@@ -3450,104 +3480,207 @@ ${common}
     const product = productOf(productSelected)
     await dispatchToNewSession(product?.workspacePath ?? '', prompt)
   }
-  async function saveProductMindmapFile(nodes: ProductNode[]): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
-    const mindmap = JSON.stringify({ nodes })
-    const map = activeMap()
-    try {
-      if (map !== undefined) {
-        // 多导图：只改这一张，产品镜像由宿主同步
-        const res = await fetch(`${API}/products/maps`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map: { id: map.id, productId: product.id, name: map.name, description: map.description, mindmap } }) })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = await res.json() as { map?: ProductMap }
-        if (data.map) Object.assign(map, data.map)
-        return
-      }
-      const res = await fetch(`${API}/products/mindmap`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ productId: product.id, mindmap }) })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as { product?: Product }
-      if (data.product) Object.assign(product, data.product)
-      product.updatedAt = new Date().toISOString()
-    } catch (cause) { toast(`导图保存失败：${String((cause as Error).message ?? cause)}`) }
-  }
+  /* ------------------------------ 导图节点操作（v2 图） ------------------------------ */
   function productNodeId(): string { return `pn-${Math.random().toString(36).slice(2, 8)}` }
-  /* ---- 思维导图操作（对标 XMind：子/同级节点、折叠、缩放、大纲） ---- */
-  function openNodeQuickAdd(kind: 'child' | 'sibling', type: 'feature' | 'requirement' = 'feature'): void {
-    const product = productOf(productSelected)
-    if (!product) return
-    const nodes = productNodes(product)
-    const selected = productNodeById(product, productNodeSelected)
-    if (!selected && kind === 'child') { openProductNodeEditor(type); return }
-    let parentId: string | null = nodes.find(n => n.type === 'root')?.id ?? null
-    if (kind === 'child' && selected) parentId = selected.id
-    if (kind === 'sibling' && selected) parentId = selected.parentId
-    if (kind === 'sibling' && selected?.type === 'root') { toast('根节点不能加同级'); return }
+
+  /** 写回当前导图草稿；rerender=false 只刷画布，保住编辑焦点。 */
+  function commitMapGraph(graph: ProductMapGraph, opts: { rerender?: boolean } = {}): void {
+    const map = activeMap()
+    if (map === undefined) return
+    map.graph = normalizeProductGraph(graph, { title: map.name }).graph
+    void persistProductGraph()
+    if (opts.rerender === true) renderContent()
+    else refreshMapCanvas()
+  }
+
+  /** 局部刷新画布（renderContent 会重建 DOM，编辑中尽量不整页重渲）。 */
+  function refreshMapCanvas(): void {
+    if (productMapPreview !== null || productMapEngine === 'force') {
+      if (productChart !== null) {
+        try { productChart.setOption(buildProductForceOption(mapGraph(), { dark: resolvedTheme() === 'dark' }), true) } catch { /* ignore */ }
+      }
+      return
+    }
+    if (productMind !== null) {
+      try { productMind.refresh(toMindElixir(mapGraph())) } catch { /* ignore */ }
+    }
+  }
+
+  const PRODUCT_KIND_OPTIONS: ProductNodeKind[] = ['module', 'business', 'feature', 'requirement']
+  function kindLabel(kind: ProductNodeKind): string { return PRODUCT_KIND_LABEL[kind] }
+
+  function openNodeQuickAdd(kind: 'child' | 'sibling', type: ProductNodeKind = 'feature'): void {
+    const graph = mapGraph()
+    const selected = productNodeById(undefined, productNodeSelected)
+    let parentId = graph.rootId
+    if (kind === 'child' && selected !== undefined) parentId = selected.id
+    if (kind === 'sibling' && selected !== undefined) {
+      if (selected.kind === 'root') { toast('根节点不能加同级'); return }
+      parentId = selected.parentId ?? graph.rootId
+    }
     openModal(`<h3>${kind === 'child' ? '添加子节点' : '添加同级节点'}</h3>
-      <div class="mfield"><label>名称</label><input id="wb-pn-label" placeholder="${type === 'feature' ? '例如：登录 / 工作台' : '例如：支持手机号登录'}"></div>
-      <div class="mfield"><label>类型</label><select id="wb-pn-type"><option value="feature" ${type === 'feature' ? 'selected' : ''}>功能</option><option value="requirement" ${type === 'requirement' ? 'selected' : ''}>需求</option></select></div>
-      <div class="mfield"><label>上级节点</label><select id="wb-pn-parent">${nodes.map(n => `<option value="${n.id}" ${n.id === parentId ? 'selected' : ''}>${esc(n.type === 'root' ? '产品' : n.label)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>名称</label><input id="wb-pn-label" placeholder="例如：登录 / 支持手机号登录"></div>
+      <div class="mfield"><label>类型</label><select id="wb-pn-type">${PRODUCT_KIND_OPTIONS.map(k => `<option value="${k}" ${k === type ? 'selected' : ''}>${kindLabel(k)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>上级节点</label><select id="wb-pn-parent">${graph.nodes.map(n => `<option value="${n.id}" ${n.id === parentId ? 'selected' : ''}>${esc(n.kind === 'root' ? '产品' : `${kindLabel(n.kind)} · ${n.label}`)}</option>`).join('')}</select></div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-node-add-quick">添加</button></div>`)
     window.setTimeout(() => $id<HTMLInputElement>('wb-pn-label')?.focus(), 0)
   }
+
   async function saveQuickNode(): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
+    const graph = mapGraph()
     const label = $id<HTMLInputElement>('wb-pn-label')?.value.trim() ?? ''
     if (label === '') { $id<HTMLInputElement>('wb-pn-label')?.focus(); return }
-    const type = ($id<HTMLSelectElement>('wb-pn-type')?.value ?? 'feature') as 'feature' | 'requirement'
-    const parentId = $id<HTMLSelectElement>('wb-pn-parent')?.value ?? ''
-    const nodes = productNodes(product)
-    const newNode = { id: productNodeId(), label, type, parentId: parentId || null }
-    nodes.push(newNode)
-    await saveProductMindmapFile(nodes)
-    productNodeSelected = newNode.id
-    productNodeCollapsed.delete(parentId)
+    const kind = ($id<HTMLSelectElement>('wb-pn-type')?.value ?? 'feature') as ProductNodeKind
+    const parentId = $id<HTMLSelectElement>('wb-pn-parent')?.value ?? graph.rootId
+    const id = productNodeId()
+    graph.nodes.push({ id, label, kind, parentId, status: 'kept' })
+    graph.edges.push({ from: parentId, to: id, kind: 'tree' })
+    productNodeSelected = id
+    commitMapGraph(graph)
     closeModal()
     renderContent()
+    toast(`已添加「${label}」`)
   }
+
   function toggleNodeFold(id: string): void {
-    if (productNodeCollapsed.has(id)) productNodeCollapsed.delete(id)
-    else productNodeCollapsed.add(id)
-    renderContent()
-  }
-  function setMapZoom(next: number): void {
-    productMapZoom = Math.min(2, Math.max(0.4, Math.round(next * 100) / 100))
+    const graph = mapGraph()
+    const node = graph.nodes.find(n => n.id === id)
+    if (node === undefined) return
+    node.collapsed = node.collapsed === true ? undefined : true
+    commitMapGraph(graph)
     renderContent()
   }
 
-  async function changeNodeKind(id: string, type: 'feature' | 'requirement'): Promise<void> {
-    const product = productOf(productSelected)
-    if (product === undefined) return
-    const nodes = productNodes(product)
-    const node = nodes.find(n => n.id === id)
-    if (node === undefined || node.type === 'root') return
-    node.type = type
-    await saveProductMindmapFile(nodes)
-    productNodeSelected = id
+  async function changeNodeKind(id: string, kind: ProductNodeKind): Promise<void> {
+    const graph = mapGraph()
+    const node = graph.nodes.find(n => n.id === id)
+    if (node === undefined || node.kind === 'root') return
+    node.kind = kind
+    commitMapGraph(graph)
     renderContent()
-    toast(`已改为${type === 'feature' ? '功能' : '需求'}`)
+    toast(`已改为${kindLabel(kind)}`)
   }
-  interface MapMenuItem { label: string; act: string; icon?: string; id?: string; type?: string; key?: string; danger?: boolean }
+
+  /** 节点属性编辑：名称 / 类型 / 端 / 状态 / 说明。 */
+  function openNodeProperty(): void {
+    const node = productNodeById(undefined, productNodeSelected)
+    if (!node) { toast('先选中一个节点'); return }
+    if (node.kind === 'root') { toast('产品根节点请用「编辑产品」'); return }
+    openModal(`<h3>编辑节点</h3>
+      <div class="mfield"><label>名称</label><input id="wb-pn-edit-label" value="${esc(node.label)}"></div>
+      <div class="mfield"><label>类型</label><select id="wb-pn-edit-kind">${PRODUCT_KIND_OPTIONS.map(k => `<option value="${k}" ${k === node.kind ? 'selected' : ''}>${kindLabel(k)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>端</label><select id="wb-pn-edit-platform">${(['', 'all', 'pc', 'mobile', 'tablet'] as const).map(p => `<option value="${p}" ${p === (node.platform ?? '') ? 'selected' : ''}>${p === '' ? '未指定' : platformLabel(p)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>状态</label><select id="wb-pn-edit-status">${(['kept', 'pending', 'dropped'] as const).map(s => `<option value="${s}" ${s === (node.status ?? 'kept') ? 'selected' : ''}>${s === 'kept' ? '采纳' : s === 'pending' ? '待定' : '放弃'}</option>`).join('')}</select></div>
+      <div class="mfield"><label>说明（≤200 字）</label><textarea id="wb-pn-edit-detail" rows="3">${esc(node.detail ?? '')}</textarea></div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-node-update" data-id="${node.id}">保存</button></div>`)
+  }
+
+  async function updateProductNode(id: string): Promise<void> {
+    const graph = mapGraph()
+    const node = graph.nodes.find(n => n.id === id)
+    if (!node) return
+    const label = $id<HTMLInputElement>('wb-pn-edit-label')?.value.trim() ?? ''
+    if (label === '') return
+    node.label = label
+    node.kind = ($id<HTMLSelectElement>('wb-pn-edit-kind')?.value ?? node.kind) as ProductNodeKind
+    const platform = $id<HTMLSelectElement>('wb-pn-edit-platform')?.value ?? ''
+    node.platform = platform === '' ? undefined : platform as ProductMapNode['platform']
+    node.status = ($id<HTMLSelectElement>('wb-pn-edit-status')?.value ?? 'kept') as ProductMapNode['status']
+    node.detail = ($id<HTMLTextAreaElement>('wb-pn-edit-detail')?.value ?? '').slice(0, 200)
+    commitMapGraph(graph)
+    closeModal()
+    renderContent()
+    toast('节点已更新')
+  }
+
+  async function deleteProductNode(): Promise<void> {
+    const graph = mapGraph()
+    const node = productNodeById(undefined, productNodeSelected)
+    if (!node) { toast('先选中一个节点'); return }
+    if (node.kind === 'root') { toast('不能删除产品根节点'); return }
+    /* 子树收集：沿 tree 边 BFS */
+    const doomed = new Set<string>([node.id])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const edge of graph.edges) {
+        if (edge.kind === 'tree' && doomed.has(edge.from) && !doomed.has(edge.to)) { doomed.add(edge.to); changed = true }
+      }
+    }
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除「${node.label}」及其 ${doomed.size - 1} 个子节点？关联边一并清理。`) : true
+    if (!ok) return
+    const next: ProductMapGraph = {
+      ...graph,
+      nodes: graph.nodes.filter(n => !doomed.has(n.id)),
+      edges: graph.edges.filter(e => !doomed.has(e.from) && !(e.kind === 'relate' && doomed.has(e.to))),
+    }
+    productNodeSelected = null
+    commitMapGraph(next)
+    renderContent()
+  }
+
+  /** 同图关联 / 跨图引用（relate 边）。 */
+  function openRelateModal(nodeId: string, external = false): void {
+    const graph = mapGraph()
+    const from = graph.nodes.find(n => n.id === nodeId)
+    if (!from) return
+    if (external) {
+      const others = productMaps.filter(m => m.id !== productMapSelected)
+      const options = others.map(m => {
+        const nodes = (m.graph?.nodes ?? []).filter(n => n.kind !== 'root')
+        return nodes.length === 0 ? '' : `<optgroup label="${esc(m.name)}">${nodes.map(n => `<option value="${m.id}:${n.id}">${esc(kindLabel(n.kind))} · ${esc(n.label)}</option>`).join('')}</optgroup>`
+      }).join('')
+      if (options === '') { toast('没有其他导图或其节点可引用'); return }
+      openModal(`<h3>加跨图引用</h3>
+        <div class="mfield"><label>从「${esc(from.label)}」指向（同产品另一张导图）</label><select id="wb-rel-target">${options}</select></div>
+        <div class="mfield"><label>关系说明（可选）</label><input id="wb-rel-label" placeholder="例如：互补 / 依赖"></div>
+        <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">跨图引用是「互为补充」的表达：删除目标导图时引用会自动清理。</div>
+        <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-relate-save" data-id="${nodeId}" data-ext="1">添加</button></div>`)
+      return
+    }
+    const candidates = graph.nodes.filter(n => n.id !== nodeId)
+    openModal(`<h3>加同图关联</h3>
+      <div class="mfield"><label>从「${esc(from.label)}」指向</label><select id="wb-rel-target">${candidates.map(n => `<option value="${n.id}">${esc(kindLabel(n.kind))} · ${esc(n.label)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>关系说明（可选）</label><input id="wb-rel-label" placeholder="例如：关联 / 前置"></div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-relate-save" data-id="${nodeId}">添加</button></div>`)
+  }
+
+  function saveRelate(nodeId: string, ext: boolean): void {
+    const graph = mapGraph()
+    const to = $id<HTMLSelectElement>('wb-rel-target')?.value ?? ''
+    const label = $id<HTMLInputElement>('wb-rel-label')?.value.trim() ?? ''
+    if (to === '') return
+    const key = ext ? to : to
+    if (graph.edges.some(e => e.kind === 'relate' && e.from === nodeId && e.to === key)) { toast('这条关联已存在'); return }
+    graph.edges.push({ from: nodeId, to: key, kind: 'relate', label: label.slice(0, 24) || undefined })
+    commitMapGraph(graph)
+    closeModal()
+    renderContent()
+    toast(ext ? '已加跨图引用' : '已加同图关联')
+  }
+
+  interface MapMenuItem { label: string; act: string; icon?: string; id?: string; kind?: string; key?: string; danger?: boolean }
   function mapMenuItems(node: ProductNode | undefined): MapMenuItem[] {
     if (node === undefined) {
       return [
-        { label: '新增功能', act: 'product-node-new', type: 'feature', icon: 'plus' },
-        { label: '新增需求', act: 'product-node-new', type: 'requirement', icon: 'plus' },
-        { label: '全部展开', act: 'pm-expand-all', icon: 'expand' },
-        { label: '全部折叠', act: 'pm-collapse-all', icon: 'panel' },
+        { label: '新增功能', act: 'product-node-new', kind: 'feature', icon: 'plus' },
+        { label: '新增需求', act: 'product-node-new', kind: 'requirement', icon: 'plus' },
+        { label: '存档版本', act: 'pm-version-archive', icon: 'layers' },
+        { label: '版本对比', act: 'pm-version-diff', icon: 'tag' },
       ]
     }
-    const product = productOf(productSelected)
-    const hasKids = productNodes(product).some(n => n.parentId === node.id)
     const items: MapMenuItem[] = [{ label: '添加子节点', act: 'product-node-child', icon: 'corner', key: 'Tab' }]
-    if (node.type !== 'root') items.push({ label: '添加同级', act: 'product-node-sibling', icon: 'plus', key: 'Enter' })
-    items.push({ label: '重命名 / 编辑', act: 'product-node-edit', icon: 'edit', key: 'F2' })
-    if (node.type !== 'root') {
-      items.push({ label: node.type === 'feature' ? '改为需求' : '改为功能', act: 'pm-node-kind', icon: 'tag', id: node.id, type: node.type === 'feature' ? 'requirement' : 'feature' })
+    if (node.kind !== 'root') items.push({ label: '添加同级', act: 'product-node-sibling', icon: 'plus', key: 'Enter' })
+    items.push({ label: '编辑属性', act: 'product-node-edit', icon: 'edit', key: 'F2' })
+    if (node.kind !== 'root') {
+      for (const k of PRODUCT_KIND_OPTIONS) {
+        if (k !== node.kind) items.push({ label: `改为${kindLabel(k)}`, act: 'pm-node-kind', icon: 'tag', id: node.id, kind: k })
+      }
     }
-    if (hasKids) items.push({ label: productNodeCollapsed.has(node.id) ? '展开子树' : '折叠子树', act: 'pm-toggle-fold', icon: 'chevD', id: node.id })
-    if (node.type !== 'root') items.push({ label: '删除节点', act: 'product-node-delete', icon: 'trash', key: 'Del', danger: true })
+    items.push({ label: '加同图关联', act: 'pm-node-relate', icon: 'arrowR', id: node.id })
+    items.push({ label: '加跨图引用', act: 'pm-node-relate-ext', icon: 'arrowR', id: node.id })
+    items.push({ label: node.collapsed === true ? '展开子树' : '折叠子树', act: 'pm-toggle-fold', icon: 'chevD', id: node.id })
+    if (node.kind !== 'root') items.push({ label: '删除节点', act: 'product-node-delete', icon: 'trash', key: 'Del', danger: true })
     return items
   }
   function closeContextMenu(): void {
@@ -3560,10 +3693,10 @@ ${common}
   function openContextMenu(nodeId: string | null, x: number, y: number): void {
     const menu = $id('wb-ctxmenu')
     if (menu === null) return
-    const node = nodeId === null ? undefined : productNodeById(productOf(productSelected), nodeId)
+    const node = nodeId === null ? undefined : productNodeById(undefined, nodeId)
     const items = mapMenuItems(node)
-    const head = node === undefined ? '画布' : `${node.type === 'root' ? '产品' : node.type === 'feature' ? '功能' : '需求'} · ${esc(node.label.slice(0, 24))}`
-    menu.innerHTML = `<div class="ctx-head">${head}</div>${items.map(item => `<button class="ctx-item${item.danger === true ? ' danger' : ''}" data-act="${item.act}"${item.id === undefined ? '' : ` data-id="${item.id}"`}${item.type === undefined ? '' : ` data-type="${item.type}"`}>${ic(item.icon ?? 'plus', 13)}<span>${item.label}</span>${item.key === undefined ? '' : `<kbd>${item.key}</kbd>`}</button>`).join('')}`
+    const head = node === undefined ? '画布' : `${kindLabel(node.kind)} · ${esc(node.label.slice(0, 24))}`
+    menu.innerHTML = `<div class="ctx-head">${head}</div>${items.map(item => `<button class="ctx-item${item.danger === true ? ' danger' : ''}" data-act="${item.act}"${item.id === undefined ? '' : ` data-id="${item.id}"`}${item.kind === undefined ? '' : ` data-kind="${item.kind}"`}>${ic(item.icon ?? 'plus', 13)}<span>${item.label}</span>${item.key === undefined ? '' : `<kbd>${item.key}</kbd>`}</button>`).join('')}`
     menu.classList.add('open')
     menu.querySelectorAll<HTMLElement>('.ctx-item').forEach(item => {
       item.addEventListener('click', () => { window.setTimeout(closeContextMenu, 0) })
@@ -3577,35 +3710,17 @@ ${common}
   function onContextMenu(event: MouseEvent): void {
     const target = event.target as Element | null
     if (target === null) return
-    if (ui.view !== 'product' || productTab !== 'map') return
-    const nodeEl = target.closest('[data-product-node]')
-    const canvas = target.closest('[data-pm-canvas]')
+    if (ui.view !== 'product' || productTab !== 'map' || productMapPreview !== null) return
+    const nodeEl = target.closest('#pm-plot [data-nodeid]') as HTMLElement | null
+    const canvas = target.closest('#pm-plot')
     if (nodeEl === null && canvas === null) return
     event.preventDefault()
-    const nodeId = nodeEl === null ? null : nodeEl.getAttribute('data-product-node') ?? null
-    if (nodeId !== null) {
-      productNodeSelected = nodeId
-      renderContent()
-    }
-    openContextMenu(nodeId, event.clientX, event.clientY)
+    const nodeId = nodeEl === null ? '' : productGraphIdOf(nodeEl.getAttribute('data-nodeid') ?? '')
+    if (nodeId !== '') productNodeSelected = nodeId
+    openContextMenu(nodeId === '' ? null : nodeId, event.clientX, event.clientY)
   }
-  function productOutline(product: Product): string {
-    const nodes = productNodes(product)
-    const children = new Map<string, ProductNode[]>()
-    for (const node of nodes) {
-      const key = node.parentId ?? ''
-      const list = children.get(key) ?? []
-      list.push(node)
-      children.set(key, list)
-    }
-    const lines: string[] = []
-    const walk = (node: ProductNode, depth: number): void => {
-      lines.push(`${'  '.repeat(depth)}- ${node.label}${node.type === 'requirement' ? '（需求）' : ''}`)
-      for (const kid of children.get(node.id) ?? []) walk(kid, depth + 1)
-    }
-    const root = nodes.find(n => n.type === 'root' || n.parentId === null) ?? nodes[0]
-    if (root) walk(root, 0)
-    return lines.join('\n')
+  function productOutline(_product?: Product): string {
+    return productGraphToMarkdown(mapGraph())
   }
   function exportMindmapOutline(): void {
     const product = productOf(productSelected)
@@ -3625,82 +3740,126 @@ ${common}
     }
   }
   function importMindmapOutline(): void {
-    const product = productOf(productSelected)
-    if (!product) return
-    openModal(`<h3>导入大纲</h3>
-      <div class="mfield"><label>粘贴 Markdown 大纲（用缩进或 - 层级表示父子）</label><textarea id="wb-pm-outline" rows="10" placeholder="- 功能A&#10;  - 需求A1&#10;  - 需求A2&#10;- 功能B"></textarea></div>
-      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">导入会<b>替换</b>当前导图（根节点保留产品名）。支持 Tab / 空格缩进，或在行首用 - / * 标记。</div>
+    const map = activeMap()
+    if (map === undefined) { toast('先选择导图'); return }
+    openModal(`<h3>导入大纲（替换当前导图）</h3>
+      <div class="mfield"><label>粘贴 Markdown 大纲（缩进或 - 层级；（模块）（业务）（需求）标记类型）</label><textarea id="wb-pm-outline" rows="10" placeholder="- 登录（模块）&#10;  - 手机验证码登录&#10;  - 一键登录（需求）"></textarea></div>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">导入会<b>替换</b>「${esc(map.name)}」当前草稿；导入前会自动存档当前版本，可随时回滚。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-import-run">导入</button></div>`)
   }
   async function runMindmapImport(): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
+    const map = activeMap()
+    if (!map) return
     const raw = $id<HTMLTextAreaElement>('wb-pm-outline')?.value ?? ''
-    const rows = raw.split('\n').map(line => line.replace(/\t/g, '  '))
-    type Row = { depth: number; label: string; type: 'feature' | 'requirement' }
-    const parsed: Row[] = []
-    for (const line of rows) {
-      const match = line.match(/^(\s*)(?:[-*+]\s+)?(.*)$/)
-      if (!match) continue
-      const labelRaw = match[2].trim()
-      if (labelRaw === '') continue
-      const type: 'feature' | 'requirement' = /（需求）|\(需求\)|\[需求\]/.test(labelRaw) ? 'requirement' : 'feature'
-      const label = labelRaw.replace(/（需求）|\(需求\)|\[需求\]/g, '').trim()
-      const indent = match[1].replace(/\t/g, '  ').length
-      parsed.push({ depth: Math.floor(indent / 2), label, type })
-    }
-    if (parsed.length === 0) { toast('没有解析到大纲内容'); return }
-    const rootId = productNodeId()
-    const nodes: ProductNode[] = [{ id: rootId, label: product.name, type: 'root', parentId: null }]
-    const stack: Array<{ id: string; depth: number }> = [{ id: rootId, depth: -1 }]
-    for (const row of parsed) {
-      while (stack.length > 1 && stack[stack.length - 1].depth >= row.depth) stack.pop()
-      const parent = stack[stack.length - 1]
-      const id = productNodeId()
-      nodes.push({ id, label: row.label, type: row.type, parentId: parent.id })
-      stack.push({ id, depth: row.depth })
-    }
-    await saveProductMindmapFile(nodes)
-    productNodeSelected = rootId
-    productNodeCollapsed.clear()
-    closeModal()
-    renderContent()
-    toast(`已导入 ${parsed.length} 个节点`)
+    const { graph, issues } = parseOutlineToProductGraph(raw, map.name)
+    if (graph.nodes.length <= 1) { toast('没有解析到大纲内容'); return }
+    if (issues.length > 0) console.warn('[dsh-workbench] 大纲解析提示：', issues)
+    try {
+      /* 导入前自动存档当前草稿（可回滚），修掉旧版「整体替换、无撤销」的问题 */
+      await fetch(`${API}/products/maps/versions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: { mapId: map.id, label: '导入前快照', source: 'manual', summary: '导入大纲前自动存档' } }),
+      })
+      const res = await fetch(`${API}/products/maps/versions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: { mapId: map.id, graph, source: 'outline', label: '大纲导入', summary: `导入 ${graph.nodes.length - 1} 个节点` } }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      map.graph = graph
+      map.graphRev += 1
+      closeModal()
+      await loadMapVersions()
+      renderContent()
+      toast(`已导入 ${graph.nodes.length - 1} 个节点`)
+    } catch (cause) { toast(`导入失败：${String((cause as Error).message ?? cause)}`) }
   }
-  /* ------------------------------- 多导图 ------------------------------- */
+
+  /* ------------------------------ 多导图（自建 / 导入 / 从灵感选择） ------------------------------ */
   function openMapEditor(id?: string): void {
     const product = productOf(productSelected)
     if (product === undefined) { toast('先选择产品'); return }
     if (!productMapsReady) { toast('多导图需要宿主更新，请重启 DSH'); return }
     const map = id === undefined ? undefined : productMaps.find(item => item.id === id)
-    openModal(`<h3>${map === undefined ? '新建导图' : '编辑导图'}</h3>
-      <div class="mfield"><label>名称</label><input id="wb-map-name" value="${esc(map?.name ?? '')}" placeholder="例如：收银主链路 / 移动端 / V2 改版"></div>
-      <div class="mfield"><label>说明（可选）</label><input id="wb-map-desc" value="${esc(map?.description ?? '')}" placeholder="这张导图负责的范围"></div>
-      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">每张导图独立保存 mindmap 到工作区 <code>.dsh-workbench/products/&lt;id&gt;/maps/&lt;mapId&gt;.json</code>；设计笔记 / 模块 / 灵感 / Demo 都会挂到当前导图下。</div>
-      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-map-save" data-id="${map?.id ?? ''}">${map === undefined ? '创建' : '保存'}</button></div>`)
+    if (map !== undefined) {
+      openModal(`<h3>编辑导图</h3>
+        <div class="mfield"><label>名称</label><input id="wb-map-name" value="${esc(map.name)}"></div>
+        <div class="mfield"><label>说明（可选）</label><input id="wb-map-desc" value="${esc(map.description)}"></div>
+        <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-map-save" data-id="${map.id}">保存</button></div>`)
+      return
+    }
+    openModal(`<h3>新建产品导图</h3>
+      <div class="mfield"><label>来源</label><select id="wb-map-source">
+        <option value="blank">自建空白（画布直接编辑）</option>
+        <option value="outline">导入 Markdown 大纲</option>
+        <option value="idea">从灵感选择（整图 / 分支）</option>
+      </select></div>
+      <div class="mfield"><label>名称</label><input id="wb-map-name" placeholder="例如：收银主链路 / 移动端 / V2 改版"></div>
+      <div class="mfield"><label>说明（可选）</label><input id="wb-map-desc" placeholder="这张导图负责的范围（多张导图互为补充）"></div>
+      <div class="mfield" id="wb-map-outline-field"><label>粘贴 Markdown 大纲</label><textarea id="wb-map-outline" rows="8" placeholder="- 登录（模块）&#10;  - 手机验证码登录"></textarea></div>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">每张导图有独立版本序列；文件镜像在 <code>.dsh-workbench/products/&lt;id&gt;/maps/&lt;mapId&gt;.json</code>。</div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-map-save" data-id="">创建</button></div>`)
+    const sel = $id<HTMLSelectElement>('wb-map-source')
+    const syncOutlineField = (): void => {
+      const field = $id('wb-map-outline-field')
+      if (field instanceof HTMLElement) field.style.display = sel?.value === 'outline' ? '' : 'none'
+    }
+    sel?.addEventListener('change', syncOutlineField)
+    syncOutlineField()
   }
   async function saveMapFromModal(id: string): Promise<void> {
     const product = productOf(productSelected)
     if (product === undefined) return
     const name = $id<HTMLInputElement>('wb-map-name')?.value.trim() ?? ''
-    if (name === '') { toast('先填名称'); return }
     const description = $id<HTMLInputElement>('wb-map-desc')?.value.trim() ?? ''
+    const source = $id<HTMLSelectElement>('wb-map-source')?.value ?? 'blank'
+    if (id === '' && source === 'idea') {
+      closeModal()
+      void openIdeaImport(name)
+      return
+    }
+    if (name === '') { toast('先填名称'); return }
     try {
-      const res = await fetch(`${API}/products/maps`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map: { id, productId: product.id, name, description } }) })
+      let graph: ProductMapGraph | undefined
+      let archiveSource = ''
+      let archiveLabel = ''
+      if (source === 'outline') {
+        const raw = $id<HTMLTextAreaElement>('wb-map-outline')?.value ?? ''
+        const parsed = parseOutlineToProductGraph(raw, name)
+        if (parsed.graph.nodes.length <= 1) { toast('没有解析到大纲内容'); return }
+        graph = parsed.graph
+        archiveSource = 'outline'
+        archiveLabel = '大纲导入'
+      } else if (id === '') {
+        graph = emptyProductGraph(name)
+      }
+      const res = await fetch(`${API}/products/maps`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ map: { id: id || undefined, productId: product.id, name, description, graph, source: archiveSource || undefined } }),
+      })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { map?: ProductMap }
+      const map = data.map
       closeModal()
       await loadProductMaps()
-      if (data.map !== undefined && id === '') productMapSelected = data.map.id
+      if (map !== undefined && id === '') {
+        productMapSelected = map.id
+        if (archiveSource !== '') {
+          await fetch(`${API}/products/maps/versions`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ version: { mapId: map.id, graph: map.graph, source: archiveSource, label: archiveLabel, summary: `导入 ${map.graph.nodes.length - 1} 个节点` } }),
+          })
+        }
+      }
       productMapScopeAll = false
+      await loadMapVersions()
       toast(id === '' ? '已新建导图' : '已保存导图')
       renderContent()
     } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
   }
   async function deleteMapById(id: string): Promise<void> {
     const map = productMaps.find(item => item.id === id)
-    const ok = typeof window.confirm === 'function' ? window.confirm(`删除导图「${map?.name ?? id}」？
-该导图下的模块 / 笔记 / Demo 不会被删除，会失去导图归属。`) : true
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除导图「${map?.name ?? id}」及其版本历史？
+该导图下的模块 / 笔记 / Demo 不会被删除，会失去导图归属；其他导图指向它的跨图引用会自动清理。`) : true
     if (!ok) return
     try {
       const res = await fetch(`${API}/products/maps/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -3710,7 +3869,9 @@ ${common}
       }
       await loadProductMaps()
       productNodeSelected = null
+      productMapPreview = null
       productPicked = productDefaultPicked(productOf(productSelected))
+      await loadMapVersions()
       toast('已删除导图')
       renderContent()
     } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
@@ -3720,35 +3881,202 @@ ${common}
     productMapSelected = id
     productMapScopeAll = false
     productNodeSelected = null
-    productNodeCollapsed.clear()
+    productMapPreview = null
     productPicked = productDefaultPicked(productOf(productSelected))
-    renderContent()
+    void loadMapVersions().then(() => renderContent())
   }
 
-  function openProductNodeEditor(type: 'feature' | 'requirement'): void {
+  /* ------------------------------ 从灵感导入（整图 / 分支） ------------------------------ */
+  async function openIdeaImport(presetName = ''): Promise<void> {
+    try {
+      const res = await fetch(`${API}/ideas`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { ideas?: Array<{ id: string; title: string; status?: string }> }
+      const ideas = Array.isArray(data.ideas) ? data.ideas : []
+      if (ideas.length === 0) { toast('还没有灵感：先在「灵感」里发散一版'); return }
+      openModal(`<h3>从灵感导入 · 选择灵感</h3>
+        <div class="mfield"><label>灵感</label><select id="wb-idea-pick">${ideas.map(idea => `<option value="${idea.id}">${esc(idea.title)}${idea.status ? `（${esc(idea.status)}）` : ''}</option>`).join('')}</select></div>
+        <div class="mfield"><label>导图名称（默认同灵感）</label><input id="wb-idea-map-name" value="${esc(presetName || ideas[0]?.title || '')}"></div>
+        <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="idea-import-next">下一步：选版本</button></div>`)
+      $id<HTMLSelectElement>('wb-idea-pick')?.addEventListener('change', e => {
+        const input = $id<HTMLInputElement>('wb-idea-map-name')
+        const found = ideas.find(i => i.id === (e.currentTarget as HTMLSelectElement).value)
+        if (input instanceof HTMLInputElement && found) input.value = found.title ?? ''
+      })
+    } catch (cause) { toast(`灵感读取失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function openIdeaVersionPick(): Promise<void> {
+    const ideaId = $id<HTMLSelectElement>('wb-idea-pick')?.value ?? ''
+    const name = $id<HTMLInputElement>('wb-idea-map-name')?.value.trim() ?? ''
+    if (ideaId === '') return
+    try {
+      const res = await fetch(`${API}/ideas/${encodeURIComponent(ideaId)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { versions?: Array<{ id: string; seq: number; label: string; nodeCount?: number; createdAt?: string }> }
+      const versions = Array.isArray(data.versions) ? data.versions : []
+      if (versions.length === 0) { toast('该灵感还没有版本（先生成或存档一版）'); return }
+      openModal(`<h3>从灵感导入 · 选择版本</h3>
+        <div class="mfield"><label>版本</label><select id="wb-idea-version">${versions.map(v => `<option value="${v.id}">v${v.seq} · ${esc(v.label)}（${v.nodeCount ?? 0} 节点 · ${(v.createdAt ?? '').slice(5, 16)}）</option>`).join('')}</select></div>
+        <div class="mfield"><label>导入范围</label><select id="wb-idea-scope"><option value="all">整张灵感图</option><option value="branch">某个方向的子树</option></select></div>
+        <div class="mfield" id="wb-idea-branch-field"><label>分支起点</label><select id="wb-idea-branch"></select></div>
+        <div class="mfield"><label>方向节点默认层级</label><select id="wb-idea-kind"><option value="module">模块（module）</option><option value="business">业务（business）</option></select></div>
+        <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">映射：方向→模块/业务、点子→功能、问题→需求（待定）、风险→需求（带「风险」标签）；角度变成 angle:* 标签保留溯源。</div>
+        <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="idea-import-run" data-idea="${esc(ideaId)}" data-name="${esc(name)}">导入并创建导图</button></div>`)
+      const versionSel = $id<HTMLSelectElement>('wb-idea-version')
+      const scopeSel = $id<HTMLSelectElement>('wb-idea-scope')
+      const branchField = $id('wb-idea-branch-field')
+      const syncScope = (): void => {
+        if (branchField instanceof HTMLElement) branchField.style.display = scopeSel?.value === 'branch' ? '' : 'none'
+      }
+      scopeSel?.addEventListener('change', syncScope)
+      syncScope()
+      const loadBranches = async (): Promise<void> => {
+        const branchSel = $id<HTMLSelectElement>('wb-idea-branch')
+        if (branchSel === null) return
+        branchSel.innerHTML = '<option value="">加载中…</option>'
+        try {
+          const vRes = await fetch(`${API}/ideas/${encodeURIComponent(ideaId)}/versions/${encodeURIComponent(versionSel?.value ?? '')}`)
+          if (!vRes.ok) throw new Error(`HTTP ${vRes.status}`)
+          const vData = await vRes.json() as { version?: { graph?: IdeaLikeGraph } }
+          const graph = vData.version?.graph
+          const nodes = graph?.nodes ?? []
+          branchSel.innerHTML = nodes.map(n => `<option value="${esc(n.id)}">${'　'.repeat(Math.max(0, nodes.findIndex(x => x.id === n.id) === 0 ? 0 : 1))}${esc(n.type)} · ${esc(n.label)}</option>`).join('')
+        } catch {
+          branchSel.innerHTML = '<option value="">读取失败</option>'
+        }
+      }
+      versionSel?.addEventListener('change', () => { void loadBranches() })
+      void loadBranches()
+    } catch (cause) { toast(`版本读取失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function runIdeaImport(ideaId: string, name: string): Promise<void> {
     const product = productOf(productSelected)
     if (!product) return
-    const nodes = productNodes(product)
-    const parent = productNodeById(product, productNodeSelected) ?? nodes.find(n => n.type === 'root')
-    if (!parent) { toast('先创建产品根节点'); return }
-    openModal(`<h3>新增${type === 'feature' ? '功能' : '需求'}</h3>
-      <div class="mfield"><label>名称</label><input id="wb-pn-label" placeholder="${type === 'feature' ? '例如：登录 / 工作台' : '例如：支持手机号登录'}"></div>
-      <div class="mfield"><label>上级节点</label><select id="wb-pn-parent">${nodes.map(n => `<option value="${n.id}" ${n.id === parent.id ? 'selected' : ''}>${esc(n.type === 'root' ? '产品' : n.label)}</option>`).join('')}</select></div>
-      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-node-save" data-type="${type}">添加</button></div>`)
-    window.setTimeout(() => $id<HTMLInputElement>('wb-pn-label')?.focus(), 0)
+    const versionId = $id<HTMLSelectElement>('wb-idea-version')?.value ?? ''
+    const scope = $id<HTMLSelectElement>('wb-idea-scope')?.value ?? 'all'
+    const branch = $id<HTMLSelectElement>('wb-idea-branch')?.value ?? ''
+    const defaultKind = ($id<HTMLSelectElement>('wb-idea-kind')?.value ?? 'module') as 'module' | 'business'
+    try {
+      const res = await fetch(`${API}/ideas/${encodeURIComponent(ideaId)}/versions/${encodeURIComponent(versionId)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { version?: { graph?: IdeaLikeGraph; seq?: number } }
+      const ideaGraph = data.version?.graph
+      if (!ideaGraph || !Array.isArray(ideaGraph.nodes)) throw new Error('灵感版本图为空')
+      const sourceRef = `${ideaId}@v${data.version?.seq ?? ''}`
+      const title = name || product.name
+      const graph = productGraphFromIdea(ideaGraph, { title, branchNodeId: scope === 'branch' ? branch : '', defaultKind })
+      const mapRes = await fetch(`${API}/products/maps`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ map: { productId: product.id, name: title, description: `导入自灵感 ${sourceRef}`, graph, source: 'idea', sourceRef } }),
+      })
+      if (!mapRes.ok) throw new Error(`HTTP ${mapRes.status}`)
+      const mapData = await mapRes.json() as { map?: ProductMap }
+      const map = mapData.map
+      if (map !== undefined) {
+        await fetch(`${API}/products/maps/versions`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ version: { mapId: map.id, graph: map.graph, source: 'idea', sourceRef, label: '灵感导入', summary: `${scope === 'branch' ? '分支' : '整图'}导入 ${map.graph.nodes.length} 节点` } }),
+        })
+        productMapSelected = map.id
+      }
+      closeModal()
+      await loadProductMaps()
+      await loadMapVersions()
+      renderContent()
+      toast('已从灵感创建导图')
+    } catch (cause) { toast(`导入失败：${String((cause as Error).message ?? cause)}`) }
   }
-  async function saveProductNode(type: 'feature' | 'requirement'): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
-    const label = $id<HTMLInputElement>('wb-pn-label')?.value.trim() ?? ''
-    if (label === '') { $id<HTMLInputElement>('wb-pn-label')?.focus(); return }
-    const parentId = $id<HTMLSelectElement>('wb-pn-parent')?.value ?? ''
-    const nodes = productNodes(product)
-    nodes.push({ id: productNodeId(), label, type, parentId: parentId || null })
-    await saveProductMindmapFile(nodes)
-    closeModal()
-    renderContent()
+
+  /* ------------------------------ 导图版本（存档 / 预览 / 对比 / 回滚 / 删除） ------------------------------ */
+  async function archiveMapVersion(): Promise<void> {
+    const map = activeMap()
+    if (!map) { toast('先选择导图'); return }
+    try {
+      const res = await fetch(`${API}/products/maps/versions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: { mapId: map.id, graph: map.graph, source: 'manual', label: `v${(productMapVersions[0]?.seq ?? 0) + 1} 存档`, summary: `手动存档 · ${map.graph.nodes.length} 节点` } }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await loadMapVersions()
+      renderContent()
+      toast('已存档版本')
+    } catch (cause) { toast(`存档失败：${String((cause as Error).message ?? cause)}`) }
   }
+  async function previewMapVersion(id: string): Promise<void> {
+    try {
+      const res = await fetch(`${API}/products/maps/versions/view?id=${encodeURIComponent(id)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { version?: ProductMapVersion }
+      productMapPreview = data.version ?? null
+      renderContent()
+    } catch (cause) { toast(`预览失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  async function rollbackMapVersion(id: string): Promise<void> {
+    const version = productMapVersions.find(v => v.id === id)
+    const ok = typeof window.confirm === 'function' ? window.confirm(`回滚到 v${version?.seq ?? ''}？当前草稿会被该版本覆盖（历史保留）。`) : true
+    if (!ok) return
+    try {
+      const res = await fetch(`${API}/products/maps/versions/rollback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mapId: productMapSelected, versionId: id }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      productMapPreview = null
+      await loadProductMaps()
+      await loadMapVersions()
+      renderContent()
+      toast(`已回滚到 v${version?.seq ?? ''}`)
+    } catch (cause) { toast(`回滚失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  async function removeMapVersion(id: string): Promise<void> {
+    const version = productMapVersions.find(v => v.id === id)
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除版本 v${version?.seq ?? ''}？该版本图不可恢复（草稿不受影响）。`) : true
+    if (!ok) return
+    try {
+      const res = await fetch(`${API}/products/maps/versions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(data.error ?? `HTTP ${res.status}`)
+      }
+      if (productMapPreview?.id === id) productMapPreview = null
+      await loadMapVersions()
+      renderContent()
+      toast('版本已删除')
+    } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  async function openMapVersionDiff(): Promise<void> {
+    if (productMapVersions.length < 2) { toast('至少需要两个版本才能对比'); return }
+    openModal(`<h3>版本对比</h3>
+      <div class="mfield"><label>版本 A（旧）</label><select id="wb-diff-a">${productMapVersions.map(v => `<option value="${v.id}">v${v.seq} · ${esc(v.label)}</option>`).join('')}</select></div>
+      <div class="mfield"><label>版本 B（新）</label><select id="wb-diff-b">${productMapVersions.map((v, i) => `<option value="${v.id}" ${i === 1 ? 'selected' : ''}>v${v.seq} · ${esc(v.label)}</option>`).join('')}</select></div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-version-diff-run">对比</button></div>`)
+  }
+  async function runMapVersionDiff(): Promise<void> {
+    const aId = $id<HTMLSelectElement>('wb-diff-a')?.value ?? ''
+    const bId = $id<HTMLSelectElement>('wb-diff-b')?.value ?? ''
+    try {
+      const [aRes, bRes] = await Promise.all([
+        fetch(`${API}/products/maps/versions/view?id=${encodeURIComponent(aId)}`),
+        fetch(`${API}/products/maps/versions/view?id=${encodeURIComponent(bId)}`),
+      ])
+      if (!aRes.ok || !bRes.ok) throw new Error(`HTTP ${aRes.status}/${bRes.status}`)
+      const a = (await aRes.json() as { version?: ProductMapVersion }).version
+      const b = (await bRes.json() as { version?: ProductMapVersion }).version
+      if (!a?.graph || !b?.graph) throw new Error('版本图为空')
+      const diff = diffProductGraphs(a.graph, b.graph)
+      const entry = (list: Array<{ id: string; label: string }>): string =>
+        list.length === 0 ? '<li>无</li>' : list.slice(0, 40).map(n => `<li>${esc(n.label)}</li>`).join('')
+      openModal(`<h3>版本对比：v${a.seq} → v${b.seq}</h3>
+        <div class="mfield"><b>新增 ${diff.added.length} 节点</b><ul class="diff-list">${entry(diff.added)}</ul></div>
+        <div class="mfield"><b>删除 ${diff.removed.length} 节点</b><ul class="diff-list">${entry(diff.removed)}</ul></div>
+        <div class="mfield"><b>改名 ${diff.changed.length} 节点</b><ul class="diff-list">${diff.changed.length === 0 ? '<li>无</li>' : diff.changed.slice(0, 40).map(n => `<li>${esc(n.before)} → ${esc(n.after)}</li>`).join('')}</ul></div>
+        <div class="mfield">边：+${diff.addedEdges} / −${diff.removedEdges}</div>
+        <div class="modal-foot"><button class="btn solid" data-act="close-modal">关闭</button></div>`)
+    } catch (cause) { toast(`对比失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
   function openProductEdit(id?: string, presetPath?: string): void {
     const product = productOf(id)
     const workspaces = bugWorkspaceItems()
@@ -3782,45 +4110,7 @@ ${common}
       toast('产品已保存')
     } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
   }
-  function openProductNodeEdit(): void {
-    const product = productOf(productSelected)
-    const node = productNodeById(product, productNodeSelected)
-    if (!product || !node) { toast('先选中一个节点'); return }
-    if (node.type === 'root') { toast('产品根节点不可编辑'); return }
-    openModal(`<h3>编辑节点</h3>
-      <div class="mfield"><label>名称</label><input id="wb-pn-edit-label" value="${esc(node.label)}"></div>
-      <div class="mfield"><label>类型</label><select id="wb-pn-edit-type"><option value="feature" ${node.type === 'feature' ? 'selected' : ''}>功能</option><option value="requirement" ${node.type === 'requirement' ? 'selected' : ''}>需求</option></select></div>
-      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-node-update" data-id="${node.id}">保存</button></div>`)
-  }
-  async function updateProductNode(id: string): Promise<void> {
-    const product = productOf(productSelected)
-    if (!product) return
-    const label = $id<HTMLInputElement>('wb-pn-edit-label')?.value.trim() ?? ''
-    if (label === '') return
-    const type = ($id<HTMLSelectElement>('wb-pn-edit-type')?.value ?? 'feature') as 'feature' | 'requirement'
-    const nodes = productNodes(product).map(n => n.id === id ? { ...n, label, type } : n)
-    await saveProductMindmapFile(nodes)
-    closeModal()
-    renderContent()
-  }
-  async function deleteProductNode(): Promise<void> {
-    const product = productOf(productSelected)
-    const node = productNodeById(product, productNodeSelected)
-    if (!product || !node) { toast('先选中一个节点'); return }
-    if (node.type === 'root') { toast('不能删除产品根节点'); return }
-    const nodes = productNodes(product)
-    const doomed = new Set<string>([node.id])
-    let changed = true
-    while (changed) {
-      changed = false
-      for (const item of nodes) if (item.parentId && doomed.has(item.parentId) && !doomed.has(item.id)) { doomed.add(item.id); changed = true }
-    }
-    const ok = typeof window.confirm === 'function' ? window.confirm(`删除「${node.label}」及其子节点？`) : true
-    if (!ok) return
-    await saveProductMindmapFile(nodes.filter(n => !doomed.has(n.id)))
-    productNodeSelected = null
-    renderContent()
-  }
+
   async function generateProductModules(): Promise<void> {
     const product = productOf(productSelected)
     if (!product?.workspacePath) { toast('产品未关联工作区'); return }
@@ -3870,7 +4160,7 @@ ${common}
     const sections = features.map(feature => {
       const note = productNoteForFeature(product, feature)
       const body = note ? markdownToHtml(note.content) : `<div class="empty">还没有设计笔记；先点「设计笔记 → AI 生成设计笔记」。</div>`
-      return `<section class="feature" id="f-${feature.id}"><span class="tag">${feature.type === 'requirement' ? '需求' : '功能'}</span><h2>${esc(feature.label)}</h2><div class="doc">${body}</div></section>`
+      return `<section class="feature" id="f-${feature.id}"><span class="tag">${kindLabel(feature.kind)}</span><h2>${esc(feature.label)}</h2><div class="doc">${body}</div></section>`
     }).join('')
     const pageNav = features.map((feature, i) => `<a href="${kind === 'system' ? `#p-${feature.id}` : `#f-${feature.id}`}" ${kind === 'system' ? `data-page="${feature.id}" class="page-link${i === 0 ? ' active' : ''}"` : ''}>${esc(feature.label)}</a>`).join('')
     const modeBadge = kind === 'system' ? '产品系统' : '单页原型'
@@ -3878,7 +4168,7 @@ ${common}
       ? `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}</nav><main class="main"><div class="hero"><span class="kicker">Product System</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记与灵感资料生成的可交互产品系统 Demo。')}</p></div><div class="pages">${features.map((feature, i) => {
         const note = productNoteForFeature(product, feature)
         const body = note ? markdownToHtml(note.content) : `<div class="empty">还没有设计笔记；先点「设计笔记 → AI 生成设计笔记」。</div>`
-        return `<section class="feature page${i === 0 ? ' active' : ''}" id="p-${feature.id}" data-page-panel="${feature.id}"><span class="tag">${feature.type === 'requirement' ? '需求' : '功能'}</span><h2>${esc(feature.label)}</h2><div class="doc">${body}</div></section>`
+        return `<section class="feature page${i === 0 ? ' active' : ''}" id="p-${feature.id}" data-page-panel="${feature.id}"><span class="tag">${kindLabel(feature.kind)}</span><h2>${esc(feature.label)}</h2><div class="doc">${body}</div></section>`
       }).join('')}</div></main></div>`
       : `<div class="layout"><nav class="nav"><b>功能导航</b>${pageNav}</nav><main class="main"><div class="hero"><span class="kicker">Product Prototype</span><h1>${esc(product.name)}</h1><p>${esc(product.description || '由产品设计笔记生成的可交互原型。')}</p></div>${sections}</main></div>`
     const systemJs = kind === 'system'
@@ -5689,8 +5979,7 @@ ${lines}`
       if (act === 'product-delete') { void deleteProduct(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-tab') { productTab = (actEl.getAttribute('data-tab') as 'map' | 'notes' | 'modules' | 'demo') ?? 'map'; renderContent(); return }
       if (act === 'product-refresh') { void loadProducts(); return }
-      if (act === 'product-node-new') { openProductNodeEditor((actEl.getAttribute('data-type') as 'feature' | 'requirement') ?? 'feature'); return }
-      if (act === 'product-node-save') { void saveProductNode((actEl.getAttribute('data-type') as 'feature' | 'requirement') ?? 'feature'); return }
+      if (act === 'product-node-new') { openNodeQuickAdd('child', (actEl.getAttribute('data-type') as ProductNodeKind) ?? 'feature'); return }
       if (act === 'product-node-child') { openNodeQuickAdd('child'); return }
       if (act === 'product-node-sibling') { openNodeQuickAdd('sibling'); return }
       if (act === 'product-node-add-quick') { void saveQuickNode(); return }
@@ -5699,27 +5988,26 @@ ${lines}`
       if (act === 'pm-map-save') { void saveMapFromModal(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-map-delete') { void deleteMapById(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-map-select') { selectMap(actEl.getAttribute('data-id') ?? ''); return }
-      if (act === 'pm-layout') {
-        const mode = actEl.getAttribute('data-mode')
-        if (mode === 'right' || mode === 'bilateral' || mode === 'down' || mode === 'radial') {
-          db.settings.mapLayout = mode
-          scheduleSave()
-          renderContent()
-          toast(`布局：${MAP_LAYOUTS.find(layout => layout.id === mode)?.label ?? mode}`)
-        }
-        return
-      }
+      if (act === 'pm-engine') { productMapEngine = actEl.getAttribute('data-mode') === 'force' ? 'force' : 'tree'; productMapPreview = null; renderContent(); return }
       if (act === 'pm-toggle-fold') { toggleNodeFold(actEl.getAttribute('data-id') ?? ''); return }
-      if (act === 'pm-node-kind') { void changeNodeKind(actEl.getAttribute('data-id') ?? '', actEl.getAttribute('data-type') === 'requirement' ? 'requirement' : 'feature'); return }
-      if (act === 'pm-collapse-all') { for (const n of productNodes(productOf(productSelected))) if (n.type !== 'root' && (productNodes(productOf(productSelected)).some(k => k.parentId === n.id))) productNodeCollapsed.add(n.id); renderContent(); return }
-      if (act === 'pm-expand-all') { productNodeCollapsed.clear(); renderContent(); return }
-      if (act === 'pm-zoom-in') { setMapZoom(productMapZoom + 0.15); return }
-      if (act === 'pm-zoom-out') { setMapZoom(productMapZoom - 0.15); return }
-      if (act === 'pm-zoom-reset') { setMapZoom(1); return }
+      if (act === 'pm-node-kind') { void changeNodeKind(actEl.getAttribute('data-id') ?? '', (actEl.getAttribute('data-kind') as ProductNodeKind) ?? 'feature'); return }
+      if (act === 'pm-node-relate') { openRelateModal(actEl.getAttribute('data-id') ?? productNodeSelected ?? '', false); return }
+      if (act === 'pm-node-relate-ext') { openRelateModal(actEl.getAttribute('data-id') ?? productNodeSelected ?? '', true); return }
+      if (act === 'pm-relate-save') { saveRelate(actEl.getAttribute('data-id') ?? '', actEl.getAttribute('data-ext') === '1'); return }
       if (act === 'pm-export-outline') { exportMindmapOutline(); return }
       if (act === 'pm-import-outline') { importMindmapOutline(); return }
       if (act === 'pm-import-run') { void runMindmapImport(); return }
-      if (act === 'product-node-edit') { openProductNodeEdit(); return }
+      if (act === 'pm-import-idea') { void openIdeaImport(); return }
+      if (act === 'idea-import-next') { void openIdeaVersionPick(); return }
+      if (act === 'idea-import-run') { void runIdeaImport(actEl.getAttribute('data-idea') ?? '', actEl.getAttribute('data-name') ?? ''); return }
+      if (act === 'pm-version-archive') { void archiveMapVersion(); return }
+      if (act === 'pm-version-preview') { void previewMapVersion(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-version-rollback') { void rollbackMapVersion(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-version-delete') { void removeMapVersion(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'pm-version-back') { productMapPreview = null; renderContent(); return }
+      if (act === 'pm-version-diff') { void openMapVersionDiff(); return }
+      if (act === 'pm-version-diff-run') { void runMapVersionDiff(); return }
+      if (act === 'product-node-edit') { openNodeProperty(); return }
       if (act === 'product-node-update') { void updateProductNode(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-node-delete') { void deleteProductNode(); return }
       if (act === 'product-gen-notes') { void generateProductNotes(); return }
@@ -5977,13 +6265,15 @@ ${lines}`
     const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
     const modalOpen = ($id('wb-modal')?.innerHTML ?? '') !== ''
     if (ui.view === 'product' && productTab === 'map' && !typing && !modalOpen) {
-      if (event.key === 'Tab') {
+      /* 画布内 Tab/Enter 交给 mind-elixir 原生编辑；画布外走快速添加 */
+      const inCanvas = (event.target as HTMLElement | null)?.closest('#pm-plot') !== null
+      if (event.key === 'Tab' && !inCanvas) {
         event.preventDefault()
         event.stopPropagation()
         openNodeQuickAdd('child')
         return
       }
-      if (event.key === 'Enter' && productNodeSelected !== null) {
+      if (event.key === 'Enter' && !inCanvas && productNodeSelected !== null) {
         event.preventDefault()
         event.stopPropagation()
         openNodeQuickAdd('sibling')
@@ -5992,7 +6282,7 @@ ${lines}`
       if (event.key === 'F2') {
         event.preventDefault()
         event.stopPropagation()
-        openProductNodeEdit()
+        openNodeProperty()
         return
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
