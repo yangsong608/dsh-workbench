@@ -8,7 +8,7 @@
  * - 所有请求走 /workbench-api/ideas*（独立端点，不进整份快照）。
  */
 import { IDEA_CSS } from './idea.css.js'
-import { IDEA_ANGLES } from '../shared/idea-angles.js'
+import { IDEA_ANGLES, IDEA_ANGLE_PRESETS } from '../shared/idea-angles.js'
 import { createAgentChat, teamStateOf, type ChatHandle } from './agent-chat.js'
 import {
   buildForceOption, fromMindElixir, graphStats, graphToMarkdown, graphToSVG,
@@ -68,6 +68,8 @@ interface FormState {
   angles: string[]
   /** 本次弹窗里新增的自定义角度（保存时写入灵感的 customAngles）。 */
   customAngles?: Array<{ id: string; label: string }>
+  /** 当前展开的预设维度组（空串=收起）。 */
+  preset?: string
   urlDraft?: string
   mode: 'create' | 'edit' | 'generate'
 }
@@ -1340,6 +1342,20 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (form === null) return
     const f = form
     const customList = f.customAngles ?? []
+    const openPreset = f.preset ?? ''
+    const presetBar = IDEA_ANGLE_PRESETS.map(p => `<button type="button" class="angle-preset${openPreset === p.id ? ' on' : ''}" data-idea-act="idea-preset-toggle" data-id="${p.id}" title="${deps.esc(p.hint)}">${deps.esc(p.label)}</button>`).join('')
+    const presetBody = openPreset === ''
+      ? ''
+      : (() => {
+        const preset = IDEA_ANGLE_PRESETS.find(p => p.id === openPreset)
+        if (preset === undefined) return ''
+        const chips = preset.angles.map(a => {
+          const existing = customList.find(c => c.label === a.label)
+          const on = existing !== undefined && f.angles.includes(existing.id)
+          return `<button type="button" class="${on ? 'on' : ''}" data-idea-act="idea-preset-angle" data-label="${deps.esc(a.label)}" title="${deps.esc(a.hint)}">${deps.esc(a.label)}</button>`
+        }).join('')
+        return `<div class="angle-preset-body"><div class="angle-preset-hint">${deps.esc(preset.hint)} · 点选加入（自定义维度上限 6 个）</div><div class="idea-angles">${chips}</div></div>`
+      })()
     const angleButtons = IDEA_ANGLES.map(a => `<button type="button" class="${f.angles.includes(a.id) ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="${a.id}" title="${deps.esc(a.hint)}">${a.label}</button>`).join('')
       + `<button type="button" class="${f.angles.includes('cross') ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="cross">跨界类比</button>`
       + customList.map(a => `<button type="button" class="${f.angles.includes(a.id) ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="${deps.esc(a.id)}" title="自定义角度"><span style="color:${angleColorFor(a.id)}">◆</span> ${deps.esc(a.label)} <span data-idea-act="idea-modal-angle-del" data-id="${deps.esc(a.id)}" title="移除此角度" style="opacity:.55;padding:0 2px">×</span></button>`).join('')
@@ -1359,7 +1375,10 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         <div class="m-row"><div class="m-col"><input type="url" id="idea-form-url" data-idea-input="form-url" value="${deps.esc(f.urlDraft ?? '')}" placeholder="https://…"></div>
         <button type="button" class="btn" data-idea-act="idea-modal-url-add">添加</button></div>
         <div class="m-hint">生成时由 Agent 抓摘要；失败不影响生成。</div></div>
-      <div class="m-field"><label>发散角度 <span style="font-weight:400">默认全选 · 至少 3 个</span></label><div class="idea-angles">${angleButtons}</div></div>
+      <div class="m-field"><label>发散角度 <span style="font-weight:400">默认全选 · 至少 3 个</span></label>
+        <div class="angle-presets"><span class="angle-presets-label">预设维度组</span>${presetBar}</div>
+        ${presetBody}
+        <div class="idea-angles">${angleButtons}</div></div>
       <div class="idea-modal-foot"><span class="note">生成会新建一个版本，旧版本保留可对比</span><div class="right">
         <button class="btn" data-idea-act="idea-close-modal">取消</button>
         ${f.mode === 'create' ? '<button class="btn" data-idea-act="idea-modal-create">仅保存</button><button class="btn-primary" data-idea-act="idea-modal-create-generate">保存并生成</button>' : '<button class="btn-primary" data-idea-act="idea-modal-save">保存</button>'}
@@ -1554,7 +1573,12 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   function slugifyAngle(label: string): string {
     const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-    return base !== '' && /^[a-z]/.test(base) ? base.slice(0, 20) : `a-${Math.random().toString(36).slice(2, 7)}`
+    if (base !== '' && /^[a-z]/.test(base)) return base.slice(0, 20)
+    /* 纯中文等无法 slug 的标签：用稳定哈希做 id，保证同一维度在任何一次会话里 id 一致，
+       否则后端按 id 去重、前端按 label 去重会错位，产生「同名不同 id」的重复角度。 */
+    let hash = 0
+    for (const ch of label) hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0
+    return `a-${hash.toString(36)}`
   }
 
   async function addCustomAngle(): Promise<void> {
@@ -1881,6 +1905,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-modal-image-del': form?.images.splice(Number(el.getAttribute('data-index') ?? 0), 1); renderForm(); break
       case 'idea-modal-angle': toggleFormAngle(el.getAttribute('data-id') ?? ''); break
       case 'idea-modal-angle-add': void addFormCustomAngle(); break
+      case 'idea-preset-toggle': togglePreset(el.getAttribute('data-id') ?? ''); break
+      case 'idea-preset-angle': togglePresetAngle(el.getAttribute('data-label') ?? ''); break
       case 'idea-modal-angle-del': removeFormCustomAngle(el.getAttribute('data-id') ?? ''); break
       case 'idea-modal-create': void submitForm(true, false); break
       case 'idea-modal-create-generate': void submitForm(true, true); break
@@ -1997,6 +2023,32 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     form.customAngles = (form.customAngles ?? []).filter(a => a.id !== id)
     form.angles = form.angles.filter(a => a !== id)
     renderForm()
+  }
+
+  /** 展开/收起一个预设维度组（再点一次收起）。 */
+  function togglePreset(id: string): void {
+    if (form === null) return
+    form.preset = form.preset === id ? '' : id
+    renderForm()
+  }
+
+  /** 点选预设维度：加入本次表单的自定义角度（同名复选切换），受 6 个上限约束。 */
+  function togglePresetAngle(label: string): void {
+    if (form === null) return
+    const list = form.customAngles ?? []
+    const existing = list.find(a => a.label === label)
+    if (existing !== undefined) {
+      const on = form.angles.includes(existing.id)
+      form.angles = on ? form.angles.filter(a => a !== existing.id) : form.angles.concat([existing.id])
+      renderForm()
+      return
+    }
+    if (list.length >= 6) { deps.toast('自定义维度最多 6 个'); return }
+    const id = slugifyAngle(label)
+    form.customAngles = list.concat([{ id, label }])
+    if (!form.angles.includes(id)) form.angles.push(id)
+    renderForm()
+    deps.toast(`已加入维度「${label}」`)
   }
 
   async function toggleAngle(id: string): Promise<void> {

@@ -179,6 +179,14 @@ export const IDEA_CSS = String.raw`
 .idea-angles{display:flex;flex-wrap:wrap;gap:6px}
 .idea-angles button{height:24px;padding:0 9px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--text-2);font-size:11px;cursor:pointer}
 .idea-angles button.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,var(--line));color:var(--accent-ink);font-weight:600}
+/* 预设维度组 */
+.angle-presets{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.angle-presets-label{font-size:10px;color:var(--text-3);letter-spacing:.04em}
+.angle-preset{height:24px;padding:0 10px;border-radius:999px;border:1px dashed var(--line);background:transparent;color:var(--text-2);font-size:11px;cursor:pointer}
+.angle-preset:hover{border-color:color-mix(in srgb,var(--accent) 35%,var(--line));color:var(--accent-ink)}
+.angle-preset.on{border-style:solid;background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line));color:var(--accent-ink);font-weight:600}
+.angle-preset-body{border:1px solid var(--line);border-radius:9px;padding:9px 10px;margin-bottom:9px;background:var(--panel-2)}
+.angle-preset-hint{font-size:10px;color:var(--text-3);margin-bottom:7px}
 .idea-modal-foot{display:flex;align-items:center;gap:8px;margin-top:4px}
 .idea-modal-foot .note{font-size:10.5px;color:var(--text-3)}
 .idea-modal-foot .right{margin-left:auto;display:flex;gap:8px}
