@@ -1223,6 +1223,11 @@ CREATE TABLE IF NOT EXISTS products (
     const description = str(input?.description).slice(0, 2000)
     let id = str(input?.id)
     const existing = id === '' ? undefined : this.db.prepare('SELECT * FROM product_maps WHERE id = ?').get(id) as any
+    /* 形状守卫：调用方误把 { graph, issues } 之类包装对象当图传入时，normalize 会静默退化成
+       「只剩根节点」（2026-10-26 导入空图 bug 的放大器）。这里显式报错，避免数据被悄悄写空。 */
+    if (input?.graph !== undefined && input?.graph !== null && !Array.isArray(input.graph?.nodes)) {
+      throw new Error('导图 graph 形状不正确：缺少 nodes 数组（是否误传了 { graph, issues } 包装对象？）')
+    }
     /* 图：v2 graph 优先；旧客户端传 mindmap(v1) 就转换；都没传沿用既有图。 */
     const incoming = input?.graph ?? (typeof input?.mindmap === 'string' ? productGraphFromV1(input.mindmap, name).graph : undefined)
     const base = incoming ?? (existing !== undefined ? mapGraphOf(existing) : productGraphFromV1(normalizeMindmap(undefined, name), name).graph)
@@ -1296,6 +1301,9 @@ CREATE TABLE IF NOT EXISTS products (
       error.current = toProductMap(row)
       throw error
     }
+    if (input?.graph !== undefined && input?.graph !== null && !Array.isArray(input.graph?.nodes)) {
+      throw new Error('导图 graph 形状不正确：缺少 nodes 数组（是否误传了 { graph, issues } 包装对象？）')
+    }
     const normalized = normalizeProductGraph(input?.graph, { title: row.name })
     const graph = this.pruneExternalRefs(row.product_id, normalized.graph)
     if (productGraphBytes(graph) > PRODUCT_GRAPH_LIMITS.graph) throw new Error('导图数据过大')
@@ -1345,6 +1353,9 @@ CREATE TABLE IF NOT EXISTS products (
     if (!row) throw new Error('导图不存在')
     const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM product_map_versions WHERE map_id = ?').get(mapId) as any)?.n ?? 0)
     if (count >= PRODUCT_GRAPH_LIMITS.versions) throw new Error(`每个导图最多 ${PRODUCT_GRAPH_LIMITS.versions} 个版本，请先删除旧版本`)
+    if (input?.graph !== undefined && input?.graph !== null && !Array.isArray(input.graph?.nodes)) {
+      throw new Error('导图 graph 形状不正确：缺少 nodes 数组（是否误传了 { graph, issues } 包装对象？）')
+    }
     const normalized = normalizeProductGraph(input?.graph ?? mapGraphOf(row), { title: row.name })
     const graph = this.pruneExternalRefs(row.product_id, normalized.graph)
     if (productGraphBytes(graph) > PRODUCT_GRAPH_LIMITS.graph) throw new Error('导图数据过大')

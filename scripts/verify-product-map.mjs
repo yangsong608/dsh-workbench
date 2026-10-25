@@ -81,6 +81,12 @@ console.log('· 图模型（shared/product-graph-model）')
   const branch = model.productGraphFromIdea(ideaGraph, { title: '产品C', branchNodeId: 'i1' }).graph
   check('灵感分支导入（i1 子树：不含方向/问题节点）', branch.nodes.some(n => n.id === 'r1') && !branch.nodes.some(n => n.id === 'd1' || n.id === 'q1') && branch.nodes.length === 3)
 
+  // 2026-10-26 回归：返回的是 { graph, issues } 包装对象；整对象当图用会静默退化成只剩根节点
+  const wrapped = model.productGraphFromIdea(ideaGraph, { title: '产品C' })
+  check('导入返回包装对象 { graph, issues }', Array.isArray(wrapped.graph?.nodes) && wrapped.graph.nodes.length === 5 && Array.isArray(wrapped.issues))
+  const bugShape = model.normalizeProductGraph(wrapped, { title: '产品C' })
+  check('误传包装对象时 normalize 会退化成根节点（需上层守卫拦截）', bugShape.graph.nodes.length === 1)
+
   const a = model.emptyProductGraph('P')
   const b = { ...a, nodes: a.nodes.concat([{ id: 'x1', label: '新功能', kind: 'feature', parentId: 'root', status: 'kept' }]) }
   const diff = model.diffProductGraphs(a, b)
@@ -158,6 +164,30 @@ const delRes1 = await call('DELETE', `/products/maps/versions/${v1Res.body.versi
 const delRes2 = await call('DELETE', `/products/maps/versions/${v2Res.body.version.id}`)
 const delRes3 = await call('DELETE', `/products/maps/versions/${rollbackRes.body.version.id}`)
 check('删除版本受「至少保留 1 个」保护', delRes1.status === 200 && delRes2.status === 200 && delRes3.status === 400)
+
+// 4b. 灵感导入落库（2026-10-26 回归）：正确传 .graph → 节点全在；误传包装对象 → 400 而非静默写空
+{
+  const ideaLike = {
+    rootId: 'root',
+    nodes: [
+      { id: 'root', type: 'seed', label: '导入源', parentId: null },
+      { id: 'd1', type: 'direction', label: '方向A', parentId: 'root', angle: 'users' },
+      { id: 'i1', type: 'idea', label: '点子A1', parentId: 'd1' },
+      { id: 'i2', type: 'idea', label: '点子A2', parentId: 'd1' },
+    ],
+    edges: [{ from: 'root', to: 'd1', kind: 'tree' }, { from: 'd1', to: 'i1', kind: 'tree' }, { from: 'd1', to: 'i2', kind: 'tree' }],
+  }
+  const converted = model.productGraphFromIdea(ideaLike, { title: '灵感导入图' })
+  const okRes = await call('POST', '/products/maps', {
+    map: { productId: product.id, name: '灵感导入图', graph: converted.graph, source: 'idea', sourceRef: 'idea-x@v2' },
+  })
+  check('灵感导入传 .graph：节点全部落库', okRes.status === 200 && (okRes.body?.map?.graph?.nodes ?? []).length === converted.graph.nodes.length && converted.graph.nodes.length === 4)
+  const badRes = await call('POST', '/products/maps', {
+    map: { productId: product.id, name: '坏形状', graph: converted, source: 'idea' },
+  })
+  check('误传包装对象被宿主拒绝（400 而非静默空图）', badRes.status === 400 && String(badRes.body?.message ?? '').includes('nodes'))
+  await call('DELETE', `/products/maps/${okRes.body?.map?.id}`, undefined)
+}
 
 // 5. 跨图引用：合法保留 / 非法剪除 / 删图级联清理
 const map2Res = await call('POST', '/products/maps', { map: { productId: product.id, name: '互补图', graph: model.emptyProductGraph('互补图') } })

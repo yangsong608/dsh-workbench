@@ -4005,7 +4005,12 @@ ${common}
       if (!ideaGraph || !Array.isArray(ideaGraph.nodes)) throw new Error('灵感版本图为空')
       const sourceRef = `${ideaId}@v${data.version?.seq ?? ''}`
       const title = name || product.name
-      const graph = productGraphFromIdea(ideaGraph, { title, branchNodeId: scope === 'branch' ? branch : '', defaultKind })
+      /* productGraphFromIdea 返回 { graph, issues }，必须取 .graph——整对象传给宿主时
+         normalize 读不到 nodes，会退化成「只有根节点」（2026-10-26 修复的导入空图 bug）。 */
+      const converted = productGraphFromIdea(ideaGraph, { title, branchNodeId: scope === 'branch' ? branch : '', defaultKind })
+      if (converted.issues.length > 0) console.warn('[dsh-workbench] 灵感导入规范化提示：', converted.issues)
+      const graph = converted.graph
+      if (graph.nodes.length <= 1) throw new Error('灵感图没有可导入的节点（该版本可能为空）')
       const mapRes = await fetch(`${API}/products/maps`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ map: { productId: product.id, name: title, description: `导入自灵感 ${sourceRef}`, graph, source: 'idea', sourceRef } }),

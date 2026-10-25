@@ -97,7 +97,7 @@ check('页内会话接入会话派发', client.includes('startAgentDispatch') &&
 check('智能体团队宿主具备路由/种子/工具', host.includes('createAgentModule') && host.includes('产品研发') && host.includes('spawn_teammate') && host.includes('workbench_team_list'))
 check('门户含智能体团队区块', client.includes('portal-teams') && client.includes('agent-team-open') && client.includes('智能体团队'))
 check('团队/成员弹窗与权限动作', client.includes('agent-member-write') && client.includes('agent-member-save') && client.includes('fileWrite'))
-check('灵感含 5 分钟超时与防重复生成', client.includes('生成超过 5 分钟') && /status\s*!==\s*["']running["']/.test(client))
+check('灵感含卡死判定（按进展）与防重复生成', client.includes('没有进展') && client.includes('进展基线') && /status\s*!==\s*["']running["']/.test(client))
 check('灵感项目可从门户同步', client.includes('portalProjects') && client.includes('idea-project-sync') && host.includes('saved.created'))
 check('灵感支持自定义角度', client.includes('customAngles') && client.includes('idea-angle-add') && host.includes('sanitizeCustomAngles'))
 check('导图有右键菜单与增删改', client.includes('idea-menu') && client.includes('idea-node-sibling') && client.includes('onPlotContext'))
