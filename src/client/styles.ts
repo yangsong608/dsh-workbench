@@ -882,6 +882,27 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .module-card p{font-size:10px;line-height:1.5;color:var(--text-2);margin:5px 0 3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .module-card small{font-size:9px;color:var(--text-3)}
 @media(max-width:1000px){.module-grid{grid-template-columns:1fr 1fr}}
+/* 设计笔记：覆盖度 / 节点归属 / 筛选 */
+.note-coverage{margin:0 0 8px}
+.note-coverage-bar{height:6px;border-radius:99px;background:var(--panel-3);overflow:hidden}
+.note-coverage-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--green),color-mix(in srgb,var(--green) 55%,#fff));transition:width .3s}
+.note-coverage-meta{display:flex;align-items:center;gap:10px;margin-top:5px;font-size:9.5px;color:var(--text-3)}
+.note-coverage-meta .btn{margin-left:auto}
+.note-cover-grid{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:9px;max-height:96px;overflow:auto}
+.note-cover-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;padding:3px 7px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--text-3);cursor:pointer;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.note-cover-chip .dot{width:6px;height:6px;border-radius:99px;background:var(--line-strong);flex-shrink:0}
+.note-cover-chip.done{color:var(--text-2);border-color:color-mix(in srgb,var(--green) 35%,var(--line))}
+.note-cover-chip.done .dot{background:var(--green)}
+.note-cover-chip:hover{border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.note-filters{display:flex;align-items:center;gap:6px;margin:0 0 7px}
+.note-filter-count{margin-left:auto;font-size:9.5px;color:var(--text-3)}
+.product-note-head{display:flex;align-items:flex-start;gap:4px}
+.product-note-head b{flex:1;min-width:0}
+.product-note-ops{display:flex;gap:1px;opacity:0;transition:opacity .15s}
+.product-note:hover .product-note-ops{opacity:1}
+.product-note-node{display:inline-block;margin-top:3px;font-size:9px;color:var(--accent-ink);background:var(--accent-soft);border-radius:4px;padding:1px 5px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.product-note-node.orphan{color:var(--text-3);background:var(--panel-3)}
+.product-note-text{display:block;margin-top:3px;font-size:10px;line-height:1.5;color:var(--text-3);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 /* 模块树 / 筛选 / 页内会话 */
 .module-tree{display:flex;flex-direction:column;gap:5px}
 .module-row{display:flex;align-items:stretch;gap:4px}

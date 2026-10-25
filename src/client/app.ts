@@ -420,6 +420,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /** 模块页筛选（空串=不筛）。 */
   let moduleFilterKind = ''
   let moduleFilterPlatform = ''
+  /** 笔记页：只看未关联节点的笔记。 */
+  let noteFilterMissing = false
   /** 页内会话（团队派发）句柄与当前派发。 */
   let productChat: ChatHandle | null = null
   let productDispatch: { dispatchId: string; sessionId: string; teamName: string } | null = null
@@ -3358,9 +3360,45 @@ ${lines}
     } else if (productTab === 'notes') {
       const featureNodes = productFeatureNodes(product)
       const picked = featureNodes.filter(n => productPicked.has(n.id))
-      body = `<div class="product-panel-head"><div><b>设计笔记</b><span>${esc(scopedLabel())} · ${picked.length > 0 ? `已勾选 ${picked.length} 个功能/需求，生成将覆盖勾选项` : `未勾选，生成将覆盖全部 ${featureNodes.length} 个`}</span></div><div class="product-actions"><button class="btn" data-act="flow-gen-tests">${ic('arrowR', 12)}生成测试用例</button><button class="btn-primary" data-act="product-gen-notes">${ic('spark', 12)}AI 生成设计笔记</button></div></div>
-        <div class="product-pick-list">${featureNodes.map(n => `<label><input type="checkbox" data-act="product-pick" data-id="${n.id}" ${productPicked.has(n.id) ? 'checked' : ''}> ${esc(n.label)}</label>`).join('') || '<span class="muted">先添加功能节点</span>'}</div>
-        <div class="product-note-list">${productNoteList(product).map(note => `<div class="product-note" data-product-note="${note.id}"><b>${esc(note.title)}</b><span>${esc(note.content.replace(/[#>*\n]/g, ' ').slice(0, 100))}</span><i>${note.filePath ? '已写入工作区' : '仅本地库'}</i></div>`).join('') || '<div class="notes-empty small">还没有设计笔记，点右上角 AI 生成。</div>'}</div>`
+      const cov = noteCoverage(product)
+      const p = productProgress !== null && productProgress.productId === product.id && productProgress.kind === 'notes' ? productProgress : null
+      const allNotes = productNoteList(product)
+      /* 排序：按导图节点顺序（无关联的排后面），与导图结构对齐 */
+      const orderOf = new Map(featureNodes.map((n, i) => [n.id, i]))
+      const sortedNotes = allNotes.slice().sort((a, b) => {
+        const ai = orderOf.get(noteNodeId(a)) ?? 9999
+        const bi = orderOf.get(noteNodeId(b)) ?? 9999
+        if (ai !== bi) return ai - bi
+        return String(b.updatedAt).localeCompare(String(a.updatedAt))
+      })
+      const filteredNotes = noteFilterMissing ? sortedNotes.filter(n => noteNodeId(n) === '') : sortedNotes
+      const coverLine = featureNodes.length === 0 ? '导图里还没有功能/需求节点'
+        : `覆盖 ${cov.written.size}/${featureNodes.length} 个节点${cov.missing.length > 0 ? `，缺 ${cov.missing.length} 个` : '，已全部覆盖'}`
+      body = `<div class="product-panel-head"><div><b>设计笔记</b><span>${esc(scopedLabel())} · ${coverLine}${picked.length > 0 ? ` · 已勾选 ${picked.length} 个（生成将覆盖勾选项）` : ''}</span></div><div class="product-actions">
+        <button class="btn" data-act="product-note-new">${ic('plus', 12)}写笔记</button>
+        <button class="btn" data-act="flow-gen-tests">${ic('arrowR', 12)}生成测试用例</button>
+        <button class="btn-primary" data-act="product-gen-notes">${ic('spark', 12)}AI 生成设计笔记</button>
+      </div></div>
+      ${p !== null ? renderProductProgressBar(p) : ''}
+      ${featureNodes.length === 0 ? '' : `<div class="note-coverage">
+        <div class="note-coverage-bar"><i style="width:${featureNodes.length > 0 ? Math.round(cov.written.size / featureNodes.length * 100) : 0}%"></i></div>
+        <div class="note-coverage-meta"><span>已写 ${cov.written.size}</span><span>缺失 ${cov.missing.length}</span>
+          ${cov.missing.length > 0 ? `<button class="btn tiny" data-act="product-note-pick-missing">勾选缺失 ${cov.missing.length} 个</button>` : ''}
+        </div>
+      </div>`}
+      <div class="note-cover-grid">${featureNodes.map(n => {
+        const note = noteOfNode(n.id, allNotes)
+        return `<div class="note-cover-chip${note !== undefined ? ' done' : ''}" data-act="${note !== undefined ? 'product-note-open' : 'product-note-new-node'}" data-id="${note?.id ?? n.id}" title="${note !== undefined ? `已写：${esc(note.title)}` : '点此写这篇笔记'}">
+          <span class="dot"></span>${esc(n.label)}
+        </div>`
+      }).join('')}</div>
+      <div class="product-pick-list">${featureNodes.map(n => `<label><input type="checkbox" data-act="product-pick" data-id="${n.id}" ${productPicked.has(n.id) ? 'checked' : ''}> ${esc(n.label)}</label>`).join('') || '<span class="muted">先添加功能节点</span>'}</div>
+      <div class="note-filters">
+        <button class="btn tiny ${noteFilterMissing ? 'solid' : ''}" data-act="product-note-filter-missing">${noteFilterMissing ? '只看未关联' : '只看未关联'}</button>
+        <span class="note-filter-count">${filteredNotes.length} 篇</span>
+      </div>
+      <div class="product-note-list">${filteredNotes.map(note => renderNoteCard(note, featureNodes)).join('') || `<div class="notes-empty small">${noteFilterMissing ? '没有未关联节点的笔记' : '还没有设计笔记：点「写笔记」自己写，或让 AI 按导图逐节点生成。'}</div>`}</div>
+      <div id="product-chat" class="product-chat"></div>`
     } else if (productTab === 'modules') {
       const mods = productModuleList(product)
       const kindName = (k: Module['kind']): string => k === 'module' ? '模块' : k === 'business' ? '业务' : k === 'feature' ? '功能' : '需求'
@@ -3596,7 +3634,7 @@ ${lines}
       return `产品模块化与详细设计任务：${product.name}\n\n你是资深产品架构师。请把产品拆成「产品 → 模块 → 业务 → 功能 / 需求」，并为每个模块生成详细设计笔记。\n\n${common}\n\n要求：\n1. 先调用 workbench_module_publish 写模块/业务/功能/需求，参数 { productId:"${product.id}"${mapArg}, parentId:"父级模块 id（顶层留空）", nodeId:"可选，对应导图节点 id", name, kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all", description }。\n1b. **每个节点写完后立刻调用一次 product_progress_publish 上报进度**（step 递增、total=计划拆分的节点总数、status="running"、message="已写：模块名"），全部完成后 total 步 status="done"；失败时 status="failed" 并写明原因。\n2. 每个模块调用 workbench_product_note_publish 生成详细设计笔记，参数包含 productId${mapArg}、moduleId、platform、title、content。\n3. 笔记结构：模块背景 / 范围 / 平台差异 / 信息架构 / 核心流程 / 状态 / 数据与接口 / 权限 / 边界 / 验收。\n4. 模块划分按业务能力，不按页面；平台差异明确写出 PC / 移动 / 平板分别的交互。\n5. 不要只回复正文；必须调用工具；完成后汇总模块清单。`
     }
     if (mode === 'notes') {
-      return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}"${mapArg}, featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
+      return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n0. 开始前先调用 product_progress_publish { productId:"${product.id}", kind:"notes", mapId:"${productMapSelected}", step:0, total:"\${本次覆盖节点数，请按导图里实际功能/需求个数填写}", message:"开始写设计笔记" }，每写完一篇再上报一次（step 递增，status="running"），全部完成后 total 步 status="done"；失败时 status="failed" 并说明原因。\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}"${mapArg}, featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
     }
     const platformLabelMap: Record<string, string> = { pc: 'PC（宽屏 1280+，侧栏导航、多栏信息密度）', mobile: '移动端（375-430px，单列、底部导航、大触控目标）', tablet: '平板（768-1024px，双栏自适应、大间距）', all: '自适应（移动优先，PC 增强）' }
     return `产品 Demo 生成任务：${product.name}
@@ -4447,8 +4485,9 @@ ${common}
       const data = await res.json() as { progress?: ProductProgress | null }
       productProgress = data.progress ?? null
       if (productProgress?.status === 'running') {
-        /* 运行中：刷新产物（AI 可能已经写了一半），但不重建整个页面以免打断阅读 */
+        /* 运行中：刷新产物（AI 可能已经写了一半），笔记还要单独拉一次 */
         await loadProducts(true)
+        if (productProgressKind === 'notes') await loadNotes()
       } else if (productProgress?.status === 'done' || productProgress?.status === 'failed') {
         if (productChatTimer !== 0) { window.clearInterval(productChatTimer); productChatTimer = 0 }
         await loadProducts(true)
@@ -4642,6 +4681,152 @@ ${common}
   }
 
 
+  /* ------------------------------ 设计笔记：节点归属 / 覆盖度 / 就近编辑 ------------------------------ */
+  /** 从笔记 tags 里解析出它关联的导图节点 id（tag 形如 pn-abc123）。 */
+  function noteNodeId(note: Note): string {
+    const graph = mapGraph()
+    for (const tag of note.tags ?? []) {
+      if (graph.nodes.some(n => n.id === tag)) return tag
+    }
+    /* 兼容：tags 里没有时，用标题匹配节点名（AI 标题通常是「功能名 + 设计笔记」） */
+    const hit = graph.nodes.find(n => n.kind !== 'root' && n.label.trim() !== '' && note.title.includes(n.label))
+    return hit?.id ?? ''
+  }
+
+  /** 节点的笔记（同一节点可能有多篇，取最新）。 */
+  function noteOfNode(nodeId: string, list: Note[]): Note | undefined {
+    return list.find(note => noteNodeId(note) === nodeId)
+  }
+
+  /** 覆盖度：已写/缺失的节点清单（只看功能与需求，模块/业务可作为分组头）。 */
+  function noteCoverage(product: Product | undefined): { nodes: ProductNode[]; written: Set<string>; missing: ProductNode[] } {
+    const nodes = productFeatureNodes(product)
+    const list = productNoteList(product)
+    const written = new Set<string>()
+    for (const note of list) {
+      const id = noteNodeId(note)
+      if (id !== '') written.add(id)
+    }
+    return { nodes, written, missing: nodes.filter(n => !written.has(n.id)) }
+  }
+
+  /** 笔记卡片：显示「▸ 节点名」归属 + 编辑/删除按钮。 */
+  function renderNoteCard(note: Note, graphNodes: ProductNode[]): string {
+    const nodeId = noteNodeId(note)
+    const node = graphNodes.find(n => n.id === nodeId)
+    const plain = note.content.replace(/[#>*\n]/g, ' ').slice(0, 100)
+    return `<div class="product-note" data-product-note="${note.id}">
+      <div class="product-note-head">
+        <b>${esc(note.title)}</b>
+        <span class="product-note-ops">
+          <button class="icon-btn" data-act="product-note-edit" data-id="${note.id}" title="编辑">${ic('edit', 11)}</button>
+          <button class="icon-btn" data-act="product-note-delete" data-id="${note.id}" title="删除">${ic('trash', 11)}</button>
+        </span>
+      </div>
+      ${node !== undefined ? `<span class="product-note-node" title="关联导图节点">▸ ${kindLabel(node.kind)} · ${esc(node.label)}</span>` : '<span class="product-note-node orphan">未关联节点</span>'}
+      <span class="product-note-text">${esc(plain)}</span>
+      <i>${note.filePath ? '已写入工作区' : '仅本地库'}</i>
+    </div>`
+  }
+
+  /** 笔记编辑弹窗（就地编辑，不跳走）：标题 / 正文 / 关联节点。 */
+  function openNoteEditor(id: string): void {
+    const note = notes.find(n => n.id === id)
+    if (note === undefined) { toast('笔记不存在'); return }
+    const graphNodes = mapGraph().nodes.filter(n => n.kind !== 'root')
+    const current = noteNodeId(note)
+    openModal(`<h3>编辑设计笔记</h3>
+      <div class="mfield"><label>标题</label><input id="wb-note-title" value="${esc(note.title)}"></div>
+      <div class="mfield"><label>关联导图节点</label><select id="wb-note-node">
+        <option value="">不关联</option>
+        ${graphNodes.map(n => `<option value="${n.id}" ${n.id === current ? 'selected' : ''}>${kindLabel(n.kind)} · ${esc(n.label)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>正文（Markdown）</label><textarea id="wb-note-content" rows="14">${esc(note.content)}</textarea></div>
+      <div class="modal-foot"><button class="btn" data-act="product-note-delete" data-id="${note.id}">${ic('trash', 12)}删除</button><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-note-save" data-id="${note.id}">保存</button></div>`)
+  }
+
+  /** 手工新建一篇设计笔记（默认归到产品笔记本 + 当前导图）。 */
+  function openNoteCreator(presetNodeId = ''): void {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const graphNodes = mapGraph().nodes.filter(n => n.kind !== 'root')
+    openModal(`<h3>写设计笔记</h3>
+      <div class="mfield"><label>标题</label><input id="wb-note-title" placeholder="例如：登录 · 设计笔记"></div>
+      <div class="mfield"><label>关联导图节点（可选）</label><select id="wb-note-node">
+        <option value="">不关联</option>
+        ${graphNodes.map(n => `<option value="${n.id}" ${n.id === presetNodeId ? 'selected' : ''}>${kindLabel(n.kind)} · ${esc(n.label)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>正文（Markdown）</label><textarea id="wb-note-content" rows="14" placeholder="背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准"></textarea></div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-note-create">创建</button></div>`)
+  }
+
+  async function saveNoteFromModal(id: string): Promise<void> {
+    const note = notes.find(n => n.id === id)
+    if (note === undefined) return
+    const title = $id<HTMLInputElement>('wb-note-title')?.value.trim() ?? ''
+    if (title === '') { toast('标题不能为空'); return }
+    const content = $id<HTMLTextAreaElement>('wb-note-content')?.value ?? ''
+    const nodeId = $id<HTMLSelectElement>('wb-note-node')?.value ?? ''
+    /* tags：保留原有非节点 tag，替换节点 tag */
+    const graphIds = new Set(mapGraph().nodes.map(n => n.id))
+    const kept = (note.tags ?? []).filter(t => !graphIds.has(t))
+    const tags = nodeId === '' ? kept : kept.concat([nodeId])
+    try {
+      const res = await fetch(`${API}/notes`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ note: { ...note, title, content, tags } }),
+      })
+      const data = await res.json().catch(() => ({})) as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      if (data.note !== undefined) {
+        const index = notes.findIndex(n => n.id === data.note.id)
+        if (index >= 0) notes[index] = data.note
+      }
+      closeModal()
+      await loadNotes()
+      renderContent()
+      toast('笔记已保存')
+    } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function createNoteFromModal(): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const title = $id<HTMLInputElement>('wb-note-title')?.value.trim() ?? ''
+    if (title === '') { toast('标题不能为空'); return }
+    const content = $id<HTMLTextAreaElement>('wb-note-content')?.value ?? ''
+    const nodeId = $id<HTMLSelectElement>('wb-note-node')?.value ?? ''
+    const tags = ['产品', product.name, ...(nodeId === '' ? [] : [nodeId])]
+    try {
+      const res = await fetch(`${API}/notes`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ note: { notebookId: product.notebookId, mapId: productMapSelected, title, content, tags } }),
+      })
+      const data = await res.json().catch(() => ({})) as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      closeModal()
+      await loadNotes()
+      await loadProducts(true)
+      renderContent()
+      toast('笔记已创建')
+    } catch (cause) { toast(`创建失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function removeNoteById(id: string): Promise<void> {
+    const note = notes.find(n => n.id === id)
+    const ok = typeof window.confirm === 'function' ? window.confirm(`删除笔记「${note?.title ?? ''}」？工作区里的 .md 镜像也会一并删除。`) : true
+    if (!ok) return
+    try {
+      const res = await fetch(`${API}/notes/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      notes = notes.filter(n => n.id !== id)
+      closeModal()
+      renderContent()
+      toast('笔记已删除')
+    } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  /** 笔记生成：与模块同一套团队派发 + 进度 + 页内会话（原来走裸会话，无进度不可观测）。 */
   async function generateProductNotes(): Promise<void> {
     const product = productOf(productSelected)
     if (!product?.workspacePath) { toast('产品未关联工作区'); return }
@@ -4654,9 +4839,61 @@ ${common}
     if (!ok) return
     const prompt = productPrompt(product, 'notes', scope)
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
-    toast('正在新建产品设计会话…')
-    try { await queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    try {
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: 'notes', mapId: productMapSelected, step: 0, total: covered, status: 'running', message: '正在派发团队…' } }),
+      })
+    } catch { /* ignore */ }
+    productProgressKind = 'notes'
+    await loadProductProgress()
+    if (ui.view === 'product') renderContent()
+    const chat = ensureProductChat()
+    chat?.open({ teamName: '', dispatchId: '', sessionId: '', timeoutMs: 15 * 60 * 1000 })
+    chat?.setStatus('dispatching')
+    const started = await startAgentDispatch({
+      ideaId: '',
+      runId: '',
+      teamId: '',
+      feature: 'product.design',
+      goal: prompt,
+      ideaTitle: product.name,
+      ideaBrief: product.description,
+      workspacePath: product.workspacePath,
+      timeoutMs: 15 * 60 * 1000,
+      allowNoIdea: true,
+    } as any, {
+      event: event => chat?.ingest(event),
+      history: events => chat?.ingestMany(events),
+      status: (status, note) => {
+        chat?.setStatus(status, note)
+        if (status === 'done' || status === 'failed') {
+          void fetch(`${API}/products/progress`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ progress: { productId: product.id, kind: 'notes', mapId: productMapSelected, step: covered, total: covered, status: status === 'done' ? 'done' : 'failed', message: status === 'done' ? '团队执行结束' : (note ?? '团队执行失败') } }),
+          }).then(() => loadProductProgress()).then(() => loadNotes()).then(() => { if (ui.view === 'product') renderContent() }).catch(() => undefined)
+        }
+      },
+      team: projection => chat?.setTeam(teamStateOf(projection)),
+    })
+    if (started === null) {
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: 'notes', mapId: productMapSelected, step: 0, total: covered, status: 'failed', message: '派发失败（提示词已复制）' } }),
+      }).catch(() => undefined)
+      await loadProductProgress()
+      if (ui.view === 'product') renderContent()
+      return
+    }
+    productDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
+    chat?.open({ teamName: started.teamName, dispatchId: started.dispatchId, sessionId: started.sessionId, timeoutMs: started.timeoutMs })
+    chat?.setStatus('running')
+    watchProductDispatch()
+    startProductProgressPolling('notes')
+    toast(started.teamName === '' ? '已派发到团队会话' : `已派发给「${started.teamName}」`)
   }
+
+
   function productDemoCss(style: string): string {
     const base = `*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;background:var(--bg);color:var(--text)}a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}.top{display:flex;align-items:center;gap:12px;padding:16px 28px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:3}.brand{font-weight:800;font-size:18px;letter-spacing:-.3px}.badge{font-size:10px;border:1px solid var(--line);border-radius:99px;padding:2px 8px;color:var(--muted)}.layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0}.nav{border-right:1px solid var(--line);padding:18px 14px;position:sticky;top:57px;height:calc(100vh - 57px);overflow:auto;background:var(--surface)}.nav b{display:block;font-size:10px;letter-spacing:.12em;color:var(--muted);margin-bottom:9px;text-transform:uppercase}.nav a{display:block;padding:7px 9px;border-radius:7px;text-decoration:none;font-size:13px;color:var(--muted);margin-bottom:2px}.nav a:hover{background:var(--hover);color:var(--text)}.main{padding:42px 48px 72px;max-width:1000px;width:100%;margin:0 auto}.hero{padding:20px 0 26px;border-bottom:1px solid var(--line);margin-bottom:26px}.hero .kicker{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}.hero h1{font-size:34px;line-height:1.2;margin:8px 0 7px;letter-spacing:-.6px}.hero p{color:var(--muted);font-size:14px;margin:0;max-width:680px}.feature{padding:24px 0 30px;border-bottom:1px solid var(--line)}.feature:last-child{border-bottom:0}.feature h2{font-size:23px;margin:0 0 12px;letter-spacing:-.3px}.feature .tag{font-size:10px;color:var(--accent);font-weight:700;letter-spacing:.1em;text-transform:uppercase}.doc h1,.doc h2,.doc h3{margin:16px 0 6px;line-height:1.3}.doc h1{font-size:20px}.doc h2{font-size:16px}.doc h3{font-size:14px}.doc p,.doc li{font-size:13.5px;color:var(--muted)}.doc ul,.doc ol{padding-left:20px}.doc blockquote{border-left:3px solid var(--accent);margin:10px 0;padding:6px 12px;background:var(--hover);color:var(--muted)}.doc code{background:var(--hover);padding:1px 4px;border-radius:4px;font-size:12px}.doc pre{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow:auto}.doc a{color:var(--accent)}.doc table{border-collapse:collapse;width:100%}.doc td,.doc th{border:1px solid var(--line);padding:5px 7px;font-size:12px}.empty{border:1px dashed var(--line);border-radius:10px;padding:16px;color:var(--muted);font-size:13px}.foot{padding:16px 28px;border-top:1px solid var(--line);color:var(--muted);font-size:10px;display:flex;justify-content:space-between}.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none;font-size:12px;font-weight:600}`
     const themes: Record<string, string> = {
@@ -5269,7 +5506,7 @@ ${mapLine}
       modPlatformSel.value = moduleFilterPlatform
       modPlatformSel.addEventListener('change', () => { moduleFilterPlatform = modPlatformSel.value; renderContent() })
     }
-    if (productTab === 'modules') ensureProductChat()
+    if (productTab === 'modules' || productTab === 'notes') ensureProductChat()
     $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => {
       productSelected = (e.currentTarget as HTMLSelectElement).value
       productNodeSelected = null
@@ -6568,6 +6805,14 @@ ${lines}`
       if (act === 'product-module-save') { void saveModuleFromModal(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-module-delete') { void deleteModuleById(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-module-filter-clear') { moduleFilterKind = ''; moduleFilterPlatform = ''; renderContent(); return }
+      if (act === 'product-note-new') { openNoteCreator(); return }
+      if (act === 'product-note-new-node') { openNoteCreator(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-note-edit') { openNoteEditor(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-note-save') { void saveNoteFromModal(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-note-create') { void createNoteFromModal(); return }
+      if (act === 'product-note-delete') { void removeNoteById(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-note-filter-missing') { noteFilterMissing = !noteFilterMissing; renderContent(); return }
+      if (act === 'product-note-pick-missing') { const cov = noteCoverage(productOf(productSelected)); productPicked = new Set(cov.missing.map(n => n.id)); renderContent(); toast(`已勾选 ${cov.missing.length} 个缺失节点`); return }
       if (act === 'product-progress-clear') { void clearProductProgress(); return }
       if (act === 'product-chat-open') { productChat?.open({ teamName: productDispatch?.teamName ?? '', dispatchId: productDispatch?.dispatchId ?? '', sessionId: productDispatch?.sessionId ?? '', timeoutMs: 15 * 60 * 1000 }); return }
       if (act === 'product-demo-delete') { void deleteProductDemo(actEl.getAttribute('data-id') ?? ''); return }
@@ -6774,7 +7019,7 @@ ${lines}`
     const productNodeEl = target.closest('[data-product-node]') as HTMLElement | null
     if (productNodeEl !== null) { productNodeSelected = productNodeEl.getAttribute('data-product-node'); renderContent(); return }
     const productNoteEl = target.closest('[data-product-note]') as HTMLElement | null
-    if (productNoteEl !== null) { void openProductNote(productNoteEl.getAttribute('data-product-note') ?? ''); return }
+    if (productNoteEl !== null) { openNoteEditor(productNoteEl.getAttribute('data-product-note') ?? ''); return }
     const productDemoEl = target.closest('[data-product-demo]') as HTMLElement | null
     if (productDemoEl !== null) { productDemoSelected = productDemoEl.getAttribute('data-product-demo') ?? ''; renderContent(); return }
     const bugEl = target.closest('[data-bug-id]') as HTMLElement | null

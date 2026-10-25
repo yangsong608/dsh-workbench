@@ -73,6 +73,8 @@ check('导图版本/草稿乐观锁（宿主）', host.includes('product_map_ver
 check('导图：选中可见 / 撤销重做 / 搜索 / 引用检查 / 导出图片 / 版本增量', client.includes('pm-selection-bar') && client.includes('mapHistoryStep') && client.includes('jumpToSearchHit') && client.includes('openRefCheck') && client.includes('exportMapImage') && client.includes('pm-version-more'))
 check('大纲导入支持未标记节点默认类型', client.includes('wb-pm-outline-kind') && client.includes('defaultKind'))
 check('多导图（product_maps + mapId 贯穿）', host.includes('CREATE TABLE IF NOT EXISTS product_maps') && host.includes('listProductMaps') && host.includes('map_id') && client.includes('pm-map-select') && client.includes('productMapSelected') && client.includes('/products/maps'))
+check('设计笔记：节点归属/覆盖度/就地编辑/手工新建', client.includes('noteCoverage') && client.includes('renderNoteCard') && client.includes('product-note-node') && client.includes('openNoteEditor') && client.includes('openNoteCreator') && client.includes('note-cover-chip'))
+check('设计笔记生成走团队派发 + 进度', (client.includes('kind:"notes"') || client.includes("kind: 'notes'")) && client.includes('startAgentDispatch') && client.includes('renderProductProgressBar'))
 check('模块手工 CRUD（新建/编辑/删除/筛选）', client.includes('product-module-new') && client.includes('product-module-save') && client.includes('product-module-delete') && client.includes('moduleFilterKind') && host.includes('patch: true'))
 check('模块生成走团队派发 + 进度可观测', client.includes('product.design') && client.includes('startAgentDispatch') && client.includes('product_progress_publish') && client.includes('products/progress?productId=') && client.includes('renderProductProgressBar'))
 check('模块树形展示与 nodeId 关联', client.includes('module-tree') && client.includes('renderTree') && host.includes('node_id') && client.includes('wb-mod-node'))
