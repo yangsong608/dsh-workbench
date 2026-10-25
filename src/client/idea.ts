@@ -1461,6 +1461,9 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       form = null
       await loadIdeas()
       await selectIdea(ideaId)
+      /* selectIdea 对「已选中的同一条灵感」会早退，编辑模式下不会重新拉库；
+         这里强制重载，保证弹窗里新增的自定义维度立刻出现在右侧详情面板。 */
+      await reloadDetail()
       renderAll()
       if (shouldGenerate) await generate('diverge')
       else deps.toast('已保存；点右上「✦ 生成」开始发散')
