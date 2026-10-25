@@ -183,7 +183,9 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
   function paintStatus(): void {
     statusEl.textContent = status
     statusEl.className = `chat-status ${status}`
-    countEl.textContent = team !== null ? `成员 ${team.members} · 任务 ${team.tasksDone}/${team.tasksTotal}` : total > 0 ? `成员 ${running}/${total}` : ''
+    /* 只保留投影口径：running/total 这套 setCounts 从未被任何地方调用（死代码），
+       曾经会让人以为「成员 N/M」在某些场景可用，实际永远为空。要恢复请先接上数据源。 */
+    countEl.textContent = team !== null ? `成员 ${team.members} · 任务 ${team.tasksDone}/${team.tasksTotal}` : ''
     host.classList.toggle('is-running', status === 'running' || status === 'dispatching')
     if (note !== '') statusEl.title = note
   }

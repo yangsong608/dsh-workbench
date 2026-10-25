@@ -106,11 +106,43 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   let dispatchId = ''
   let dispatchSessionId = ''
   let dispatchTimer = 0
+
+  /**
+   * 派发现场持久化：dispatchId/sessionId 只存在内存里，页面刷新后抽屉与团队进度会全部丢失
+   * （后端会话仍在跑，用户只能去侧栏里翻）。用 localStorage 记一份，重新进入该灵感时恢复。
+   * 只存标识，不存消息——消息由 /agents/sessions/:id/events 回放。
+   */
+  const DISPATCH_KEY = 'dsh-workbench.idea.dispatch'
+  interface DispatchMemo { ideaId: string; dispatchId: string; sessionId: string; teamName: string; at: number }
+  function readDispatchMemo(): DispatchMemo | null {
+    try {
+      const raw = window.localStorage.getItem(DISPATCH_KEY)
+      if (raw === null || raw === '') return null
+      const parsed = JSON.parse(raw) as Partial<DispatchMemo>
+      if (typeof parsed.ideaId !== 'string' || typeof parsed.dispatchId !== 'string' || typeof parsed.sessionId !== 'string') return null
+      /* 超过 2 小时的记录视为陈旧（派发预算最长 15 分钟，留足余量） */
+      if (typeof parsed.at === 'number' && Date.now() - parsed.at > 2 * 60 * 60 * 1000) { window.localStorage.removeItem(DISPATCH_KEY); return null }
+      return { ideaId: parsed.ideaId, dispatchId: parsed.dispatchId, sessionId: parsed.sessionId, teamName: String(parsed.teamName ?? ''), at: Number(parsed.at ?? 0) }
+    } catch { return null }
+  }
+  function writeDispatchMemo(memo: Omit<DispatchMemo, 'at'>): void {
+    try { window.localStorage.setItem(DISPATCH_KEY, JSON.stringify({ ...memo, at: Date.now() })) } catch { /* 忽略 */ }
+  }
+  function clearDispatchMemo(ideaId = ''): void {
+    try {
+      const memo = readDispatchMemo()
+      /* 只清自己的记录，避免把另一个灵感的现场误删 */
+      if (memo === null || ideaId === '' || memo.ideaId === ideaId) window.localStorage.removeItem(DISPATCH_KEY)
+    } catch { /* 忽略 */ }
+  }
   /** 派发早期到达、但 chat 实例还没创建时先缓存，打开抽屉时补渲染。 */
   const pendingChatEvents: any[] = []
   /** 页内会话说：轮询宿主事件的下标与定时器。 */
   let chatPolling = 0
   let chatSeq = 0
+  /* run 进展监视：只在 step/total 变化时刷新时间戳，用于区分「慢」与「卡死」。 */
+  let lastRunProgressKey = ''
+  let lastRunProgressAt = 0
 
   /* ------------------------------ 引擎 ------------------------------ */
   let mind: any = null
@@ -256,6 +288,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     selectedNode = ''
     preview = null
     await reloadDetail()
+    /* 刷新/切回该灵感时，若内存里没有派发但本地记着这个灵感的现场，就恢复抽屉与轮询。 */
+    await restoreDispatchMemo()
   }
 
   async function reloadDetail(): Promise<void> {
@@ -837,19 +871,32 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       renderDetail()
       renderList()
       if (run?.status === 'running') {
-        const started = Date.parse(String(run.startedAt ?? '').replace(' ', 'T'))
-        if (Number.isFinite(started) && Date.now() - started > 5 * 60 * 1000) {
+        /* 卡死判定改为「按进展」而不是「按总时长」：
+           旧逻辑一律在 5 分钟砍掉，与抽屉那条 15 分钟派发预算直接冲突——团队常常 5 分钟后
+           才刚进入成员执行阶段，会被误杀。现在只有「进展长时间不动」才算卡死。 */
+        const idleLimit = 6 * 60 * 1000
+        const progressKey = `${String(run.step ?? '')}/${String(run.total ?? '')}`
+        if (progressKey !== lastRunProgressKey) {
+          lastRunProgressKey = progressKey
+          lastRunProgressAt = Date.now()
+        }
+        if (lastRunProgressAt !== 0 && Date.now() - lastRunProgressAt > idleLimit) {
           await api(`/ideas/${selectedId}/runs/${run.id}/cancel`, { method: 'POST' }).catch(() => null)
           stopPolling()
-          deps.toast('生成超过 5 分钟没有回写，已停止；已生成的节点保留为草稿')
+          deps.toast('生成已超过 6 分钟没有进展，已停止；已生成的节点保留为草稿')
           await reloadDetail()
           renderAll()
           return
         }
+      } else {
+        /* 非 running 时重置进展基线，下一次运行重新计时 */
+        lastRunProgressKey = ''
+        lastRunProgressAt = 0
       }
       if (run?.status === 'done') {
         stopPolling()
         closeChatTimer()
+        clearDispatchMemo(selectedId)
         chat?.setStatus('done')
         busy = ''
         deps.toast('已生成，可在右侧版本里对比')
@@ -858,6 +905,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       } else if (run?.status === 'failed') {
         stopPolling()
         closeChatTimer()
+        clearDispatchMemo(selectedId)
         chat?.setStatus('failed', String(run.error || ''))
         busy = ''
         deps.toast(`生成失败：${run.error || '未知原因'}`)
@@ -908,6 +956,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
         if (started !== null) {
           dispatchId = started.dispatchId
           dispatchSessionId = started.sessionId
+          writeDispatchMemo({ ideaId: selectedId, dispatchId, sessionId: dispatchSessionId, teamName: started.teamName })
           openChat(started.teamName, started.timeoutMs)
         }
       } else {
@@ -982,7 +1031,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   async function pollChatEvents(): Promise<void> {
     if (dispatchSessionId === '') { stopChatPolling(); return }
     try {
-      /* 一次最多 400 条；有 next 就说明还没追平，立刻续拉，避免跳事件。 */
+      /* chatSeq 现在是「已收到的最大 seq」（不是数组下标），与 host 的 since 语义一致。
+         一次最多 400 条；有 next 就说明还没追平，立刻续拉，避免跳事件。 */
       for (let round = 0; round < 8; round += 1) {
         const res = await api(`/agents/sessions/${encodeURIComponent(dispatchSessionId)}/events?since=${chatSeq}`)
         if (!res.ok) return
@@ -999,6 +1049,48 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
 
   function closeChatTimer(): void {
     if (dispatchTimer !== 0) { window.clearTimeout(dispatchTimer); dispatchTimer = 0 }
+  }
+
+  /**
+   * 恢复上一次的派发现场（页面刷新、切走再切回、或重新打开这个灵感）。
+   * 判定链：内存已有 → 什么都不做；本地记录属于当前灵感 → 问后端该 dispatch 是否还活着 →
+   * 活着就恢复抽屉与轮询，已结束就只回放历史并标终态，然后清掉记录。
+   */
+  async function restoreDispatchMemo(): Promise<void> {
+    if (dispatchId !== '' || dispatchSessionId !== '') return
+    if (selectedId === '') return
+    const memo = readDispatchMemo()
+    if (memo === null || memo.ideaId !== selectedId) return
+    /* 后端是权威：本地记录可能陈旧（团队早已跑完或被顶掉）。 */
+    const res = await api(`/agents/dispatches/${encodeURIComponent(memo.dispatchId)}`).catch(() => null)
+    if (res === null || !res.ok) { clearDispatchMemo(memo.ideaId); return }
+    const status = String(res.body?.dispatch?.status ?? '')
+    const alive = status === 'dispatching' || status === 'running'
+    dispatchId = memo.dispatchId
+    dispatchSessionId = memo.sessionId
+    if (chat === null) ensureChat()
+    /* 先把历史回放进抽屉；alive 再启动轮询与 15 分钟计时。 */
+    const el = q('idea-chat')
+    if (el !== null) el.style.display = ''
+    chat?.open({ teamName: memo.teamName === '' ? '智能体团队' : memo.teamName, dispatchId, sessionId: dispatchSessionId, timeoutMs: 15 * 60 * 1000 })
+    if (alive) {
+      chat?.setStatus('running')
+      startChatPolling()
+      if (dispatchTimer !== 0) window.clearTimeout(dispatchTimer)
+      dispatchTimer = window.setTimeout(() => {
+        chat?.setStatus('timeout', '超过派发预算')
+        void stopRun()
+      }, 15 * 60 * 1000)
+    } else {
+      /* 已终结的派发：只回放历史并画终态，不启动轮询/计时，然后清记录。 */
+      chat?.setStatus(status === 'done' ? 'done' : status === 'timeout' ? 'timeout' : status === 'failed' ? 'failed' : 'cancelled', String(res.body?.dispatch?.error ?? ''))
+      clearDispatchMemo(memo.ideaId)
+    }
+    if (typeof deps.agent?.history === 'function') {
+      void deps.agent.history(dispatchSessionId)
+        .then(events => { if (events.length > 0) chat?.ingestMany(events) })
+        .catch(() => undefined)
+    }
   }
 
   /**
@@ -1041,6 +1133,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     if (run === null || selectedId === '') return
     if (dispatchId !== '' && dispatchSessionId !== '') {
       closeChatTimer()
+      clearDispatchMemo(selectedId)
       chat?.setStatus('cancelled')
       await deps.agent?.stop(dispatchId, dispatchSessionId).catch(() => undefined)
     }

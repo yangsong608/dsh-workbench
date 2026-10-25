@@ -438,7 +438,11 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
       if (a === 'sessions' && b !== undefined && c === 'events') {
         if (method !== 'GET') { fail(res, 405, '不支持的方法'); return true }
         const sessionId = b
-        const since = Math.max(0, Number(url.searchParams.get('since') ?? 0) || 0)
+        /* since 语义：前端传「已收到的最大 seq」，服务端按 seq 过滤。
+           旧实现把 since 当数组下标用，而客户端用 event.seq 去重——两套编号混用，
+           会话日志压缩/裁剪后会错位（漏事件或重复渲染）。这里统一到 seq。
+           since=0 表示从头拉。 */
+        const sinceSeq = Math.max(0, Number(url.searchParams.get('since') ?? 0) || 0)
         /* ctx.agents 未 inject 时属性访问会抛错：用 get() 兜底并整体 try。 */
         const agent = (() => {
           try { return options.ctx?.get?.('agents')?.get?.(sessionId) ?? options.ctx?.agents?.get?.(sessionId) } catch { return undefined }
@@ -454,9 +458,19 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           send(res, 200, { ok: true, events: [], total: 0, next: 0, available: false })
           return true
         }
-        const end = Math.min(all.length, since + 400)
-        const sliced = all.slice(since, end).map((event: any) => ({ type: event.type, seq: event.seq, time: event.time, data: event.data }))
-        send(res, 200, { ok: true, events: sliced, total: all.length, next: end, available: true })
+        /* 统一 seq 语义：只回 seq > sinceSeq 的事件，单次上限 400 条。
+           无 seq 的事件（会话元信息，实测 326 条里仅 1 条）只在该会话首次拉取时给，
+           否则每轮都会重发，客户端虽按 seq 去重但这里没有 seq 可依，会重复渲染。 */
+        const pending = sinceSeq === 0
+          ? all
+          : all.filter((event: any) => {
+              const seq = Number(event?.seq)
+              return Number.isFinite(seq) && seq > sinceSeq
+            })
+        const sliced = pending.slice(0, 400).map((event: any) => ({ type: event.type, seq: event.seq, time: event.time, data: event.data }))
+        const lastSeq = sliced.length > 0 ? Number(sliced[sliced.length - 1]?.seq ?? sinceSeq) : sinceSeq
+        const next = Number.isFinite(lastSeq) ? lastSeq : sinceSeq
+        send(res, 200, { ok: true, events: sliced, total: all.length, next, available: true })
         return true
       }
 
