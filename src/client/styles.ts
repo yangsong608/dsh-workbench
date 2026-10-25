@@ -882,6 +882,18 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .module-card p{font-size:10px;line-height:1.5;color:var(--text-2);margin:5px 0 3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .module-card small{font-size:9px;color:var(--text-3)}
 @media(max-width:1000px){.module-grid{grid-template-columns:1fr 1fr}}
+/* 模块树 / 筛选 / 页内会话 */
+.module-tree{display:flex;flex-direction:column;gap:5px}
+.module-row{display:flex;align-items:stretch;gap:4px}
+.module-row .module-card{flex:1;min-width:0}
+.module-ops{display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .15s}
+.module-row:hover .module-ops{opacity:1}
+.module-linked{font-style:normal;font-size:8px;color:var(--green);border:1px solid color-mix(in srgb,var(--green) 40%,var(--line));border-radius:99px;padding:1px 5px}
+.module-filters{display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.module-filters .notes-nb-select{height:26px;max-width:110px;font-size:10.5px}
+.module-filter-count{margin-left:auto;font-size:9.5px;color:var(--text-3)}
+.product-chat{margin-top:10px}
+.product-chat:empty{display:none}
 
 .test-live-stage{display:grid;grid-template-columns:120px 1fr 150px;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;position:relative;overflow:hidden}
 .test-live-ring{width:92px;height:92px;border-radius:50%;background:conic-gradient(var(--green) 0 var(--rate),var(--red) var(--rate) 100%);display:grid;place-items:center;position:relative;margin:auto;animation:testPulse 2.2s ease-in-out infinite}

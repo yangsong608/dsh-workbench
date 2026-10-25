@@ -8,6 +8,7 @@
 import { WORKBENCH_CSS } from './styles'
 import { createIdeaView, type IdeaViewHandle } from './idea'
 import { createAgentPanel } from './agent-panel'
+import { createAgentChat, teamStateOf, type ChatHandle } from './agent-chat'
 import {
   buildProductForceOption, emptyProductGraph, externalEdges, fromMindElixir, normalizeProductGraph,
   parseExternalRef, parseOutlineToProductGraph, productGraphFromIdea, productGraphFromV1, productGraphToMarkdown, diffProductGraphs,
@@ -101,6 +102,14 @@ interface ProjectCard {
 interface Module {
   id: string; productId: string; mapId?: string; parentId: string; name: string; kind: 'module' | 'business' | 'feature' | 'requirement'
   platform: 'pc' | 'mobile' | 'tablet' | 'all'; description: string; noteId: string; status: string
+  /** 关联的导图节点 id（v2 图模型）；空表示未关联。 */
+  nodeId?: string; sortOrder?: number
+}
+/** 模块 / 笔记生成进度（与 Demo 进度同构）。 */
+interface ProductProgress {
+  id: string; productId: string; kind: 'modules' | 'notes' | 'demo'; demoId?: string; mapId?: string
+  step: number; total: number; status: 'running' | 'done' | 'failed'
+  message: string; log: { step: number; message: string; at: string }[]; sessionId?: string; updatedAt: string
 }
 interface ProductDemo {
   id: string; productId: string; mapId?: string; style: string; scope: 'feature' | 'all'
@@ -405,6 +414,16 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let demoViewport: 'pc' | 'tablet' | 'mobile' = 'pc'
   let demoProgress: DemoProgress | null = null
   let demoProgressDismissedAt = ''
+  /** 模块/笔记生成进度 + 页内会话（团队派发）状态。 */
+  let productProgress: ProductProgress | null = null
+  let productProgressKind: 'modules' | 'notes' = 'modules'
+  /** 模块页筛选（空串=不筛）。 */
+  let moduleFilterKind = ''
+  let moduleFilterPlatform = ''
+  /** 页内会话（团队派发）句柄与当前派发。 */
+  let productChat: ChatHandle | null = null
+  let productDispatch: { dispatchId: string; sessionId: string; teamName: string } | null = null
+  let productChatTimer = 0
   let productLoading = false
   let productError = ''
   let productSig = ''
@@ -3345,9 +3364,54 @@ ${lines}
     } else if (productTab === 'modules') {
       const mods = productModuleList(product)
       const kindName = (k: Module['kind']): string => k === 'module' ? '模块' : k === 'business' ? '业务' : k === 'feature' ? '功能' : '需求'
-      body = `<div class="product-panel-head"><div><b>模块 / 业务 / 功能 / 需求</b><span>产品 → 模块 → 业务 → 功能 / 需求；端：PC / 移动 / 平板 / 全部</span></div><button class="btn-primary" data-act="product-gen-modules">${ic('spark', 12)}AI 生成模块与详细设计</button></div>
-        <div class="module-coverage"><b>${mods.length}</b> 节点${['all','pc','mobile','tablet'].map(p => `<span>${platformLabel(p)} ${mods.filter(m => m.platform === p).length}</span>`).join('')}<span class="bar">${['all','pc','mobile','tablet'].map((p, i) => `<i style="width:${mods.length ? Math.round(mods.filter(m => m.platform === p).length / mods.length * 100) : 0}%;background:${['var(--accent)','var(--green)','var(--orange)','var(--amber)'][i]}"></i>`).join('')}</span></div>
-        <div class="module-grid">${mods.map(m => `<div class="module-card ${m.kind}" data-act="product-module-detail" data-id="${m.id}" title="${esc(m.name)}"><div><span class="module-kind">${kindName(m.kind)}</span><b>${esc(m.name)}</b><i class="platform ${m.platform}">${m.platform.toUpperCase()}</i></div><p>${esc(m.description || '待补充模块说明')}</p><small>${esc(m.status)}${m.noteId ? ' · 已关联笔记' : ''}</small></div>`).join('') || '<div class="notes-empty small">还没有模块，点右上角 AI 生成；AI 会按产品导图拆分模块并逐模块生成详细设计笔记。</div>'}</div>`
+      const p = productProgress !== null && productProgress.productId === product.id && productProgress.kind === 'modules' ? productProgress : null
+      /* 树形渲染：按 parentId 组装（parentId 为空或指向不存在节点 → 顶层） */
+      const byParent = new Map<string, Module[]>()
+      const ids = new Set(mods.map(m => m.id))
+      for (const m of mods) {
+        const key = m.parentId !== '' && ids.has(m.parentId) ? m.parentId : ''
+        const list = byParent.get(key) ?? []
+        list.push(m)
+        byParent.set(key, list)
+      }
+      const kindRank: Record<string, number> = { module: 0, business: 1, feature: 2, requirement: 3 }
+      const sorted = (list: Module[]): Module[] => list.slice().sort((a, b) => (kindRank[a.kind] ?? 9) - (kindRank[b.kind] ?? 9) || (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name, 'zh-CN'))
+      const card = (m: Module, depth: number): string => `<div class="module-row" style="padding-left:${8 + depth * 16}px">
+        <div class="module-card ${m.kind}" data-act="product-module-detail" data-id="${m.id}" title="${esc(m.name)}">
+          <div><span class="module-kind">${kindName(m.kind)}</span><b>${esc(m.name)}</b><i class="platform ${m.platform}">${m.platform.toUpperCase()}</i>
+            ${m.nodeId !== undefined && m.nodeId !== '' ? '<i class="module-linked" title="已关联导图节点">◆ 导图</i>' : ''}</div>
+          <p>${esc(m.description || '待补充模块说明')}</p><small>${esc(m.status)}${m.noteId ? ' · 已关联笔记' : ''}</small>
+        </div>
+        <span class="module-ops">
+          <button class="icon-btn" data-act="product-module-edit" data-id="${m.id}" title="编辑">${ic('edit', 11)}</button>
+          <button class="icon-btn" data-act="product-module-add" data-id="${m.id}" title="添加子项">${ic('plus', 11)}</button>
+          <button class="icon-btn" data-act="product-module-delete" data-id="${m.id}" title="删除">${ic('trash', 11)}</button>
+        </span>
+      </div>`
+      const renderTree = (parent: string, depth: number): string =>
+        sorted(byParent.get(parent) ?? []).map(m => card(m, depth) + renderTree(m.id, depth + 1)).join('')
+      const tree = renderTree('', 0)
+      const filterKind = moduleFilterKind
+      const filterPlatform = moduleFilterPlatform
+      const filtered = mods.filter(m =>
+        (filterKind === '' || m.kind === filterKind) && (filterPlatform === '' || m.platform === filterPlatform))
+      body = `<div class="product-panel-head"><div><b>模块 / 业务 / 功能 / 需求</b><span>${esc(scopedLabel())} · ${mods.length} 个节点；可手工增删改，也可让 AI 按导图拆分并生成设计笔记</span></div><div class="product-actions">
+        <button class="btn" data-act="product-module-new">${ic('plus', 12)}新建模块</button>
+        <button class="btn-primary" data-act="product-gen-modules">${ic('spark', 12)}AI 生成模块与详细设计</button>
+      </div></div>
+      ${p !== null ? renderProductProgressBar(p) : ''}
+      <div class="module-coverage"><b>${mods.length}</b> 节点${['all','pc','mobile','tablet'].map(pl => `<span>${platformLabel(pl)} ${mods.filter(m => m.platform === pl).length}</span>`).join('')}<span class="bar">${['all','pc','mobile','tablet'].map((pl, i) => `<i style="width:${mods.length ? Math.round(mods.filter(m => m.platform === pl).length / mods.length * 100) : 0}%;background:${['var(--accent)','var(--green)','var(--orange)','var(--amber)'][i]}"></i>`).join('')}</span></div>
+      <div class="module-filters">
+        <select id="wb-mod-kind" class="notes-nb-select"><option value="">全部类型</option>${(['module','business','feature','requirement'] as const).map(k => `<option value="${k}" ${filterKind === k ? 'selected' : ''}>${kindName(k)}</option>`).join('')}</select>
+        <select id="wb-mod-platform" class="notes-nb-select"><option value="">全部端</option>${(['pc','mobile','tablet','all'] as const).map(pl => `<option value="${pl}" ${filterPlatform === pl ? 'selected' : ''}>${platformLabel(pl)}</option>`).join('')}</select>
+        ${filterKind !== '' || filterPlatform !== '' ? `<button class="btn tiny" data-act="product-module-filter-clear">清除筛选</button>` : ''}
+        <span class="module-filter-count">${filtered.length === mods.length ? '' : `筛出 ${filtered.length} / ${mods.length}`}</span>
+      </div>
+      ${mods.length === 0
+        ? '<div class="notes-empty small">还没有模块。点「新建模块」手工添加，或让 AI 按导图拆分并逐模块生成设计笔记。</div>'
+        : (filterKind === '' && filterPlatform === '' ? `<div class="module-tree">${tree}</div>`
+          : `<div class="module-grid">${filtered.map(m => `<div class="module-card ${m.kind}" data-act="product-module-detail" data-id="${m.id}" title="${esc(m.name)}"><div><span class="module-kind">${kindName(m.kind)}</span><b>${esc(m.name)}</b><i class="platform ${m.platform}">${m.platform.toUpperCase()}</i></div><p>${esc(m.description || '待补充模块说明')}</p><small>${esc(m.status)}${m.noteId ? ' · 已关联笔记' : ''}</small></div>`).join('')}</div>`)}
+      <div id="product-chat" class="product-chat"></div>`
     } else {
       const demos = productDemoList(product)
       const current = demos.find(d => d.id === productDemoSelected) ?? demos[0]
@@ -3529,7 +3593,7 @@ ${lines}
     const mapArg = mapId === '' ? '' : `, mapId:"${mapId}"`
     const common = `产品：${product.name}\n简介：${product.description || '未填写'}\n工作区绝对路径：${product.workspacePath}\n产品 ID：${product.id}\n产品笔记本 ID：${product.notebookId}\n${mapLine}\n\n导图 JSON：\n${mapMindmap()}\n\n本次覆盖节点：\n${features || '- （整个产品）'}`
     if (mode === 'modules') {
-      return `产品模块化与详细设计任务：${product.name}\n\n你是资深产品架构师。请把产品拆成「产品 → 模块 → 业务 → 功能 / 需求」，并为每个模块生成详细设计笔记。\n\n${common}\n\n要求：\n1. 先调用 workbench_module_publish 写模块/业务/功能/需求，参数 { productId:"${product.id}"${mapArg}, parentId:"父节点 id（模块为空）", name, kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all", description }。\n2. 每个模块调用 workbench_product_note_publish 生成详细设计笔记，参数包含 productId${mapArg}、moduleId、platform、title、content。\n3. 笔记结构：模块背景 / 范围 / 平台差异 / 信息架构 / 核心流程 / 状态 / 数据与接口 / 权限 / 边界 / 验收。\n4. 模块划分按业务能力，不按页面；平台差异明确写出 PC / 移动 / 平板分别的交互。\n5. 不要只回复正文；必须调用工具；完成后汇总模块清单。`
+      return `产品模块化与详细设计任务：${product.name}\n\n你是资深产品架构师。请把产品拆成「产品 → 模块 → 业务 → 功能 / 需求」，并为每个模块生成详细设计笔记。\n\n${common}\n\n要求：\n1. 先调用 workbench_module_publish 写模块/业务/功能/需求，参数 { productId:"${product.id}"${mapArg}, parentId:"父级模块 id（顶层留空）", nodeId:"可选，对应导图节点 id", name, kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all", description }。\n1b. **每个节点写完后立刻调用一次 product_progress_publish 上报进度**（step 递增、total=计划拆分的节点总数、status="running"、message="已写：模块名"），全部完成后 total 步 status="done"；失败时 status="failed" 并写明原因。\n2. 每个模块调用 workbench_product_note_publish 生成详细设计笔记，参数包含 productId${mapArg}、moduleId、platform、title、content。\n3. 笔记结构：模块背景 / 范围 / 平台差异 / 信息架构 / 核心流程 / 状态 / 数据与接口 / 权限 / 边界 / 验收。\n4. 模块划分按业务能力，不按页面；平台差异明确写出 PC / 移动 / 平板分别的交互。\n5. 不要只回复正文；必须调用工具；完成后汇总模块清单。`
     }
     if (mode === 'notes') {
       return `产品设计笔记任务：${product.name}\n\n你是资深产品经理。请基于下面的产品导图和上下文，为每个功能/需求生成独立的设计笔记。\n\n${common}\n\n要求：\n1. 每个功能/需求调用一次工具 workbench_product_note_publish。\n2. 参数：{ productId:"${product.id}"${mapArg}, featureId:"节点 id", title:"功能名 + 设计笔记", content:"完整 Markdown", tags:["产品设计"] }。\n3. 笔记结构固定：背景 / 目标 / 用户故事 / 核心流程 / 交互与状态 / 边界与异常 / 验收标准。\n4. 多写具体交互、状态与验收，不要写空泛套话；不要遗漏节点。\n5. 全部写完后用简短清单汇报。\n6. 不修改工作区其他文件；笔记由工具负责落库与工作区 Markdown。`
@@ -4306,15 +4370,278 @@ ${common}
     } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
   }
 
+  /* ------------------------------ 产品进度 / 页内会话（团队派发） ------------------------------ */
+  /** 进度条（模块 / 笔记生成通用）：与 Demo 进度同一套观感。 */
+  function renderProductProgressBar(p: ProductProgress): string {
+    const pct = p.total > 0 ? Math.min(100, Math.round(p.step / p.total * 100)) : (p.status === 'done' ? 100 : 8)
+    const tail = p.log.slice(-4).map(l => `<div><i>${(l.at ?? '').slice(11, 16)}</i>${esc(l.message)}</div>`).join('')
+    return `<div class="demo-progress ${p.status}">
+      <div class="demo-progress-head"><b>${p.kind === 'modules' ? '模块生成' : '笔记生成'}</b>
+        <span>${p.status === 'running' ? `${p.step}/${p.total || '?'} · ${esc(p.message)}` : p.status === 'done' ? `已完成 · ${esc(p.message)}` : `失败 · ${esc(p.message)}`}</span>
+        ${productDispatch !== null && productDispatch.sessionId !== '' ? `<button class="btn tiny" data-act="product-chat-open">查看会话</button>` : ''}
+        ${p.status !== 'running' ? '<button class="icon-btn" data-act="product-progress-clear" title="关闭">✕</button>' : ''}
+      </div>
+      <div class="demo-progress-bar"><i style="width:${pct}%"></i></div>
+      ${tail === '' ? '' : `<div class="demo-progress-log">${tail}</div>`}
+    </div>`
+  }
+
+  function ensureProductChat(): ChatHandle | null {
+    if (productChat !== null) return productChat
+    const host = $id('product-chat')
+    if (host === null) return null
+    productChat = createAgentChat(host, {
+      esc,
+      ic,
+      onSend: text => { if (productDispatch !== null) void sendToSession(productDispatch.sessionId, text) },
+      onStop: () => { void stopProductDispatch() },
+      onRetry: () => { void generateProductModules() },
+      onOpenSession: () => { if (productDispatch !== null) focusSession(productDispatch.sessionId) },
+    })
+    return productChat
+  }
+
+  /** 订阅派发会话的事件与团队投影（与灵感页同一套适配层）。 */
+  function watchProductDispatch(): void {
+    const dispatch = productDispatch
+    if (dispatch === null) return
+    const chat = ensureProductChat()
+    const subscribe = (dshCtx as any)?.on
+    if (typeof subscribe === 'function') {
+      try {
+        subscribe('session/event', (session: any, event: any) => {
+          if (String(session?.id ?? session?.sessionId ?? '') !== dispatch.sessionId) return
+          chat?.ingest(event)
+        })
+      } catch { /* 订阅失败只是没有流式 */ }
+    }
+  }
+
+  async function stopProductDispatch(): Promise<void> {
+    if (productDispatch === null) return
+    try {
+      await fetch(`${API}/agents/dispatches/${encodeURIComponent(productDispatch.dispatchId)}`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'cancelled', error: '用户手动停止' }),
+      })
+      await sendToSession(productDispatch.sessionId, '请主理人立即停止当前团队工作，保留已完成的结果，并用一句话说明已停止。').catch(() => undefined)
+      toast('已请求停止')
+    } catch (cause) { toast(`停止失败：${String((cause as Error).message ?? cause)}`) }
+    productChat?.setStatus('stopped')
+  }
+
+  /** 进度轮询：3 秒一次，直到 done/failed；同时刷新模块列表让产物即时出现。 */
+  function startProductProgressPolling(progressKind: 'modules' | 'notes'): void {
+    productProgressKind = progressKind
+    if (productChatTimer !== 0) window.clearInterval(productChatTimer)
+    productChatTimer = window.setInterval(() => { void pollProductProgress() }, 3000)
+    void pollProductProgress()
+  }
+
+  async function pollProductProgress(): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    try {
+      const res = await fetch(`${API}/products/progress?productId=${encodeURIComponent(product.id)}&kind=${productProgressKind}`)
+      if (!res.ok) return
+      const data = await res.json() as { progress?: ProductProgress | null }
+      productProgress = data.progress ?? null
+      if (productProgress?.status === 'running') {
+        /* 运行中：刷新产物（AI 可能已经写了一半），但不重建整个页面以免打断阅读 */
+        await loadProducts(true)
+      } else if (productProgress?.status === 'done' || productProgress?.status === 'failed') {
+        if (productChatTimer !== 0) { window.clearInterval(productChatTimer); productChatTimer = 0 }
+        await loadProducts(true)
+        if (ui.view === 'product') renderContent()
+        toast(productProgress.status === 'done' ? '生成完成' : `生成失败：${productProgress.message}`)
+        return
+      }
+      if (ui.view === 'product' && productTab === 'modules') renderContent()
+    } catch { /* 轮询失败静默重试 */ }
+  }
+
+  async function clearProductProgress(): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    try {
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: productProgressKind, status: 'done', step: 0, total: 0, message: '' } }),
+      })
+    } catch { /* ignore */ }
+    productProgress = null
+    if (ui.view === 'product') renderContent()
+  }
+
+  async function loadProductProgress(): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) { productProgress = null; return }
+    try {
+      const res = await fetch(`${API}/products/progress?productId=${encodeURIComponent(product.id)}&kind=${productProgressKind}`)
+      if (!res.ok) { productProgress = null; return }
+      const data = await res.json() as { progress?: ProductProgress | null }
+      productProgress = data.progress ?? null
+      if (productProgress?.status === 'running') startProductProgressPolling(productProgressKind)
+    } catch { productProgress = null }
+  }
+
+  /** 用团队派发取代裸会话：按 product.design 绑定选团队，页内会话展示，进度可观测。 */
   async function generateProductModules(): Promise<void> {
     const product = productOf(productSelected)
     if (!product?.workspacePath) { toast('产品未关联工作区'); return }
-    if (!window.confirm('AI 将拆分模块/业务并生成详细设计笔记，可能消耗额度。继续？')) return
+    if (!window.confirm('AI 将按当前导图拆分模块/业务/功能，并逐模块生成设计笔记（可能消耗额度）。继续？')) return
     const prompt = productPrompt(product, 'modules', 'all')
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
-    toast('正在新建设计会话…')
-    try { await queueProductPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    /* 先落一条 running 进度：即便随后失败，用户也能看到失败原因 */
+    try {
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: 'modules', mapId: productMapSelected, step: 0, total: 0, status: 'running', message: '正在派发团队…' } }),
+      })
+    } catch { /* ignore */ }
+    await loadProductProgress()
+    if (ui.view === 'product') renderContent()
+    const chat = ensureProductChat()
+    chat?.open({ teamName: '', dispatchId: '', sessionId: '', timeoutMs: 15 * 60 * 1000 })
+    chat?.setStatus('dispatching')
+    const started = await startAgentDispatch({
+      ideaId: '',
+      runId: '',
+      teamId: '',
+      feature: 'product.design',
+      goal: prompt,
+      ideaTitle: product.name,
+      ideaBrief: product.description,
+      workspacePath: product.workspacePath,
+      timeoutMs: 15 * 60 * 1000,
+      allowNoIdea: true,
+    } as any, {
+      event: event => chat?.ingest(event),
+      history: events => chat?.ingestMany(events),
+      status: (status, note) => {
+        chat?.setStatus(status, note)
+        if (status === 'done' || status === 'failed') {
+          void fetch(`${API}/products/progress`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ progress: { productId: product.id, kind: 'modules', mapId: productMapSelected, step: 0, total: 0, status: status === 'done' ? 'done' : 'failed', message: status === 'done' ? '团队执行结束' : (note ?? '团队执行失败') } }),
+          }).then(() => loadProductProgress()).then(() => { if (ui.view === 'product') renderContent() }).catch(() => undefined)
+        }
+      },
+      team: projection => chat?.setTeam(teamStateOf(projection)),
+    })
+    if (started === null) {
+      toast('团队派发失败：已复制提示词，可粘贴到新会话')
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: 'modules', mapId: productMapSelected, step: 0, total: 0, status: 'failed', message: '派发失败' } }),
+      }).catch(() => undefined)
+      await loadProductProgress()
+      if (ui.view === 'product') renderContent()
+      return
+    }
+    productDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
+    chat?.open({ teamName: started.teamName, dispatchId: started.dispatchId, sessionId: started.sessionId, timeoutMs: started.timeoutMs })
+    chat?.setStatus('running')
+    watchProductDispatch()
+    startProductProgressPolling('modules')
+    toast(started.teamName === '' ? '已派发到团队会话' : `已派发给「${started.teamName}」`)
   }
+
+  /* ------------------------------ 模块 CRUD（手工维护） ------------------------------ */
+  function moduleKindName(kind: Module['kind']): string {
+    return kind === 'module' ? '模块' : kind === 'business' ? '业务' : kind === 'feature' ? '功能' : '需求'
+  }
+
+  function openModuleEditor(id?: string, presetParentId = ''): void {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const mod = id === undefined ? undefined : productModules.find(m => m.id === id)
+    const nodes = productNodes(product)
+    const candidates = nodes.filter(n => n.kind !== 'root')
+    const currentMapId = mod?.mapId ?? productMapSelected
+    const sameMapNodes = candidates.filter(n => (n.kind === 'module' || n.kind === 'business' || n.kind === 'feature' || n.kind === 'requirement'))
+    openModal(`<h3>${mod === undefined ? '新建模块' : '编辑模块'}</h3>
+      <div class="mfield"><label>名称</label><input id="wb-mod-name" value="${esc(mod?.name ?? '')}" placeholder="例如：预约与排班"></div>
+      <div class="mfield"><label>类型</label><select id="wb-mod-kind">
+        ${(['module','business','feature','requirement'] as const).map(k => `<option value="${k}" ${(mod?.kind ?? 'module') === k ? 'selected' : ''}>${moduleKindName(k)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>端</label><select id="wb-mod-platform">
+        ${(['all','pc','mobile','tablet'] as const).map(pl => `<option value="${pl}" ${(mod?.platform ?? 'all') === pl ? 'selected' : ''}>${platformLabel(pl)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>上级模块（可选）</label><select id="wb-mod-parent">
+        <option value="">无（顶层）</option>
+        ${productModules.filter(m => m.productId === product.id && m.id !== mod?.id).map(m => `<option value="${m.id}" ${(mod?.parentId ?? presetParentId) === m.id ? 'selected' : ''}>${moduleKindName(m.kind)} · ${esc(m.name)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>关联导图节点（可选）</label><select id="wb-mod-node">
+        <option value="">不关联</option>
+        ${sameMapNodes.map(n => `<option value="${n.id}" ${(mod?.nodeId ?? '') === n.id ? 'selected' : ''}>${kindLabel(n.kind)} · ${esc(n.label)}</option>`).join('')}
+      </select></div>
+      <div class="mfield"><label>说明</label><textarea id="wb-mod-desc" rows="3">${esc(mod?.description ?? '')}</textarea></div>
+      <div class="mfield"><label>状态</label><select id="wb-mod-status">
+        ${['designing','designed','building','done'].map(s => `<option value="${s}" ${(mod?.status ?? 'designing') === s ? 'selected' : ''}>${s}</option>`).join('')}
+      </select></div>
+      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-module-save" data-id="${mod?.id ?? ''}">${mod === undefined ? '创建' : '保存'}</button></div>`)
+  }
+
+  async function saveModuleFromModal(id: string): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const name = $id<HTMLInputElement>('wb-mod-name')?.value.trim() ?? ''
+    if (name === '') { toast('先填名称'); return }
+    const payload = {
+      id: id || undefined,
+      productId: product.id,
+      mapId: productMapSelected,
+      name,
+      kind: $id<HTMLSelectElement>('wb-mod-kind')?.value ?? 'module',
+      platform: $id<HTMLSelectElement>('wb-mod-platform')?.value ?? 'all',
+      parentId: $id<HTMLSelectElement>('wb-mod-parent')?.value ?? '',
+      nodeId: $id<HTMLSelectElement>('wb-mod-node')?.value ?? '',
+      description: $id<HTMLTextAreaElement>('wb-mod-desc')?.value ?? '',
+      status: $id<HTMLSelectElement>('wb-mod-status')?.value ?? 'designing',
+    }
+    try {
+      const res = await fetch(`${API}/modules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ module: payload }) })
+      const data = await res.json().catch(() => ({})) as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      const saved = data.module as Module | undefined
+      if (saved !== undefined) {
+        const index = productModules.findIndex(m => m.id === saved.id)
+        if (index >= 0) productModules[index] = saved
+        else productModules.push(saved)
+      }
+      closeModal()
+      await loadProducts(true)
+      renderContent()
+      toast(id === '' ? '模块已创建' : '模块已保存')
+    } catch (cause) { toast(`保存失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function deleteModuleById(id: string): Promise<void> {
+    const mod = productModules.find(m => m.id === id)
+    const children = productModules.filter(m => m.parentId === id)
+    const ok = typeof window.confirm === 'function'
+      ? window.confirm(`删除${moduleKindName(mod?.kind ?? 'module')}「${mod?.name ?? id}」？${children.length > 0 ? `\n\n它的 ${children.length} 个子项会变成顶层。` : ''}${mod?.noteId ? '\n关联的设计笔记会保留（不会删除）。' : ''}`)
+      : true
+    if (!ok) return
+    try {
+      const res = await fetch(`${API}/modules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      /* 子项提升为顶层，避免出现悬空 parentId */
+      for (const child of children) {
+        await fetch(`${API}/modules`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ module: { ...child, id: child.id, parentId: '', patch: true } }),
+        }).catch(() => undefined)
+      }
+      productModules = productModules.filter(m => m.id !== id)
+      await loadProducts(true)
+      renderContent()
+      toast('模块已删除')
+    } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+
   async function generateProductNotes(): Promise<void> {
     const product = productOf(productSelected)
     if (!product?.workspacePath) { toast('产品未关联工作区'); return }
@@ -4932,6 +5259,17 @@ ${mapLine}
         jumpToSearchHit()
       })
     }
+    const modKindSel = $id<HTMLSelectElement>('wb-mod-kind')
+    if (modKindSel !== null) {
+      modKindSel.value = moduleFilterKind
+      modKindSel.addEventListener('change', () => { moduleFilterKind = modKindSel.value; renderContent() })
+    }
+    const modPlatformSel = $id<HTMLSelectElement>('wb-mod-platform')
+    if (modPlatformSel !== null) {
+      modPlatformSel.value = moduleFilterPlatform
+      modPlatformSel.addEventListener('change', () => { moduleFilterPlatform = modPlatformSel.value; renderContent() })
+    }
+    if (productTab === 'modules') ensureProductChat()
     $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => {
       productSelected = (e.currentTarget as HTMLSelectElement).value
       productNodeSelected = null
@@ -6224,6 +6562,14 @@ ${lines}`
       if (act === 'product-node-delete') { void deleteProductNode(); return }
       if (act === 'product-gen-notes') { void generateProductNotes(); return }
       if (act === 'product-gen-modules') { void generateProductModules(); return }
+      if (act === 'product-module-new') { openModuleEditor(); return }
+      if (act === 'product-module-add') { openModuleEditor(undefined, actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-module-edit') { openModuleEditor(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-module-save') { void saveModuleFromModal(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-module-delete') { void deleteModuleById(actEl.getAttribute('data-id') ?? ''); return }
+      if (act === 'product-module-filter-clear') { moduleFilterKind = ''; moduleFilterPlatform = ''; renderContent(); return }
+      if (act === 'product-progress-clear') { void clearProductProgress(); return }
+      if (act === 'product-chat-open') { productChat?.open({ teamName: productDispatch?.teamName ?? '', dispatchId: productDispatch?.dispatchId ?? '', sessionId: productDispatch?.sessionId ?? '', timeoutMs: 15 * 60 * 1000 }); return }
       if (act === 'product-demo-delete') { void deleteProductDemo(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-note-open') { const nid = actEl.getAttribute('data-id') ?? ''; closeModal(); void openProductNote(nid); return }
       if (act === 'product-module-detail') { openModuleDetail(actEl.getAttribute('data-id') ?? ''); return }

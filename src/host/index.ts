@@ -1017,6 +1017,19 @@ CREATE TABLE IF NOT EXISTS products (
     addDemo('platform', "TEXT NOT NULL DEFAULT 'all'")
     addDemo('kind', "TEXT NOT NULL DEFAULT 'page'")
     addDemo('status', "TEXT NOT NULL DEFAULT 'ready'")
+    /* 模块 ↔ 导图节点：有了 node_id 才能在导图节点与模块之间双向跳转、改名同步 */
+    const moduleCols = this.db.prepare('PRAGMA table_info(modules)').all() as any[]
+    if (!moduleCols.some(c => c.name === 'node_id')) this.db.exec("ALTER TABLE modules ADD COLUMN node_id TEXT NOT NULL DEFAULT ''")
+    if (!moduleCols.some(c => c.name === 'sort_order')) this.db.exec('ALTER TABLE modules ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
+    /* 模块 / 笔记生成本身的进度（与 Demo 的 product_demo_progress 同构） */
+    this.db.exec(`CREATE TABLE IF NOT EXISTS product_progress (
+      id TEXT PRIMARY KEY, product_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'modules',
+      demo_id TEXT NOT NULL DEFAULT '', map_id TEXT NOT NULL DEFAULT '',
+      step INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'running', message TEXT NOT NULL DEFAULT '',
+      log TEXT NOT NULL DEFAULT '[]', session_id TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    )`)
   }
 
   private defaultNotebookId(): string {
@@ -1578,19 +1591,58 @@ CREATE TABLE IF NOT EXISTS products (
       const dup = this.db.prepare('SELECT id FROM modules WHERE product_id=? AND map_id=? AND name=? AND kind=?').get(productId, mapId, name, kind) as any
       id = dup?.id ?? `mod-${randomUUID().slice(0, 12)}`
     }
-    const existing = this.db.prepare('SELECT id, created_at FROM modules WHERE id = ?').get(id) as any
+    const existing = this.db.prepare('SELECT * FROM modules WHERE id = ?').get(id) as any
+    /* 局部更新：编辑模块时只改传进来的字段，避免把 note_id/status/node_id 冲掉 */
+    const patch = input?.patch === true
+    const nodeId = input?.nodeId !== undefined ? str(input.nodeId) : str(existing?.node_id)
+    const parentId = input?.parentId !== undefined ? str(input.parentId) : str(existing?.parent_id)
+    const description = input?.description !== undefined ? str(input.description).slice(0, 8000) : str(existing?.description)
+    const noteId = input?.noteId !== undefined ? str(input.noteId) : str(existing?.note_id)
+    const status = input?.status !== undefined ? str(input.status).slice(0, 24) : (str(existing?.status) || 'designing')
+    const sortOrder = input?.sortOrder !== undefined ? Math.max(0, Math.round(Number(input.sortOrder) || 0)) : Number(existing?.sort_order ?? 0)
     if (existing) {
-      this.db.prepare('UPDATE modules SET product_id=?, map_id=?, parent_id=?, name=?, kind=?, platform=?, description=?, note_id=?, status=?, updated_at=? WHERE id=?')
-        .run(productId, mapId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', now, id)
+      this.db.prepare('UPDATE modules SET product_id=?, map_id=?, parent_id=?, name=?, kind=?, platform=?, description=?, note_id=?, status=?, node_id=?, sort_order=?, updated_at=? WHERE id=?')
+        .run(productId, mapId, parentId, name, kind, platform, description, noteId, status, nodeId, sortOrder, now, id)
     } else {
-      this.db.prepare('INSERT INTO modules(id, product_id, map_id, parent_id, name, kind, platform, description, note_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, productId, mapId, str(input?.parentId), name, kind, platform, str(input?.description).slice(0, 8000), str(input?.noteId), str(input?.status) || 'designing', existing?.created_at ?? now, now)
+      this.db.prepare('INSERT INTO modules(id, product_id, map_id, parent_id, name, kind, platform, description, note_id, status, node_id, sort_order, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, productId, mapId, parentId, name, kind, platform, description, noteId, status, nodeId, sortOrder, now, now)
     }
+    void patch
     return toModule(this.db.prepare('SELECT * FROM modules WHERE id = ?').get(id))
   }
 
+  /** 删模块：连带把挂在该模块上的笔记解除 moduleId 标记（笔记本身保留）。 */
   deleteModule(id: string): void {
-    this.db.prepare('DELETE FROM modules WHERE id = ?').run(id)
+    const row = this.db.prepare('SELECT id, note_id FROM modules WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return
+    this.db.prepare('DELETE FROM modules WHERE id = ?').run(str(id))
+  }
+
+  /* ---------- 模块/笔记生成进度（与 Demo 进度同构） ---------- */
+  getProductProgress(productId: string, kind = 'modules'): any {
+    const row = this.db.prepare('SELECT * FROM product_progress WHERE product_id = ? AND kind = ?').get(str(productId), str(kind) || 'modules') as any
+    return row === undefined ? undefined : toProductProgress(row)
+  }
+
+  saveProductProgress(input: any): any {
+    const productId = str(input?.productId)
+    if (productId === '') throw new Error('缺少 productId')
+    const kind = ['modules', 'notes', 'demo'].includes(str(input?.kind)) ? str(input.kind) : 'modules'
+    const id = `pp-${productId}-${kind}`
+    const now = isoDateTimeSeconds()
+    const status = ['running', 'done', 'failed'].includes(str(input?.status)) ? str(input.status) : 'running'
+    const step = Math.max(0, Math.round(Number(input?.step ?? 0)) || 0)
+    const total = Math.max(0, Math.round(Number(input?.total ?? 0)) || 0)
+    const message = str(input?.message).slice(0, 500)
+    const existing = this.db.prepare('SELECT log FROM product_progress WHERE id = ?').get(id) as any
+    const log = jsonList(existing?.log)
+    if (message !== '') log.push({ step, message, at: now })
+    this.db.prepare(`INSERT INTO product_progress(id, product_id, kind, demo_id, map_id, step, total, status, message, log, session_id, updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET demo_id=excluded.demo_id, map_id=excluded.map_id, step=excluded.step, total=excluded.total,
+        status=excluded.status, message=excluded.message, log=excluded.log, session_id=excluded.session_id, updated_at=excluded.updated_at`)
+      .run(id, productId, kind, str(input?.demoId).slice(0, 60), str(input?.mapId).slice(0, 64), step, total, status, message, JSON.stringify(log.slice(-50)), str(input?.sessionId).slice(0, 64), now)
+    return toProductProgress(this.db.prepare('SELECT * FROM product_progress WHERE id = ?').get(id))
   }
 
   /* ---------- 测试 ---------- */
@@ -1849,6 +1901,7 @@ class JsonStore {
   private productMapVersions: any[] = []
   private demoProgress: any[] = []
   private modules: any[] = []
+  private productProgress: any[] = []
   private testProjects: any[] = []
   private testCases: any[] = []
   private testRuns: any[] = []
@@ -1873,6 +1926,7 @@ class JsonStore {
         this.productDemos = list(parsed.productDemos)
         this.productMaps = list(parsed.productMaps)
         this.productMapVersions = list(parsed.productMapVersions)
+        this.productProgress = list(parsed.productProgress)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
         this.testProjects = list(parsed.testProjects)
@@ -1921,7 +1975,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -1991,7 +2045,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
@@ -2472,19 +2526,52 @@ class JsonStore {
     }
     const existing = this.modules.find(m => m.id === id)
     const module = {
-      id, productId, mapId, parentId: str(input?.parentId), name, kind, platform,
-      description: str(input?.description).slice(0, 8000), noteId: str(input?.noteId),
-      status: str(input?.status) || 'designing', createdAt: existing?.createdAt ?? now, updatedAt: now,
+      id, productId, mapId,
+      parentId: input?.parentId !== undefined ? str(input.parentId) : str(existing?.parentId),
+      name, kind, platform,
+      description: input?.description !== undefined ? str(input.description).slice(0, 8000) : str(existing?.description),
+      noteId: input?.noteId !== undefined ? str(input.noteId) : str(existing?.noteId),
+      status: input?.status !== undefined ? str(input.status).slice(0, 24) : (str(existing?.status) || 'designing'),
+      nodeId: input?.nodeId !== undefined ? str(input.nodeId) : str(existing?.nodeId),
+      sortOrder: input?.sortOrder !== undefined ? Math.max(0, Math.round(Number(input.sortOrder) || 0)) : Number(existing?.sortOrder ?? 0),
+      createdAt: existing?.createdAt ?? now, updatedAt: now,
     }
     if (existing) Object.assign(existing, module)
     else this.modules.push(module)
     this.persistNews()
-    return module
+    return this.modules.find(m => m.id === id) ?? module
   }
 
   deleteModule(id: string): void {
-    this.modules = this.modules.filter(m => m.id !== id)
+    this.modules = this.modules.filter(m => m.id !== str(id))
     this.persistNews()
+  }
+
+  getProductProgress(productId: string, kind = 'modules'): any {
+    return this.productProgress.find(p => p.productId === str(productId) && p.kind === (str(kind) || 'modules')) ?? undefined
+  }
+
+  saveProductProgress(input: any): any {
+    const productId = str(input?.productId)
+    if (productId === '') throw new Error('缺少 productId')
+    const kind = ['modules', 'notes', 'demo'].includes(str(input?.kind)) ? str(input.kind) : 'modules'
+    const id = `pp-${productId}-${kind}`
+    const now = isoDateTimeSeconds()
+    const status = ['running', 'done', 'failed'].includes(str(input?.status)) ? str(input.status) : 'running'
+    const step = Math.max(0, Math.round(Number(input?.step ?? 0)) || 0)
+    const total = Math.max(0, Math.round(Number(input?.total ?? 0)) || 0)
+    const message = str(input?.message).slice(0, 500)
+    const existing = this.productProgress.find(p => p.id === id)
+    const log = Array.isArray(existing?.log) ? existing!.log.slice() : []
+    if (message !== '') log.push({ step, message, at: now })
+    const progress = {
+      id, productId, kind, demoId: str(input?.demoId).slice(0, 60), mapId: str(input?.mapId).slice(0, 64),
+      step, total, status, message, log: log.slice(-50), sessionId: str(input?.sessionId).slice(0, 64), updatedAt: now,
+    }
+    if (existing) Object.assign(existing, progress)
+    else this.productProgress.push(progress)
+    this.persistNews()
+    return progress
   }
 
   listTestProjects(): any[] {
@@ -3117,7 +3204,18 @@ function toModule(row: any): any {
   return {
     id: row.id, productId: row.product_id, mapId: row.map_id ?? '', parentId: row.parent_id ?? '', name: row.name,
     kind: row.kind ?? 'module', platform: row.platform ?? 'all', description: row.description ?? '',
-    noteId: row.note_id ?? '', status: row.status ?? 'designing', createdAt: row.created_at, updatedAt: row.updated_at,
+    noteId: row.note_id ?? '', status: row.status ?? 'designing',
+    nodeId: row.node_id ?? '', sortOrder: Number(row.sort_order ?? 0),
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }
+}
+
+function toProductProgress(row: any): any {
+  return {
+    id: row.id, productId: row.product_id, kind: row.kind ?? 'modules', demoId: row.demo_id ?? '',
+    mapId: row.map_id ?? '', step: Number(row.step ?? 0), total: Number(row.total ?? 0),
+    status: row.status ?? 'running', message: row.message ?? '', log: jsonList(row.log),
+    sessionId: row.session_id ?? '', updatedAt: row.updated_at,
   }
 }
 
@@ -3517,7 +3615,10 @@ function registerModuleTool(ctx: any, store: SqliteStore | JsonStore): void {
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
-        productId: { type: 'string' }, mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' }, parentId: { type: 'string' }, name: { type: 'string' },
+        productId: { type: 'string' }, mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
+        parentId: { type: 'string', description: '父级模块 id（顶层留空）' },
+        nodeId: { type: 'string', description: '对应的导图节点 id（可选，便于导图与模块互相跳转）' },
+        name: { type: 'string' },
         kind: { type: 'string', enum: ['module', 'business', 'feature', 'requirement'] },
         platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'] },
         description: { type: 'string' }, noteId: { type: 'string' }, status: { type: 'string' },
@@ -3533,6 +3634,32 @@ function registerModuleTool(ctx: any, store: SqliteStore | JsonStore): void {
   if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(tool), 'workbench: module tool')
   else ctx.tools.register(tool)
   console.log('[dsh-workbench] 已注册工具 workbench_module_publish')
+
+  /* 模块/笔记生成进度上报：让产品页的进度条真正动起来（与 demo 进度同构） */
+  const progressTool = {
+    name: 'product_progress_publish',
+    description: '产品模块/笔记生成进度上报。开始时 step=0 status=running；每写完一个模块调用一次（step 递增）；结束 status=done；失败 status=failed 并说明原因。',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        productId: { type: 'string' },
+        kind: { type: 'string', enum: ['modules', 'notes'], description: '生成的是模块还是设计笔记' },
+        mapId: { type: 'string' },
+        step: { type: 'number' }, total: { type: 'number' },
+        status: { type: 'string', enum: ['running', 'done', 'failed'] },
+        message: { type: 'string' },
+      },
+      required: ['productId', 'step', 'total', 'status', 'message'],
+    },
+    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `进度 ${v.progress?.step ?? 0}/${v.progress?.total ?? 0} 已记录` : `上报失败：${String(v?.error ?? '')}` }] },
+    async execute(args: any): Promise<any> {
+      try { return { ok: true, progress: await serialized(() => store.saveProductProgress(args)) } }
+      catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
+    },
+  }
+  if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(progressTool), 'workbench: product progress tool')
+  else ctx.tools.register(progressTool)
+  console.log('[dsh-workbench] 已注册工具 product_progress_publish')
 }
 
 function registerTestCaseTool(ctx: any, store: SqliteStore | JsonStore): void {
@@ -4056,6 +4183,29 @@ export function apply(ctx: any): void {
         if (method === 'POST' && path === '/modules') {
           const body = await readJson(req)
           send(res, 200, { ok: true, module: await serialized(() => store.saveModule(body?.module ?? body)) })
+          return
+        }
+        if ((method === 'PATCH' || method === 'PUT') && path.startsWith('/modules/')) {
+          const id = decodeURIComponent(path.slice('/modules/'.length))
+          const body = await readJson(req)
+          /* 局部更新：以 URL 里的 id 为准；缺少 productId 时用原记录补上，避免局部 patch 丢字段 */
+          const patch = { ...(body?.module ?? body), id, patch: true }
+          if (str(patch?.productId) === '') {
+            const existing = store.listModules().find((m: any) => m.id === id) as any
+            if (existing !== undefined) { patch.productId = existing.productId; if (patch.mapId === undefined) patch.mapId = existing.mapId; if (patch.name === undefined) patch.name = existing.name; if (patch.kind === undefined) patch.kind = existing.kind; if (patch.platform === undefined) patch.platform = existing.platform }
+          }
+          send(res, 200, { ok: true, module: await serialized(() => store.saveModule(patch)) })
+          return
+        }
+        if (method === 'GET' && path === '/products/progress') {
+          const productId = str(url.searchParams.get('productId') ?? '')
+          const kind = str(url.searchParams.get('kind') ?? 'modules') || 'modules'
+          send(res, 200, { progress: store.getProductProgress(productId, kind) ?? null })
+          return
+        }
+        if (method === 'POST' && path === '/products/progress') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, progress: await serialized(() => store.saveProductProgress(body?.progress ?? body)) })
           return
         }
         if (method === 'DELETE' && path.startsWith('/modules/')) {
