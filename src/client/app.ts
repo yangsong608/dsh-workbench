@@ -10,7 +10,7 @@ import { createIdeaView, type IdeaViewHandle } from './idea'
 import { createAgentPanel } from './agent-panel'
 import {
   buildProductForceOption, emptyProductGraph, externalEdges, fromMindElixir, normalizeProductGraph,
-  parseOutlineToProductGraph, productGraphFromIdea, productGraphFromV1, productGraphToMarkdown, diffProductGraphs,
+  parseExternalRef, parseOutlineToProductGraph, productGraphFromIdea, productGraphFromV1, productGraphToMarkdown, diffProductGraphs,
   PRODUCT_KIND_COLOR, PRODUCT_KIND_LABEL, toMindElixir,
   type IdeaLikeGraph, type ProductMapGraph, type ProductMapNode, type ProductNodeKind,
 } from '../shared/product-graph-model'
@@ -393,6 +393,10 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let productMindSyncTimer = 0
   /** 草稿保存串行链：并发提交同一 rev 会假 409 并回写覆盖，排队后后者带上前者返回的 rev。 */
   let productPersistChain: Promise<void> = Promise.resolve()
+  /** 版本面板显示条数（可增量展开；避免 12 条硬截断后旧版本不可达）。 */
+  let productVersionLimit = 12
+  /** 导图节点搜索关键字。 */
+  let productSearch = ''
   let ctxMenuOpen = false
   let productPicked = new Set<string>()
   let productStyle = 'clean'
@@ -3142,6 +3146,37 @@ ${lines}
     productMind.init(toMindElixir(mapGraph()))
     try { productMind.toCenter?.() } catch { /* 旧版本没有 toCenter */ }
     productMind.bus.addListener('operation', () => scheduleProductMindSync())
+    /* 选中态与我们的 productNodeSelected 同步：否则工具栏「编辑/删除节点」在看不见选中时就会动手 */
+    target.addEventListener('click', event => {
+      const nodeEl = (event.target as Element | null)?.closest('[data-nodeid]') as HTMLElement | null
+      if (nodeEl === null) return
+      const id = productGraphIdOf(nodeEl.getAttribute('data-nodeid') ?? '')
+      if (id === '' || id === productNodeSelected) return
+      productNodeSelected = id
+      renderSelectionBar()
+    }, true)
+    renderSelectionBar()
+  }
+
+  /** 工具栏下方的「已选」提示条：让选中状态可见，避免隐形选中后误删。 */
+  function renderSelectionBar(): void {
+    const host = $id('pm-plot')?.parentElement
+    if (host === null || host === undefined) return
+    const existing = host.querySelector('.pm-selection-bar')
+    const node = productNodeById(undefined, productNodeSelected)
+    if (node === undefined) {
+      existing?.remove()
+      return
+    }
+    const text = `<span>已选</span><b>${kindLabel(node.kind)} · ${esc(node.label)}</b>`
+    if (existing !== null) {
+      existing.innerHTML = `${text}<button class="icon-btn" data-act="pm-selection-clear" title="取消选中">✕</button>`
+      return
+    }
+    const bar = document.createElement('div')
+    bar.className = 'pm-selection-bar'
+    bar.innerHTML = `${text}<button class="icon-btn" data-act="pm-selection-clear" title="取消选中">✕</button>`
+    host.insertBefore(bar, host.firstChild)
   }
 
   async function renderProductForce(target: HTMLElement, graph: ProductMapGraph): Promise<void> {
@@ -3156,7 +3191,8 @@ ${lines}
       return
     }
     productChart = ns.init(target, null, { renderer: 'canvas' })
-    /* 点击跨图引用伪节点 → 跳到目标导图并选中目标节点（设计验收「可跳转」） */
+    /* 点击跨图引用伪节点 → 跳到目标导图并选中目标节点；点普通节点 → 选中并高亮 + 显示选中条
+       （关系视图不支持结构编辑，但选中必须可见，否则工具栏「编辑/删除节点」会隐形动手）。 */
     productChart.on('click', (params: any) => {
       if (params?.dataType !== 'node' || typeof params.data?.id !== 'string' || productMapPreview !== null) return
       const id = String(params.data.id)
@@ -3174,6 +3210,8 @@ ${lines}
         return
       }
       productNodeSelected = id
+      try { productChart.dispatchAction({ type: 'select', seriesIndex: 0, dataIndex: params.dataIndex }) } catch { /* ignore */ }
+      renderSelectionBar()
     })
     productChart.setOption(buildProductForceOption(graph, { dark: resolvedTheme() === 'dark' }), true)
     const legend = document.createElement('div')
@@ -3276,6 +3314,8 @@ ${lines}
       </div>`
       body = `<div class="pm-map-wrap">${rail}<div class="pm-map-main"><div class="product-map-toolbar">
         ${engineSeg}
+        <input id="pm-search" class="pm-search" type="search" placeholder="搜索节点…" title="回车跳到第一个命中节点">
+        <span class="pm-sep"></span>
         <button class="btn" data-act="product-node-new" data-type="feature">${ic('plus', 12)}新增功能</button>
         <button class="btn" data-act="product-node-new" data-type="requirement">${ic('plus', 12)}新增需求</button>
         <button class="btn" data-act="product-node-child">${ic('corner', 12)}加子节点</button>
@@ -3283,10 +3323,15 @@ ${lines}
         <button class="btn" data-act="product-node-edit">${ic('edit', 12)}编辑节点</button>
         <button class="icon-btn" data-act="product-node-delete" title="删除节点（Del）">${ic('trash', 13)}</button>
         <span class="pm-sep"></span>
+        <button class="icon-btn" data-act="pm-undo" title="撤销（Ctrl/⌘+Z）">↶</button>
+        <button class="icon-btn" data-act="pm-redo" title="重做（Ctrl/⌘+Shift+Z）">↷</button>
+        <span class="pm-sep"></span>
         <button class="btn" data-act="pm-version-archive">${ic('layers', 12)}存档版本</button>
         <button class="btn" data-act="pm-version-diff">版本对比</button>
         <span class="pm-sep"></span>
         <button class="btn" data-act="pm-export-outline">${ic('download', 12)}导出大纲</button>
+        <button class="btn" data-act="pm-export-image">${ic('download', 12)}导出图片</button>
+        <button class="btn" data-act="pm-ref-check">引用检查</button>
         <button class="btn" data-act="pm-import-outline">${ic('upload', 12)}导入大纲</button>
         <button class="btn" data-act="pm-import-idea">${ic('spark', 12)}从灵感导入</button>
         <span class="product-hint">${ic('folder', 11)} ${esc(productMapSelected !== '' ? `.dsh-workbench/products/${product.id}/maps/${productMapSelected}.json` : 'mindmap.json → ' + (product.workspacePath || '未关联工作区'))}</span>
@@ -3402,7 +3447,7 @@ ${lines}
   function renderVersionPanel(): string {
     return `<div class="pm-versions">
       <div class="pm-maps-head"><b>版本</b><span>${productMapVersions.length}</span></div>
-      ${productMapVersions.length === 0 ? '<div class="pm-maps-empty">「存档版本」后出现历史</div>' : productMapVersions.slice(0, 12).map(v => `<div class="pm-version${productMapPreview?.id === v.id ? ' active' : ''}">
+      ${productMapVersions.length === 0 ? '<div class="pm-maps-empty">「存档版本」后出现历史</div>' : productMapVersions.slice(0, productVersionLimit).map(v => `<div class="pm-version${productMapPreview?.id === v.id ? ' active' : ''}">
         <b>v${v.seq} · ${esc(v.label)}</b><small>${mapSourceText(v.source)} · ${v.nodeCount} 节点 · ${(v.createdAt ?? '').slice(5, 16)}</small>
         <span class="pm-map-ops">
           <button class="icon-btn" data-act="pm-version-preview" data-id="${v.id}" title="只读预览">${ic('play', 11)}</button>
@@ -3410,6 +3455,7 @@ ${lines}
           <button class="icon-btn" data-act="pm-version-delete" data-id="${v.id}" title="删除版本">${ic('trash', 11)}</button>
         </span>
       </div>`).join('')}
+      ${productMapVersions.length > productVersionLimit ? `<button class="btn tiny pm-version-more" data-act="pm-version-more">再显示 ${Math.min(20, productMapVersions.length - productVersionLimit)} 个（共 ${productMapVersions.length}）</button>` : ''}
     </div>`
   }
   /** 拉取当前导图的版本序列。 */
@@ -3546,6 +3592,40 @@ ${common}
 
   const PRODUCT_KIND_OPTIONS: ProductNodeKind[] = ['module', 'business', 'feature', 'requirement']
   function kindLabel(kind: ProductNodeKind): string { return PRODUCT_KIND_LABEL[kind] }
+
+  /** 撤销 / 重做：走 mind-elixir 内置历史栈（关系视图与只读预览不可用）。 */
+  function mapHistoryStep(action: 'undo' | 'redo'): void {
+    if (productMapPreview !== null) { toast('预览模式下不能修改'); return }
+    if (productMapEngine !== 'tree' || productMind === null) { toast('切到「编辑」视图才能撤销'); return }
+    try {
+      if (action === 'undo') productMind.undo()
+      else productMind.redo()
+      /* 撤销后 mind-elixir 已改内部数据，靠 operation 事件同步即可；
+         这里再兜底同步一次，避免某些版本 undo 不触发 operation。 */
+      scheduleProductMindSync()
+      toast(action === 'undo' ? '已撤销' : '已重做')
+    } catch (cause) {
+      toast(`${action === 'undo' ? '撤销' : '重做'}失败：${String((cause as Error).message ?? cause)}`)
+    }
+  }
+
+  /** 节点搜索：回车把第一个命中节点选中并居中（编辑视图）/ 高亮（关系视图）。 */
+  function jumpToSearchHit(): void {
+    const keyword = productSearch.trim()
+    if (keyword === '') return
+    const hit = mapGraph().nodes.find(n => n.kind !== 'root' && n.label.includes(keyword))
+    if (hit === undefined) { toast(`没找到包含「${keyword}」的节点`); return }
+    productNodeSelected = hit.id
+    if (productMapEngine === 'tree' && productMind !== null) {
+      try {
+        productMind.selectNode?.(hit.id, true)
+        productMind.toCenter?.(hit.id, true)
+      } catch { /* 老版本没有这些方法，退化为仅高亮选中条 */ }
+      refreshMapCanvas()
+    }
+    renderSelectionBar()
+    toast(`已定位「${hit.label}」`)
+  }
 
   function openNodeQuickAdd(kind: 'child' | 'sibling', type: ProductNodeKind = 'feature'): void {
     const graph = mapGraph()
@@ -3760,6 +3840,72 @@ ${common}
   function productOutline(_product?: Product): string {
     return productGraphToMarkdown(mapGraph())
   }
+  /** 引用检查：列出本图出向引用、其他图对本图的入向引用，并标出悬空引用（目标已删）。 */
+  function openRefCheck(): void {
+    const graph = mapGraph()
+    const map = activeMap()
+    if (map === undefined) { toast('先选择导图'); return }
+    const labelOf = (mapId: string, nodeId: string): string => {
+      const target = productMaps.find(m => m.id === mapId)
+      const node = target?.graph?.nodes?.find(n => n.id === nodeId)
+      return node === undefined ? `⚠ 悬空（${mapId.slice(0, 10)}:${nodeId.slice(0, 8)}）` : `「${target?.name ?? mapId}」${node.label}`
+    }
+    const outRows = externalEdges(graph).map(e => {
+      const ref = parseExternalRef(String(e.to))
+      const from = graph.nodes.find(n => n.id === e.from)
+      return `<li>${esc(from?.label ?? e.from)} → ${ref === null ? esc(String(e.to)) : esc(labelOf(ref.mapId, ref.nodeId))}${e.label ? `（${esc(e.label)}）` : ''}</li>`
+    })
+    const inRows: string[] = []
+    for (const other of productMaps) {
+      if (other.id === map.id || !Array.isArray(other.graph?.edges)) continue
+      for (const edge of externalEdges(other.graph)) {
+        const ref = parseExternalRef(String(edge.to))
+        if (ref === null || ref.mapId !== map.id) continue
+        const target = graph.nodes.find(n => n.id === ref.nodeId)
+        const from = other.graph.nodes.find(n => n.id === edge.from)
+        inRows.push(`<li>「${esc(other.name)}」${esc(from?.label ?? edge.from)} → ${target === undefined ? '⚠ 悬空（本图已无此节点）' : esc(target.label)}</li>`)
+      }
+    }
+    const dangling = [...outRows.filter(r => r.includes('悬空')), ...inRows.filter(r => r.includes('悬空'))].length
+    openModal(`<h3>跨图引用检查</h3>
+      <div class="mfield"><label>本图指向其他导图（${outRows.length}）</label>${outRows.length === 0 ? '<div class="muted">无</div>' : `<ul class="diff-list">${outRows.join('')}</ul>`}</div>
+      <div class="mfield"><label>其他导图指向本图（${inRows.length}）</label>${inRows.length === 0 ? '<div class="muted">无</div>' : `<ul class="diff-list">${inRows.join('')}</ul>`}</div>
+      ${dangling > 0 ? `<div class="mfield" style="color:var(--orange)">发现 ${dangling} 条悬空引用：目标节点/导图已删除，重新保存任一导图时会被自动清理。</div>` : '<div class="mfield" style="color:var(--text-3)">引用完整，无悬空。</div>'}
+      <div class="modal-foot"><button class="btn solid" data-act="close-modal">关闭</button></div>`)
+  }
+
+  /** 导出当前导图为图片（关系视图走 ECharts，编辑视图走 SVG 快照）。 */
+  async function exportMapImage(): Promise<void> {
+    const map = activeMap()
+    const product = productOf(productSelected)
+    if (map === undefined || !product) { toast('先选择导图'); return }
+    try {
+      if (productChart !== null) {
+        const url = productChart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: resolvedTheme() === 'dark' ? '#19191d' : '#fff' })
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${product.name}-${map.name}.png`
+        a.click()
+        toast('已导出当前关系图')
+        return
+      }
+      if (productMind === null) { toast('切到「关系」视图后可导出图片'); return }
+      /* mind-elixir 的 exportPng(download=false) 返回 dataURL，自己触发下载以便控制文件名 */
+      const exported = await productMind.exportPng?.(false)
+      if (typeof exported === 'string' && exported !== '') {
+        const a = document.createElement('a')
+        a.href = exported
+        a.download = `${product.name}-${map.name}.png`
+        a.click()
+        toast('已导出导图图片')
+        return
+      }
+      toast('该版本编辑器不支持导出图片，请切到「关系」视图导出')
+    } catch (cause) {
+      toast(`导出失败：${String((cause as Error).message ?? cause)}`)
+    }
+  }
+
   function exportMindmapOutline(): void {
     const product = productOf(productSelected)
     if (!product) return
@@ -3782,14 +3928,18 @@ ${common}
     if (map === undefined) { toast('先选择导图'); return }
     openModal(`<h3>导入大纲（替换当前导图）</h3>
       <div class="mfield"><label>粘贴 Markdown 大纲（缩进或 - 层级；（模块）（业务）（需求）标记类型）</label><textarea id="wb-pm-outline" rows="10" placeholder="- 登录（模块）&#10;  - 手机验证码登录&#10;  - 一键登录（需求）"></textarea></div>
-      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">导入会<b>替换</b>「${esc(map.name)}」当前草稿；导入前会自动存档当前版本，可随时回滚。</div>
+      <div class="mfield"><label>未标记节点的默认类型</label><select id="wb-pm-outline-kind">
+        <option value="feature">功能（默认）</option><option value="module">模块</option><option value="business">业务</option><option value="requirement">需求</option>
+      </select></div>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">普通 Markdown（XMind / 飞书导出）没有类型标记，会按上面选中的类型导入；带「（模块）（业务）（需求）」后标的行仍按标记走。导入会<b>替换</b>「${esc(map.name)}」当前草稿，导入前自动存档，可随时回滚。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-import-run">导入</button></div>`)
   }
   async function runMindmapImport(): Promise<void> {
     const map = activeMap()
     if (!map) return
     const raw = $id<HTMLTextAreaElement>('wb-pm-outline')?.value ?? ''
-    const { graph, issues } = parseOutlineToProductGraph(raw, map.name)
+    const fallbackKind = ($id<HTMLSelectElement>('wb-pm-outline-kind')?.value as ProductNodeKind | undefined) ?? 'feature'
+    const { graph, issues } = parseOutlineToProductGraph(raw, map.name, fallbackKind)
     if (graph.nodes.length <= 1) { toast('没有解析到大纲内容'); return }
     if (issues.length > 0) console.warn('[dsh-workbench] 大纲解析提示：', issues)
     try {
@@ -4771,6 +4921,17 @@ ${mapLine}
   }
 
   function bindProduct(): void {
+    const searchEl = $id<HTMLInputElement>('pm-search')
+    if (searchEl !== null) {
+      searchEl.value = productSearch
+      searchEl.addEventListener('input', () => { productSearch = searchEl.value })
+      searchEl.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        event.stopPropagation()
+        jumpToSearchHit()
+      })
+    }
     $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => {
       productSelected = (e.currentTarget as HTMLSelectElement).value
       productNodeSelected = null
@@ -6034,12 +6195,17 @@ ${lines}`
       if (act === 'pm-map-delete') { void deleteMapById(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-map-select') { selectMap(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-engine') { productMapEngine = actEl.getAttribute('data-mode') === 'force' ? 'force' : 'tree'; productMapPreview = null; renderContent(); return }
+      if (act === 'pm-undo') { mapHistoryStep('undo'); return }
+      if (act === 'pm-redo') { mapHistoryStep('redo'); return }
+      if (act === 'pm-selection-clear') { productNodeSelected = null; renderSelectionBar(); return }
       if (act === 'pm-toggle-fold') { toggleNodeFold(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-node-kind') { void changeNodeKind(actEl.getAttribute('data-id') ?? '', (actEl.getAttribute('data-kind') as ProductNodeKind) ?? 'feature'); return }
       if (act === 'pm-node-relate') { openRelateModal(actEl.getAttribute('data-id') ?? productNodeSelected ?? '', false); return }
       if (act === 'pm-node-relate-ext') { openRelateModal(actEl.getAttribute('data-id') ?? productNodeSelected ?? '', true); return }
       if (act === 'pm-relate-save') { saveRelate(actEl.getAttribute('data-id') ?? '', actEl.getAttribute('data-ext') === '1'); return }
       if (act === 'pm-export-outline') { exportMindmapOutline(); return }
+      if (act === 'pm-export-image') { void exportMapImage(); return }
+      if (act === 'pm-ref-check') { openRefCheck(); return }
       if (act === 'pm-import-outline') { importMindmapOutline(); return }
       if (act === 'pm-import-run') { void runMindmapImport(); return }
       if (act === 'pm-import-idea') { void openIdeaImport(); return }
@@ -6051,6 +6217,7 @@ ${lines}`
       if (act === 'pm-version-delete') { void removeMapVersion(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'pm-version-back') { productMapPreview = null; renderContent(); return }
       if (act === 'pm-version-diff') { void openMapVersionDiff(); return }
+      if (act === 'pm-version-more') { productVersionLimit = Math.min(productVersionLimit + 20, productMapVersions.length); renderContent(); return }
       if (act === 'pm-version-diff-run') { void runMapVersionDiff(); return }
       if (act === 'product-node-edit') { openNodeProperty(); return }
       if (act === 'product-node-update') { void updateProductNode(actEl.getAttribute('data-id') ?? ''); return }
@@ -6312,6 +6479,13 @@ ${lines}`
     if (ui.view === 'product' && productTab === 'map' && !typing && !modalOpen) {
       /* 画布内 Tab/Enter 交给 mind-elixir 原生编辑；画布外走快速添加 */
       const inCanvas = (event.target as HTMLElement | null)?.closest('#pm-plot') !== null
+      /* 撤销/重做：画布内让 mind-elixir 自己处理（它已绑 Ctrl+Z），这里只处理画布外与兜底 */
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        event.stopPropagation()
+        mapHistoryStep(event.shiftKey ? 'redo' : 'undo')
+        return
+      }
       if (event.key === 'Tab' && !inCanvas) {
         event.preventDefault()
         event.stopPropagation()

@@ -800,6 +800,12 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .pm-preview-bar b{color:var(--text)}
 .pm-preview-bar span{color:var(--text-3);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pm-engine-seg{flex-shrink:0}
+/* 导图：搜索框 / 已选提示条 / 版本增量加载 */
+.pm-search{height:27px;width:132px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text);font:10.5px var(--font);flex-shrink:0}
+.pm-search:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+.pm-selection-bar{position:absolute;left:10px;top:10px;z-index:5;display:flex;align-items:center;gap:7px;padding:4px 8px;border-radius:8px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));background:color-mix(in srgb,var(--panel) 92%,transparent);font-size:10px;color:var(--text-3);max-width:70%}
+.pm-selection-bar b{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pm-version-more{margin-top:6px;width:100%;justify-content:center;height:24px;font-size:10px}
 .pm-versions{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
 .pm-version{border:1px solid transparent;border-radius:7px;padding:5px 7px;cursor:pointer;position:relative}
 .pm-version:hover{background:var(--hover)}

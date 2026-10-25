@@ -599,7 +599,7 @@ export function productGraphToMarkdown(graph: ProductMapGraph): string {
 }
 
 /** Markdown 大纲 → 图（缩进或 - 层级；（需求）（模块）（业务）标记定 kind；首行 # 标题即根）。 */
-export function parseOutlineToProductGraph(raw: string, title: string): NormalizedProductGraph {
+export function parseOutlineToProductGraph(raw: string, title: string, defaultKind: ProductNodeKind = 'feature'): NormalizedProductGraph {
   const rows = raw.split('\n').map(line => line.replace(/\t/g, '  '))
   type Row = { depth: number; label: string; kind: ProductNodeKind }
   const parsed: Row[] = []
@@ -618,7 +618,7 @@ export function parseOutlineToProductGraph(raw: string, title: string): Normaliz
     const kind: ProductNodeKind = /（需求）|\(需求\)|\[需求\]/.test(labelRaw)
       ? 'requirement'
       : /（模块）|\(模块\)/.test(labelRaw) ? 'module'
-        : /（业务）|\(业务\)/.test(labelRaw) ? 'business' : 'feature'
+        : /（业务）|\(业务\)/.test(labelRaw) ? 'business' : defaultKind
     const label = labelRaw
       .replace(/（需求）|\(需求\)|\[需求\]|（模块）|\(模块\)|（业务）|\(业务\)/g, '')
       .split(' —— ')[0]

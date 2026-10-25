@@ -70,6 +70,8 @@ check('AI 发送走公开 retain（ready 可 resolve）', client.includes('.reta
 check('导图双引擎（mind-elixir/ECharts）+ 节点右键菜单', client.includes('MindElixir') && client.includes('buildProductForceOption') && client.includes('pm-engine') && client.includes('ctx-item'))
 check('导图三来源（自建/大纲/灵感）+ 版本序列', client.includes('wb-map-source') && client.includes('parseOutlineToProductGraph') && client.includes('productGraphFromIdea') && client.includes('pm-version-archive') && client.includes('pm-version-rollback') && client.includes('pm-version-diff'))
 check('导图版本/草稿乐观锁（宿主）', host.includes('product_map_versions') && host.includes('saveMapDraft') && host.includes('draft_conflict') && host.includes('rollbackMapVersion') && host.includes('product_maps SET graph_json'))
+check('导图：选中可见 / 撤销重做 / 搜索 / 引用检查 / 导出图片 / 版本增量', client.includes('pm-selection-bar') && client.includes('mapHistoryStep') && client.includes('jumpToSearchHit') && client.includes('openRefCheck') && client.includes('exportMapImage') && client.includes('pm-version-more'))
+check('大纲导入支持未标记节点默认类型', client.includes('wb-pm-outline-kind') && client.includes('defaultKind'))
 check('多导图（product_maps + mapId 贯穿）', host.includes('CREATE TABLE IF NOT EXISTS product_maps') && host.includes('listProductMaps') && host.includes('map_id') && client.includes('pm-map-select') && client.includes('productMapSelected') && client.includes('/products/maps'))
 check('统一模块/业务/端模型', host.includes('CREATE TABLE IF NOT EXISTS modules') && host.includes('workbench_module_publish') && client.includes('product-gen-modules') && client.includes('module-grid'))
 check('Bug/测试平台字段', host.includes('module_id') && host.includes("platform TEXT NOT NULL DEFAULT 'all'") && client.includes('wb-bug-platform') && client.includes('wb-test-platform'))
