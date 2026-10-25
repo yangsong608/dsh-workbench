@@ -882,6 +882,14 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .module-card p{font-size:10px;line-height:1.5;color:var(--text-2);margin:5px 0 3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .module-card small{font-size:9px;color:var(--text-3)}
 @media(max-width:1000px){.module-grid{grid-template-columns:1fr 1fr}}
+/* 设计文档类型徽标 / 文档分组统计 */
+.note-kind{display:inline-block;margin-top:3px;font-size:8.5px;border-radius:4px;padding:1px 5px;border:1px solid var(--line);color:var(--text-3)}
+.note-kind.module{color:var(--accent-ink);background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}
+.note-kind.product{color:var(--green);border-color:color-mix(in srgb,var(--green) 35%,var(--line))}
+.note-kind.feature{color:var(--orange);border-color:color-mix(in srgb,var(--orange) 35%,var(--line))}
+.note-doc-summary{display:flex;gap:12px;font-size:9.5px;color:var(--text-3);margin:0 0 7px;flex-wrap:wrap}
+.note-doc-summary b{color:var(--text-2)}
+.note-pipeline-running{font-size:9.5px;color:var(--accent-ink)}
 /* 设计流水线 */
 .pipeline-maps{display:flex;flex-direction:column;gap:4px;max-height:130px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--panel-2)}
 .pipeline-maps label,.pipeline-stage{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-2)}

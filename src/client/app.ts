@@ -80,6 +80,7 @@ type ProductNode = ProductMapNode
 interface Product {
   id: string; name: string; description: string; workspacePath: string; notebookId: string
   mindmap: string; styles: string[]; createdAt: string; updatedAt: string
+  archivedAt?: string
 }
 /** 一张导图：一个产品可有多张（互为补充），每张导图有独立版本序列。 */
 interface ProductMap {
@@ -103,7 +104,7 @@ interface Module {
   id: string; productId: string; mapId?: string; parentId: string; name: string; kind: 'module' | 'business' | 'feature' | 'requirement'
   platform: 'pc' | 'mobile' | 'tablet' | 'all'; description: string; noteId: string; status: string
   /** 关联的导图节点 id（v2 图模型）；空表示未关联。 */
-  nodeId?: string; sortOrder?: number
+  nodeId?: string; sortOrder?: number; archivedAt?: string
 }
 /** 模块 / 笔记生成进度（与 Demo 进度同构）。 */
 interface ProductProgress {
@@ -424,6 +425,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let moduleFilterPlatform = ''
   /** 笔记页：只看未关联节点的笔记。 */
   let noteFilterMissing = false
+  /** 是否显示已归档内容（产品/模块/文档）。 */
+  let showArchived = false
   /** 页内会话（团队派发）句柄与当前派发。 */
   let productChat: ChatHandle | null = null
   let productDispatch: { dispatchId: string; sessionId: string; teamName: string } | null = null
@@ -3310,6 +3313,7 @@ ${lines}
       <select id="wb-product-select" class="bug-project-select"><option value="">选择产品…</option>${products.map(p => `<option value="${p.id}" ${p.id === product.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
       <button class="icon-btn" data-act="product-edit" title="编辑产品">${ic('edit', 14)}</button>
       <span class="product-ws">${ic('folder', 12)}${esc(product.workspacePath || '未关联工作区')}</span>
+      <label class="pm-archived-toggle" title="显示已归档的产品/模块/文档"><input type="checkbox" id="wb-show-archived" ${showArchived ? 'checked' : ''}> 显示已归档</label>
       <button class="icon-btn" data-act="product-refresh" title="刷新">${ic('refresh', 14)}</button>
     </div>`
     const scopeSelect = productTab === 'map' || productMaps.length <= 1 ? '' : `<select id="wb-map-scope" class="bug-project-select" title="导图范围">
@@ -3396,8 +3400,16 @@ ${lines}
         </div>`
       }).join('')}</div>
       <div class="product-pick-list">${featureNodes.map(n => `<label><input type="checkbox" data-act="product-pick" data-id="${n.id}" ${productPicked.has(n.id) ? 'checked' : ''}> ${esc(n.label)}</label>`).join('') || '<span class="muted">先添加功能节点</span>'}</div>
+      <div class="note-doc-summary">
+        <span>业务模块设计 <b>${allNotes.filter(n => n.kind === 'module_design').length}</b></span>
+        <span>产品设计 <b>${allNotes.filter(n => n.kind === 'product_design').length}</b></span>
+        <span>功能设计 <b>${allNotes.filter(n => n.kind === 'feature_design').length}</b></span>
+        <span>普通笔记 <b>${allNotes.filter(n => !n.kind).length}</b></span>
+      </div>
       <div class="note-filters">
-        <button class="btn tiny ${noteFilterMissing ? 'solid' : ''}" data-act="product-note-filter-missing">${noteFilterMissing ? '只看未关联' : '只看未关联'}</button>
+        <button class="btn tiny ${noteFilterMissing ? 'solid' : ''}" data-act="product-note-filter-missing">只看未关联</button>
+        ${pipelineRemaining.length > 0 && !pipelineRunning ? `<button class="btn tiny solid" data-act="pipeline-next">继续下一步（${stageLabel(pipelineRemaining[0])}）</button>` : ''}
+        ${pipelineRunning ? '<span class="note-pipeline-running">流水线执行中…</span>' : ''}
         <span class="note-filter-count">${filteredNotes.length} 篇</span>
       </div>
       <div class="product-note-list">${filteredNotes.map(note => renderNoteCard(note, featureNodes)).join('') || `<div class="notes-empty small">${noteFilterMissing ? '没有未关联节点的笔记' : '还没有设计笔记：点「写笔记」自己写，或让 AI 按导图逐节点生成。'}</div>`}</div>
@@ -3426,6 +3438,7 @@ ${lines}
         <span class="module-ops">
           <button class="icon-btn" data-act="product-module-edit" data-id="${m.id}" title="编辑">${ic('edit', 11)}</button>
           <button class="icon-btn" data-act="product-module-add" data-id="${m.id}" title="添加子项">${ic('plus', 11)}</button>
+          <button class="icon-btn" data-act="archive-toggle" data-target="modules" data-id="${m.id}" data-archived="${m.archivedAt ? '1' : ''}" title="${m.archivedAt ? '取消归档' : '归档'}">${m.archivedAt ? '↩' : '⌸'}</button>
           <button class="icon-btn" data-act="product-module-delete" data-id="${m.id}" title="删除">${ic('trash', 11)}</button>
         </span>
       </div>`
@@ -3582,7 +3595,8 @@ ${lines}
     productLoading = true
     if (!silent) { productError = ''; if (ui.view === 'product') renderContent() }
     try {
-      const [pRes, nRes] = await Promise.all([fetch(`${API}/products`), fetch(`${API}/notes`)])
+      const suffix = showArchived ? '?archived=1' : ''
+      const [pRes, nRes] = await Promise.all([fetch(`${API}/products${suffix}`), fetch(`${API}/notes${suffix}`)])
       if (!pRes.ok || !nRes.ok) throw new Error(`HTTP ${pRes.status}/${nRes.status}`)
       const pData = await pRes.json() as { products?: Product[]; demos?: ProductDemo[]; modules?: Module[] }
       const nData = await nRes.json() as { notes?: Note[]; notebooks?: Notebook[] }
@@ -4387,7 +4401,7 @@ ${common}
       <div class="mfield"><label>关联 DSH 工作区</label>${workspaces.length > 0 ? `<select id="wb-prod-ws">${workspaces.map(ws => `<option value="${esc(ws.path)}" ${ws.path === current ? 'selected' : ''}>${esc(bugWorkspaceName(ws.path))} · ${esc(ws.path)}</option>`).join('')}</select>` : '<div class="muted" style="font-size:10.5px">未读取到工作区，可直接填路径。</div>'}</div>
       <div class="mfield"><label>工作区路径</label><input id="wb-prod-path" value="${esc(current)}" placeholder="/Users/you/project"></div>
       <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">创建后会自动建立「产品：名称」笔记本并关联同一工作区；导图、笔记文件、Demo 都会写到该目录。</div>
-      <div class="modal-foot">${product ? `<button class="btn" data-act="product-delete" data-id="${product.id}">${ic('trash', 12)}删除产品</button>` : ''}<button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-save" data-id="${product?.id ?? ''}">${product ? '保存' : '创建产品'}</button></div>`)
+      <div class="modal-foot">${product ? `<button class="btn" data-act="archive-toggle" data-target="products" data-id="${product.id}" data-archived="${product.archivedAt ? '1' : ''}">${product.archivedAt ? '取消归档' : '归档'}</button><button class="btn" data-act="product-delete" data-id="${product.id}">${ic('trash', 12)}删除产品</button>` : ''}<button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="product-save" data-id="${product?.id ?? ''}">${product ? '保存' : '创建产品'}</button></div>`)
     $id<HTMLSelectElement>('wb-prod-ws')?.addEventListener('change', e => { const v = (e.currentTarget as HTMLSelectElement).value; const p = $id<HTMLInputElement>('wb-prod-path'); if (p) p.value = v })
   }
   async function saveProduct(id: string): Promise<void> {
@@ -4818,6 +4832,30 @@ ${common}
     toast(started.teamName === '' ? `已派发：${label}` : `已派发给「${started.teamName}」：${label}`)
   }
 
+  /** 等待「阶段真正跑完」：轮询目标状态直到 done/failed 或超时。这是阶段串行的前提。 */
+  function waitForStageSettled(progressKind: 'modules' | 'notes', timeoutMs = 20 * 60 * 1000): Promise<'done' | 'failed' | 'timeout'> {
+    const product = productOf(productSelected)
+    if (product === undefined) return Promise.resolve('failed')
+    const startedAt = Date.now()
+    return new Promise(resolve => {
+      const tick = async (): Promise<void> => {
+        if (Date.now() - startedAt > timeoutMs) { resolve('timeout'); return }
+        try {
+          const res = await fetch(`${API}/products/progress?productId=${encodeURIComponent(product.id)}&kind=${progressKind}`)
+          if (res.ok) {
+            const data = await res.json() as { progress?: ProductProgress | null }
+            const p = data.progress
+            productProgress = p ?? null
+            if (p?.status === 'done') { resolve('done'); return }
+            if (p?.status === 'failed') { resolve('failed'); return }
+          }
+        } catch { /* 单次失败继续等 */ }
+        window.setTimeout(() => { void tick() }, 3000)
+      }
+      void tick()
+    })
+  }
+
   /** 流水线面板：选阶段、选导图、选产品文档形态、增量开关。 */
   function openPipeline(): void {
     const product = productOf(productSelected)
@@ -4842,30 +4880,34 @@ ${common}
       </div>
       <div class="mfield"><label>④ 模式</label>
         <label class="pipeline-stage"><input type="checkbox" id="wb-pipeline-incremental" ${pipelineIncremental ? 'checked' : ''}> 增量（只处理导图改动过 / 尚无文档的部分）</label>
+        <label class="pipeline-stage"><input type="checkbox" id="wb-pipeline-step" ${pipelineStepMode ? 'checked' : ''}> 分步执行（一次只跑一步，完成后我确认再继续）</label>
       </div>
       <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">阶段按顺序执行：先文档 → 再提炼模块 → 再产品设计 → 最后交叉检查。每一步都是独立团队派发，可在页内会话里看到过程；可先跑 1-2 步检查质量再继续。</div>
-      <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pipeline-run">开始执行</button></div>`)
+      <div class="modal-foot">${pipelineRemaining.length > 0 ? `<button class="btn" data-act="pipeline-next">继续下一步（${stageLabel(pipelineRemaining[0])}）</button>` : ''}<button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pipeline-run">开始执行</button></div>`)
   }
 
   let pipelineStageSel: DesignStage[] = ['module_doc', 'extract_module', 'product_doc', 'audit']
   let pipelineMapSel: string[] = []
   let pipelineRunning = false
+  /** 分步模式：剩余待执行阶段。 */
+  let pipelineRemaining: DesignStage[] = []
+  let pipelineStepMode = false
   let productDocMode: 'single' | 'per_module' = 'single'
   let pipelineIncremental = false
   function pipelineStages(): DesignStage[] { return pipelineStageSel }
   function pipelinePickedMaps(): string[] { return pipelineMapSel }
 
-  /** 顺序执行选中的阶段（每阶段独立派发；失败即停，避免在错误基础上继续）。 */
+  /** 顺序执行选中的阶段；每阶段等真正 done 再进下一步（失败或超时即停）。 */
   async function runPipeline(): Promise<void> {
     const product = productOf(productSelected)
     if (product === undefined) return
-    /* 读弹窗里的选择 */
     const stageEls = Array.from(document.querySelectorAll('[data-pipeline-stage]')) as HTMLInputElement[]
     const mapEls = Array.from(document.querySelectorAll('[data-pipeline-map]')) as HTMLInputElement[]
     const stageChecked = stageEls.filter(el => el.checked).map(el => el.getAttribute('data-pipeline-stage') as DesignStage)
     const order: DesignStage[] = ['module_doc', 'extract_module', 'product_doc', 'audit']
     pipelineStageSel = order.filter(s => stageChecked.includes(s))
     pipelineMapSel = mapEls.filter(el => el.checked).map(el => el.getAttribute('data-pipeline-map') ?? '')
+    pipelineStepMode = $id<HTMLInputElement>('wb-pipeline-step')?.checked === true
     productDocMode = ($id<HTMLSelectElement>('wb-pipeline-doc-mode')?.value as 'single' | 'per_module') ?? 'single'
     pipelineIncremental = $id<HTMLInputElement>('wb-pipeline-incremental')?.checked === true
     if (pipelineStageSel.length === 0) { toast('至少选一个阶段'); return }
@@ -4873,22 +4915,64 @@ ${common}
     if (mapIds.length === 0) { toast('没有可用导图'); return }
     const opts: PipelineOptions = { stages: pipelineStageSel, mapIds, productDocMode, incremental: pipelineIncremental }
     closeModal()
+    const steps = pipelineStepMode ? pipelineStageSel.slice(0, 1) : pipelineStageSel
     const ok = typeof window.confirm === 'function'
-      ? window.confirm(`将依次执行 ${pipelineStageSel.length} 个阶段：${pipelineStageSel.map(s => s === 'module_doc' ? '业务模块设计文档' : s === 'extract_module' ? '提炼模块' : s === 'product_doc' ? '产品设计文档' : '交叉检查').join(' → ')}\n涉及 ${mapIds.length} 张导图。可能消耗较多额度，继续？`)
+      ? window.confirm(`${pipelineStepMode ? '只执行第一阶段' : `依次执行 ${steps.length} 个阶段（每步等完成后继续）`}：${steps.map(stageLabel).join(' → ')}\n涉及 ${mapIds.length} 张导图。可能消耗较多额度，继续？`)
       : true
     if (!ok) return
     pipelineRunning = true
+    pipelineRemaining = pipelineStageSel.slice(steps.length)
     if (ui.view === 'product') renderContent()
     try {
-      for (const stage of pipelineStageSel) {
+      for (const stage of steps) {
         await runDesignStage(stage, opts)
-        /* 每个阶段跑完后刷新产物，让下一阶段基于最新数据 */
+        /* 关键：必须等团队真正跑完，否则下一阶段读到的是旧数据（先文档后模块的前提会失效） */
+        toast(`等待「${stageLabel(stage)}」完成…`)
+        const settled = await waitForStageSettled(stage === 'extract_module' ? 'modules' : 'notes')
+        if (settled !== 'done') {
+          toast(settled === 'timeout' ? `「${stageLabel(stage)}」超时未完成，已停止流水线` : `「${stageLabel(stage)}」失败，已停止流水线`)
+          return
+        }
         await loadNotes()
         await loadProducts(true)
         await loadProductProgress()
         if (ui.view === 'product') renderContent()
       }
-      toast('流水线已提交，可在页内会话查看进度')
+      toast(pipelineStepMode && pipelineRemaining.length > 0
+        ? `本阶段完成，还剩 ${pipelineRemaining.length} 步（点「继续下一步」）`
+        : '流水线全部完成')
+    } finally {
+      pipelineRunning = false
+      if (ui.view === 'product') renderContent()
+    }
+  }
+
+  function stageLabel(stage: DesignStage): string {
+    return stage === 'module_doc' ? '业务模块设计文档' : stage === 'extract_module' ? '从文档提炼模块'
+      : stage === 'product_doc' ? '产品设计文档' : '交叉检查与修复'
+  }
+
+  /** 继续下一步（分步模式下使用剩余阶段）。 */
+  async function runPipelineNext(): Promise<void> {
+    if (pipelineRemaining.length === 0) { toast('没有待执行的阶段'); return }
+    const product = productOf(productSelected)
+    if (product === undefined) return
+    const stage = pipelineRemaining[0]
+    const mapIds = pipelineMapSel.length > 0 ? pipelineMapSel : productMaps.map(m => m.id)
+    const opts: PipelineOptions = { stages: pipelineRemaining, mapIds, productDocMode, incremental: pipelineIncremental }
+    pipelineRunning = true
+    if (ui.view === 'product') renderContent()
+    try {
+      await runDesignStage(stage, opts)
+      toast(`等待「${stageLabel(stage)}」完成…`)
+      const settled = await waitForStageSettled(stage === 'extract_module' ? 'modules' : 'notes')
+      pipelineRemaining = pipelineRemaining.slice(1)
+      if (settled === 'done') {
+        await loadNotes(); await loadProducts(true); await loadProductProgress()
+        toast(pipelineRemaining.length > 0 ? `本阶段完成，还剩 ${pipelineRemaining.length} 步` : '流水线全部完成')
+      } else {
+        toast(`「${stageLabel(stage)}」${settled === 'timeout' ? '超时' : '失败'}，已停止`)
+      }
     } finally {
       pipelineRunning = false
       if (ui.view === 'product') renderContent()
@@ -4941,6 +5025,14 @@ ${common}
     return { nodes, written, missing: nodes.filter(n => !written.has(n.id)) }
   }
 
+  /** 设计文档类型徽标（普通笔记不显示）。 */
+  function noteKindBadge(note: Note): string {
+    if (note.kind === 'module_design') return '<span class="note-kind module">业务模块设计</span>'
+    if (note.kind === 'product_design') return '<span class="note-kind product">产品设计</span>'
+    if (note.kind === 'feature_design') return '<span class="note-kind feature">功能设计</span>'
+    return ''
+  }
+
   /** 笔记卡片：显示「▸ 节点名」归属 + 编辑/删除按钮。 */
   function renderNoteCard(note: Note, graphNodes: ProductNode[]): string {
     const nodeId = noteNodeId(note)
@@ -4951,10 +5043,12 @@ ${common}
         <b>${esc(note.title)}</b>
         <span class="product-note-ops">
           <button class="icon-btn" data-act="product-note-edit" data-id="${note.id}" title="编辑">${ic('edit', 11)}</button>
+          <button class="icon-btn" data-act="archive-toggle" data-target="notes" data-id="${note.id}" data-archived="${note.archivedAt ? '1' : ''}" title="${note.archivedAt ? '取消归档' : '归档'}">${note.archivedAt ? '↩' : '⌸'}</button>
           <button class="icon-btn" data-act="product-note-delete" data-id="${note.id}" title="删除">${ic('trash', 11)}</button>
         </span>
       </div>
       ${node !== undefined ? `<span class="product-note-node" title="关联导图节点">▸ ${kindLabel(node.kind)} · ${esc(node.label)}</span>` : '<span class="product-note-node orphan">未关联节点</span>'}
+      ${noteKindBadge(note)}
       <span class="product-note-text">${esc(plain)}</span>
       <i>${note.filePath ? '已写入工作区' : '仅本地库'}</i>
     </div>`
@@ -5268,7 +5362,8 @@ ${common}
     openModal(`<h3>${esc(mod.name)}</h3>
       <div class="bug-detail-meta"><span>${kindName}</span><span>${platformLabel(mod.platform)}</span><span>${esc(mod.status)}</span></div>
       <div class="mfield"><label>说明</label><div class="bug-detail-text">${esc(mod.description || '待补充模块说明')}</div></div>
-      ${note ? `<div class="mfield"><label>关联设计笔记</label><div class="bug-detail-text">${esc(note.title)}</div></div>` : ''}
+      ${note ? `<div class="mfield"><label>关联设计文档${note.kind === 'module_design' ? '（业务模块设计）' : note.kind === 'product_design' ? '（产品设计分册）' : ''}</label><div class="bug-detail-text">${esc(note.title)}</div></div>` : ''}
+      ${(() => { const docs = notes.filter(n => n.notebookId === (productOf(productSelected)?.notebookId ?? '') && n.moduleId === mod.id && n.id !== note?.id); return docs.length === 0 ? '' : `<div class="mfield"><label>其他关联文档（${docs.length}）</label><div class="bug-detail-text">${docs.map(d => esc(d.title)).join('<br>')}</div></div>` })()}
       <div class="modal-foot">${note ? `<button class="btn solid" data-act="product-note-open" data-id="${note.id}">打开设计笔记</button>` : `<button class="btn" data-act="product-gen-notes">${ic('spark', 12)}生成设计笔记</button>`}<button class="btn" data-act="close-modal">关闭</button></div>`)
   }
   async function openProductNote(id: string): Promise<void> {
@@ -5736,6 +5831,11 @@ ${mapLine}
     if (modPlatformSel !== null) {
       modPlatformSel.value = moduleFilterPlatform
       modPlatformSel.addEventListener('change', () => { moduleFilterPlatform = modPlatformSel.value; renderContent() })
+    }
+    const archivedToggle = $id<HTMLInputElement>('wb-show-archived')
+    if (archivedToggle !== null) {
+      archivedToggle.checked = showArchived
+      archivedToggle.addEventListener('change', () => { showArchived = archivedToggle.checked; void loadProducts().then(() => renderContent()) })
     }
     if (productTab === 'modules' || productTab === 'notes') ensureProductChat()
     $id<HTMLSelectElement>('wb-product-select')?.addEventListener('change', e => {
@@ -7038,6 +7138,7 @@ ${lines}`
       if (act === 'product-module-filter-clear') { moduleFilterKind = ''; moduleFilterPlatform = ''; renderContent(); return }
       if (act === 'pipeline-open') { openPipeline(); return }
       if (act === 'pipeline-run') { void runPipeline(); return }
+      if (act === 'pipeline-next') { void runPipelineNext(); return }
       if (act === 'archive-toggle') {
         const target = actEl.getAttribute('data-target') ?? ''
         const id = actEl.getAttribute('data-id') ?? ''

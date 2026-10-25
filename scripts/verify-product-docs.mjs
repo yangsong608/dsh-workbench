@@ -45,11 +45,11 @@ check('产品设计文档幂等（单份）', pd1.id === pd2.id && pd2.content =
 
 // 4) 归档
 await call('POST', '/archive', { target: 'modules', id: mod.id, archived: true })
-const mods = (await call('GET', `/modules?productId=${p.id}`)).body.modules
-check('模块归档写入 archivedAt', (mods[0].archivedAt ?? '') !== '', JSON.stringify(mods[0].archivedAt))
+const mods = (await call('GET', `/modules?productId=${p.id}&archived=1`)).body.modules
+check('模块归档写入 archivedAt 且默认列表已隐藏', (mods[0]?.archivedAt ?? '') !== '' && (await call('GET', `/modules?productId=${p.id}`)).body.modules.length === 0)
 await call('POST', '/archive', { target: 'notes', id: d1.id, archived: true })
-const notes = (await call('GET', '/notes')).body.notes
-check('笔记归档写入 archivedAt', (notes.find(n => n.id === d1.id)?.archivedAt ?? '') !== '')
+const notes = (await call('GET', '/notes?archived=1')).body.notes
+check('笔记归档写入 archivedAt 且默认列表已隐藏', (notes.find(n => n.id === d1.id)?.archivedAt ?? '') !== '' && !(await call('GET', '/notes')).body.notes.some(n => n.id === d1.id))
 
 console.log(`\n${pass}/${pass + fail} 通过`)
 process.exit(fail > 0 ? 1 : 0)

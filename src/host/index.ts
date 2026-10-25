@@ -1073,8 +1073,11 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /** 记事本：与任务/新闻分开的独立表。 */
-  listNotes(): any[] {
-    return this.db.prepare('SELECT * FROM notes ORDER BY pinned DESC, updated_at DESC').all().map(toNote)
+  listNotes(includeArchived = false): any[] {
+    const sql = includeArchived
+      ? 'SELECT * FROM notes ORDER BY pinned DESC, updated_at DESC'
+      : "SELECT * FROM notes WHERE archived_at = '' ORDER BY pinned DESC, updated_at DESC"
+    return this.db.prepare(sql).all().map(toNote)
   }
 
   listNotebooks(): any[] {
@@ -1128,7 +1131,11 @@ CREATE TABLE IF NOT EXISTS products (
     if (docKey === '' && kind !== '') {
       if (kind === 'module_design' && moduleId !== '') docKey = `md:${moduleId}`
       else if (kind === 'feature_design' && nodeId !== '') docKey = `fd:${mapId}:${nodeId}`
-      else if (kind === 'product_design') docKey = `pd:${str(input?.productId) || 'all'}`
+      else if (kind === 'product_design') {
+        /* 产品设计：单份用 pd:<产品>；分册用 pd:<产品>:<模块>，避免与模块设计文档的 md:<模块> 撞键 */
+        const pid = str(input?.productId) || 'all'
+        docKey = moduleId !== '' ? `pd:${pid}:${moduleId}` : `pd:${pid}`
+      }
     }
     let existing = this.db.prepare('SELECT id, created_at, file_path FROM notes WHERE id = ?').get(id) as any
     /* 有 doc_key 时按它找既有笔记：幂等，避免 AI 重跑堆重复文档 */
@@ -1172,8 +1179,11 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /* ---------- 产品（导图 / 设计笔记 / Demo） ---------- */
-  listProducts(): any[] {
-    return this.db.prepare('SELECT * FROM products ORDER BY updated_at DESC, id').all().map(toProduct)
+  listProducts(includeArchived = false): any[] {
+    const sql = includeArchived
+      ? 'SELECT * FROM products ORDER BY updated_at DESC, id'
+      : "SELECT * FROM products WHERE archived_at = '' ORDER BY updated_at DESC, id"
+    return this.db.prepare(sql).all().map(toProduct)
   }
 
   saveProduct(input: any): any {
@@ -1635,13 +1645,14 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /* ---------- 统一模块 / 业务 / 端 ---------- */
-  listModules(productId?: string, mapId?: string): any[] {
+  listModules(productId?: string, mapId?: string, includeArchived = false): any[] {
     const map = str(mapId)
+    const arch = includeArchived ? '' : " AND archived_at = ''"
     const rows = productId
       ? (map === '' || map === 'all'
-        ? this.db.prepare('SELECT * FROM modules WHERE product_id = ? ORDER BY created_at, id').all(productId)
-        : this.db.prepare('SELECT * FROM modules WHERE product_id = ? AND map_id = ? ORDER BY created_at, id').all(productId, map))
-      : this.db.prepare('SELECT * FROM modules ORDER BY created_at, id').all()
+        ? this.db.prepare(`SELECT * FROM modules WHERE product_id = ?${arch} ORDER BY created_at, id`).all(productId)
+        : this.db.prepare(`SELECT * FROM modules WHERE product_id = ? AND map_id = ?${arch} ORDER BY created_at, id`).all(productId, map))
+      : this.db.prepare(`SELECT * FROM modules WHERE 1=1${arch} ORDER BY created_at, id`).all()
     return rows.map(toModule)
   }
 
@@ -2192,8 +2203,10 @@ class JsonStore {
     return this.getExportConfig()
   }
 
-  listProducts(): any[] {
-    return this.products.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+  listProducts(includeArchived = false): any[] {
+    return this.products
+      .filter((p: any) => includeArchived || !p.archivedAt)
+      .slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
   }
 
   saveProduct(input: any): any {
@@ -2573,9 +2586,10 @@ class JsonStore {
     return note
   }
 
-  listModules(productId?: string, mapId?: string): any[] {
-    if (productId && mapId && mapId !== 'all') return this.modules.filter(m => m.productId === productId && m.mapId === mapId)
-    return this.modules.filter(m => productId === undefined || m.productId === productId)
+  listModules(productId?: string, mapId?: string, includeArchived = false): any[] {
+    const keep = (m: any): boolean => includeArchived || !m.archivedAt
+    if (productId && mapId && mapId !== 'all') return this.modules.filter(m => keep(m) && m.productId === productId && m.mapId === mapId)
+    return this.modules.filter(m => keep(m) && (productId === undefined || m.productId === productId))
   }
 
   saveModule(input: any): any {
@@ -4203,7 +4217,8 @@ export function apply(ctx: any): void {
           return
         }
         if (method === 'GET' && path === '/notes') {
-          send(res, 200, { notes: store.listNotes(), notebooks: store.listNotebooks() })
+          const withArchived = url.searchParams.get('archived') === '1'
+          send(res, 200, { notes: store.listNotes(withArchived), notebooks: store.listNotebooks() })
           return
         }
         if (method === 'GET' && path === '/notes/config') {
@@ -4271,11 +4286,12 @@ export function apply(ctx: any): void {
           send(res, 200, result); return
         }
         if (method === 'GET' && path === '/products') {
-          send(res, 200, { products: store.listProducts(), demos: store.listProductDemos(), modules: store.listModules(str(url.searchParams.get('productId'))) })
+          const withArchived = url.searchParams.get('archived') === '1'
+          send(res, 200, { products: store.listProducts(withArchived), demos: store.listProductDemos(), modules: store.listModules(str(url.searchParams.get('productId')), undefined, withArchived) })
           return
         }
         if (method === 'GET' && path === '/modules') {
-          send(res, 200, { modules: store.listModules(str(url.searchParams.get('productId')), str(url.searchParams.get('mapId'))) })
+          send(res, 200, { modules: store.listModules(str(url.searchParams.get('productId')), str(url.searchParams.get('mapId')), url.searchParams.get('archived') === '1') })
           return
         }
         if (method === 'POST' && path === '/modules') {
