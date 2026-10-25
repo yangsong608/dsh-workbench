@@ -66,6 +66,8 @@ interface FormState {
   urls: string[]
   images: Array<{ id?: string; dataUrl?: string; name?: string }>
   angles: string[]
+  /** 本次弹窗里新增的自定义角度（保存时写入灵感的 customAngles）。 */
+  customAngles?: Array<{ id: string; label: string }>
   urlDraft?: string
   mode: 'create' | 'edit' | 'generate'
 }
@@ -1328,6 +1330,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       urls: existing.filter(i => i.kind === 'url').map(i => i.url),
       images: existing.filter(i => i.kind === 'image').map(i => ({ id: i.id, name: i.filePath.split('/').pop() ?? '截图' })),
       angles: IDEA_ANGLES.map(a => a.id),
+      customAngles: mode === 'edit' ? customAngles().map(a => ({ id: a.id, label: a.label })) : [],
       mode,
     }
     renderForm()
@@ -1336,8 +1339,11 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
   function renderForm(): void {
     if (form === null) return
     const f = form
+    const customList = f.customAngles ?? []
     const angleButtons = IDEA_ANGLES.map(a => `<button type="button" class="${f.angles.includes(a.id) ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="${a.id}" title="${deps.esc(a.hint)}">${a.label}</button>`).join('')
       + `<button type="button" class="${f.angles.includes('cross') ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="cross">跨界类比</button>`
+      + customList.map(a => `<button type="button" class="${f.angles.includes(a.id) ? 'on' : ''}" data-idea-act="idea-modal-angle" data-id="${deps.esc(a.id)}" title="自定义角度"><span style="color:${angleColorFor(a.id)}">◆</span> ${deps.esc(a.label)} <span data-idea-act="idea-modal-angle-del" data-id="${deps.esc(a.id)}" title="移除此角度" style="opacity:.55;padding:0 2px">×</span></button>`).join('')
+      + `<button type="button" class="btn tiny" data-idea-act="idea-modal-angle-add" title="添加自定义发散维度">＋ 自定义</button>`
     const thumbs = f.images.map((img, index) => `<div class="idea-thumb" title="${deps.esc(img.name ?? '截图')}">${img.dataUrl ? `<img src="${img.dataUrl}" alt="">` : `<span>${deps.esc(img.name ?? '截图')}</span>`}<span class="x" data-idea-act="idea-modal-image-del" data-index="${index}">×</span></div>`).join('')
     const urls = f.urls.map((url, index) => `<div class="idea-url-row"><span>🔗 ${deps.esc(url)}</span><span class="x" data-idea-act="idea-modal-url-del" data-index="${index}">×</span></div>`).join('')
     deps.openModal(`<div class="idea-modal">
@@ -1426,6 +1432,17 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       } else {
         const res = await api(`/ideas/${ideaId}`, { method: 'PATCH', body: { title: f.title.trim(), brief: f.brief } })
         if (!res.ok) { deps.toast(`保存失败：${res.body?.message ?? res.status}`); return }
+      }
+      // 本次弹窗里新增的自定义维度：并入灵感的 customAngles（同名去重），再开始生成
+      const addedAngles = f.customAngles ?? []
+      if (addedAngles.length > 0) {
+        const merged = customAngles()
+        for (const angle of addedAngles) {
+          if (!merged.some(a => a.id === angle.id || a.label === angle.label)) merged.push({ id: angle.id, label: angle.label })
+        }
+        const angleRes = await api(`/ideas/${ideaId}`, { method: 'PATCH', body: { customAngles: merged.slice(0, 6).map(a => ({ id: a.id, label: a.label })) } })
+        if (!angleRes.ok) deps.toast(`自定义角度保存失败：${angleRes.body?.message ?? angleRes.status}`)
+        anglePref = f.angles.slice()
       }
       // 追加本次新增的输入（已存在的只在编辑模式里保留）
       for (const url of f.urls) {
@@ -1860,6 +1877,8 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
       case 'idea-modal-url-del': form?.urls.splice(Number(el.getAttribute('data-index') ?? 0), 1); renderForm(); break
       case 'idea-modal-image-del': form?.images.splice(Number(el.getAttribute('data-index') ?? 0), 1); renderForm(); break
       case 'idea-modal-angle': toggleFormAngle(el.getAttribute('data-id') ?? ''); break
+      case 'idea-modal-angle-add': void addFormCustomAngle(); break
+      case 'idea-modal-angle-del': removeFormCustomAngle(el.getAttribute('data-id') ?? ''); break
       case 'idea-modal-create': void submitForm(true, false); break
       case 'idea-modal-create-generate': void submitForm(true, true); break
       case 'idea-quick-text': void addQuickText(); break
@@ -1945,6 +1964,35 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     const index = form.angles.indexOf(id)
     if (index >= 0) form.angles.splice(index, 1)
     else form.angles.push(id)
+    renderForm()
+  }
+
+  /** 弹窗内新增自定义发散维度：立刻进本次表单（保存灵感时落到 customAngles）。 */
+  async function addFormCustomAngle(): Promise<void> {
+    if (form === null) return
+    const list = form.customAngles ?? []
+    const builtin = [...IDEA_ANGLES.map(a => a.label), '跨界类比']
+    if (list.length >= 6) { deps.toast('自定义角度最多 6 个'); return }
+    const input = await askText('自定义发散维度', '', '≤12 字，例如：合规、硬件形态、竞品')
+    if (input === null) return
+    const label = input.trim().slice(0, 12)
+    if (label === '') return
+    if (builtin.includes(label) || list.some(a => a.label === label) || customAngles().some(a => a.label === label)) {
+      deps.toast('这个角度已经存在')
+      return
+    }
+    const id = slugifyAngle(label)
+    form.customAngles = list.concat([{ id, label }])
+    if (!form.angles.includes(id)) form.angles.push(id)
+    renderForm()
+    deps.toast(`已添加维度「${label}」`)
+  }
+
+  /** 移除弹窗内的自定义维度（只影响本次表单，不删库里已有的）。 */
+  function removeFormCustomAngle(id: string): void {
+    if (form === null) return
+    form.customAngles = (form.customAngles ?? []).filter(a => a.id !== id)
+    form.angles = form.angles.filter(a => a !== id)
     renderForm()
   }
 
