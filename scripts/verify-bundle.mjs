@@ -67,6 +67,8 @@ check('测试客户端用例/执行/报告', client.includes('test-case-list') &
 check('测试 Bug 录入/回归', client.includes('createBugFromTest') && client.includes('regressionRun') && host.includes('/bugs/status'))
 check('AI 会话统一走 sessions（无刷新）', client.includes('dispatchToNewSession') && client.includes('createSessionIn') && client.includes('sendToSession') && !client.includes('location.reload'))
 check('AI 发送走公开 retain（ready 可 resolve）', client.includes('.retain(') && client.includes('gateway') && client.includes('会话打开超时'))
+check('流水线 8 阶段（含 UI/DEMO/测试文档/测试用例）', client.includes('测试设计文档（按角色）') && client.includes('测试用例') && client.includes('ui_design') && client.includes('test_cases') && client.includes('data-pipeline-stage='))
+check('测试计划与追溯链（T1/T2）', host.includes('CREATE TABLE IF NOT EXISTS test_plans') && host.includes('purgeStaleTestCases') && host.includes('markCasesForRegression') && host.includes('publishTestDoc'))
 check('团队 kickoff 按 feature 分支（不再套灵感模板）', host.includes('isDemo') && host.includes('workbench_demo_publish') && host.includes('「DEMO 页面生成」') && host.includes('ui.design') && host.includes('demo.build'))
 check('产品→UI/DEMO 跳转 + 团队 feature 兜底', client.includes('goto-ui') && client.includes('goto-demo') && client.includes('wb-ui-design-host') && client.includes('wb-demo-host') && host.includes('无团队绑定，回退到团队'))
 check('DEMO 视图（独立模块 demo.ts）', client.includes('wb-demo-host') && client.includes('createDemoView') && client.includes('layout_mode_immutable') === false && client.includes('ud-demo-wrap') && client.includes('/demos'))

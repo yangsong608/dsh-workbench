@@ -1233,7 +1233,7 @@ CREATE TABLE IF NOT EXISTS products (
     const notebookId = notebook?.id ? String(notebook.id) : this.defaultNotebookId()
     const nb = notebook?.id ? notebook : this.db.prepare('SELECT id, name, workspace_path FROM notebooks WHERE id = ?').get(notebookId) as any
     const mapId = str(input?.mapId)
-    const kind = ['module_design', 'product_design', 'feature_design'].includes(str(input?.kind)) ? str(input.kind) : ''
+    const kind = ['module_design', 'product_design', 'feature_design', 'ui_design', 'test_design'].includes(str(input?.kind)) ? str(input.kind) : ''
     const nodeId = str(input?.nodeId).slice(0, 64)
     const moduleId = str(input?.moduleId).slice(0, 64)
     /* doc_key：同 scope 的唯一键（重跑生成 = 更新同一篇）。未显式给出时按 kind+归属自动推导。 */
@@ -1573,6 +1573,101 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare("UPDATE test_cases SET plan_id = '' WHERE plan_id = ?").run(str(id))
     this.db.prepare("UPDATE test_runs SET plan_id = '' WHERE plan_id = ?").run(str(id))
     this.db.prepare('DELETE FROM test_plans WHERE id = ?').run(str(id))
+  }
+
+  /**
+   * T2/T6：校验用例的追溯链是否落在真实页面/区块上。
+   * 返回问题列表（空数组=通过）。用于「从文档提炼用例」后的自检。
+   */
+  validateTestCaseScope(projectId: string): Array<{ caseId: string; title: string; issue: string }> {
+    const cases = this.listTestCases(projectId)
+    const issues: Array<{ caseId: string; title: string; issue: string }> = []
+    /* 收集所有 UI 设计的页面/区块 id */
+    const pageBlocks = new Map<string, Set<string>>()
+    for (const design of this.listUiDesigns('', true)) {
+      for (const page of (design.pages ?? []) as any[]) {
+        const blocks = new Set<string>((page.blocks ?? []).map((b: any) => String(b.id ?? '')))
+        pageBlocks.set(String(page.id ?? ''), blocks)
+      }
+    }
+    for (const c of cases) {
+      if (c.uiDesignId !== '' && c.pageId === '') {
+        issues.push({ caseId: c.id, title: c.title, issue: '挂了 UI 设计但没有 pageId' })
+        continue
+      }
+      if (c.pageId !== '') {
+        const blocks = pageBlocks.get(c.pageId)
+        if (blocks === undefined) {
+          issues.push({ caseId: c.id, title: c.title, issue: `pageId「${c.pageId}」在 UI 设计里不存在` })
+          continue
+        }
+        if (c.blockId !== '' && !blocks.has(c.blockId)) {
+          issues.push({ caseId: c.id, title: c.title, issue: `blockId「${c.blockId}」不在页面 ${c.pageId} 下` })
+        }
+      }
+    }
+    return issues
+  }
+
+  /** 按页面统计用例覆盖度（T 覆盖度回流）。 */
+  testCoverageByPage(uiDesignId: string): Array<{ pageId: string; name: string; total: number; passed: number; failed: number; pending: number }> {
+    const design = this.getUiDesign(str(uiDesignId))
+    if (design === undefined) return []
+    const cases = this.listTestCases('').filter(c => c.uiDesignId === design.id)
+    /* 从最近一次执行里取每条用例的结果 */
+    const runs = this.db.prepare('SELECT results FROM test_runs WHERE project_id != \'\' ORDER BY created_at DESC LIMIT 20').all() as any[]
+    const lastResult = new Map<string, string>()
+    for (const run of runs) {
+      for (const r of (jsonList(run.results) as any[])) {
+        const cid = String(r?.caseId ?? '')
+        if (cid !== '' && !lastResult.has(cid)) lastResult.set(cid, String(r?.status ?? ''))
+      }
+    }
+    return ((design.pages ?? []) as any[]).map(page => {
+      const pageId = String(page.id ?? '')
+      const mine = cases.filter(c => c.pageId === pageId)
+      let passed = 0; let failed = 0; let pending = 0
+      for (const c of mine) {
+        const st = lastResult.get(c.id) ?? ''
+        if (st === 'pass') passed++
+        else if (st === 'fail') failed++
+        else pending++
+      }
+      return { pageId, name: String(page.name ?? pageId), total: mine.length, passed, failed, pending }
+    })
+  }
+
+  /**
+   * T6/T7：写入测试设计文档（按角色分组）→ 存 notes（kind=test_design）+ 关联计划。
+   * doc_key 幂等：td:<planId 或 projectId>，重跑更新同一篇。
+   */
+  publishTestDoc(input: any): any {
+    const projectId = str(input?.projectId)
+    if (projectId === '' || !this.db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) throw new Error('项目不存在')
+    const name = str(input?.name).trim().slice(0, 200) || '测试设计文档'
+    const content = str(input?.content)
+    if (content.trim() === '') throw new Error('测试设计文档内容不能为空')
+    const planId = str(input?.planId)
+    const docKey = planId !== '' ? `td:${planId}` : `td:${projectId}`
+    /* 幂等：同 doc_key 的旧笔记更新而不是新增 */
+    const existing = this.db.prepare("SELECT id FROM notes WHERE doc_key = ?").get(docKey) as any
+    const note = this.saveNote({
+      ...(existing !== undefined ? { id: String(existing.id) } : {}),
+      title: name, content,
+      tags: ['测试', '测试设计', ...(planId !== '' ? [`plan:${planId}`] : [])],
+      docKey, kind: 'test_design',
+      ...(str(input?.uiDesignId) !== '' ? { nodeId: '' } : {}),
+    } as any)
+    const noteId = String((note as any)?.id ?? '')
+    /* 关联到计划（若给了 planId） */
+    if (planId !== '' && noteId !== '') {
+      const plan = this.db.prepare('SELECT * FROM test_plans WHERE id = ?').get(planId) as any
+      if (plan !== undefined) {
+        this.db.prepare('UPDATE test_plans SET doc_note_id = ?, updated_at = ? WHERE id = ?')
+          .run(noteId, isoDateTimeSeconds(), planId)
+      }
+    }
+    return { noteId, name, docKey, planId }
   }
 
   /**
@@ -2181,7 +2276,7 @@ CREATE TABLE IF NOT EXISTS products (
     if (!product) throw new Error('产品不存在')
     const featureId = str(input?.featureId)
     const moduleId = str(input?.moduleId)
-    const kind = ['module_design', 'product_design', 'feature_design'].includes(str(input?.kind))
+    const kind = ['module_design', 'product_design', 'feature_design', 'ui_design', 'test_design'].includes(str(input?.kind))
       ? str(input.kind)
       : (moduleId !== '' ? 'module_design' : featureId !== '' ? 'feature_design' : 'product_design')
     const mapId = str(input?.mapId) || this.defaultMapId(product.id)
@@ -5378,6 +5473,13 @@ function registerTestCaseTool(ctx: any, store: SqliteStore | JsonStore): void {
         expected: { type: 'string' }, priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] },
         type: { type: 'string' }, source: { type: 'string' },
         moduleId: { type: 'string' }, platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'] },
+        /* 1.14 T2/T9：追溯链（页面+区块）、角色、计划、基线版本 */
+        planId: { type: 'string', description: '所属测试计划 id' },
+        uiDesignId: { type: 'string' }, demoId: { type: 'string' },
+        pageId: { type: 'string', description: 'UI 设计的页面 id（如 page-home）' },
+        blockId: { type: 'string', description: '页面内区块 id（可选）' },
+        role: { type: 'string', description: '角色（来自测试设计文档）' },
+        designVersion: { type: 'string', description: '生成时的基线版本（如 v3）' },
       },
       required: ['projectId', 'title', 'steps', 'expected'],
     },
@@ -5390,6 +5492,34 @@ function registerTestCaseTool(ctx: any, store: SqliteStore | JsonStore): void {
   if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(tool), 'workbench: test case tool')
   else ctx.tools.register(tool)
   console.log('[dsh-workbench] 已注册工具 workbench_testcase_publish')
+
+  /* 1.14 T6/T7：测试设计文档（按角色分组）→ 写笔记 + 关联计划 */
+  const docTool = {
+    name: 'workbench_test_doc_publish',
+    description: '写入「测试设计文档」（按角色分组的场景清单），并关联到测试计划。这是提炼用例前的第一段产物。',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        projectId: { type: 'string', description: '统一项目 id' },
+        planId: { type: 'string', description: '测试计划 id（可先建计划再写）' },
+        name: { type: 'string', description: '文档标题' },
+        productId: { type: 'string' }, uiDesignId: { type: 'string' }, demoId: { type: 'string' },
+        platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'] },
+        content: { type: 'string', description: 'Markdown 测试设计文档（6 节结构，按角色分组）' },
+      },
+      required: ['projectId', 'name', 'content'],
+    },
+    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `已写入测试设计文档「${v.name ?? ''}」` : `写入失败：${String(v?.error ?? '')}` }] },
+    async execute(args: any): Promise<any> {
+      try {
+        const result = await serialized(() => store.publishTestDoc(args))
+        return { ok: true, ...result }
+      } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
+    },
+  }
+  if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(docTool), 'workbench: test doc tool')
+  else ctx.tools.register(docTool)
+  console.log('[dsh-workbench] 已注册工具 workbench_test_doc_publish')
 }
 
 function registerTestFlowTools(ctx: any, store: SqliteStore | JsonStore): void {
@@ -5982,6 +6112,15 @@ export function apply(ctx: any): void {
             uiDesignId: str(body?.uiDesignId), demoId: str(body?.demoId), keepVersion: str(body?.keepVersion),
           }))
           send(res, 200, { ok: true, removed })
+          return
+        }
+        /* 用例追溯链校验 + 页面覆盖度（1.14 T2/覆盖度回流） */
+        if (method === 'GET' && path === '/tests/validate-scope') {
+          send(res, 200, { ok: true, issues: store.validateTestCaseScope(str(url.searchParams.get('projectId'))) })
+          return
+        }
+        if (method === 'GET' && path === '/tests/coverage') {
+          send(res, 200, { ok: true, pages: store.testCoverageByPage(str(url.searchParams.get('uiDesignId'))) })
           return
         }
         /* ---------- DEMO（A4） ---------- */

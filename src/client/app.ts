@@ -5284,7 +5284,8 @@ ${common}
    *  4) 交叉检查：产品设计 vs 模块设计 vs 导图三方对照，以导图为基准列出偏差并修复
    * 多导图：可勾选参与联合生成；导图改动后可只重跑受影响范围（增量）。
    */
-  type DesignStage = 'module_doc' | 'extract_module' | 'product_doc' | 'audit'
+  /* 1.14：追加 UI 设计 / DEMO / 测试设计文档 / 测试用例，共 8 阶段（决策 T9） */
+  type DesignStage = 'module_doc' | 'extract_module' | 'product_doc' | 'audit' | 'ui_design' | 'demo' | 'test_doc' | 'test_cases'
 
   interface PipelineOptions {
     stages: DesignStage[]
@@ -5344,15 +5345,83 @@ ${common}
 2. 产品设计文档结构：产品定位与目标用户 / 整体信息架构（跨模块）/ 核心用户旅程（跨模块串接）/ 模块职责矩阵 / 模块间依赖与数据流 / 分阶段路线图 / 全局性约束（权限·合规·性能）/ 风险与对策 / 整体验收标准。\n3. **严禁把模块设计文档整段复制过来**；产品级只写「跨模块」的内容，模块内的细节引用其文档即可。\n4. 与导图不一致的地方要显式列出「导图未覆盖，待确认」。\n5. 完成后汇报文档清单。`
     }
     return `【阶段 4／交叉检查与以导图为基准的修复】${product.name}\n\n你是产品架构评审人。请对「导图 ↔ 模块 ↔ 业务模块设计文档 ↔ 产品设计文档」做四方交叉检查。\n\n${base}\n\n已有模块设计文档：\n${docList}\n\n已知模块：\n${productModules.filter(m => m.productId === product.id).slice(0, 80).map(m => `- [${m.kind}] ${m.name}（id:${m.id}${m.noteId ? `, note:${m.noteId}` : '，无文档'}）`).join('\n') || '（尚无模块）'}\n\n要求：\n1. 逐项比对，列出四类偏差：\n   A. 导图有、但模块缺失（结构缺口）\n   B. 模块有、但导图没有（多余模块 / 未回填导图）\n   C. 有模块但无业务模块设计文档\n   D. 产品设计文档与模块设计文档互相矛盾（职责重叠、边界冲突、指标不一致）\n2. **以导图为唯一事实基准**：\n   - A 类：用 workbench_module_publish 补模块；若属结构遗漏，也建议在导图里补节点（给出节点 JSON 建议，不要直接改图）。\n   - B 类：标记为「待确认」，不要自删。\n   - C 类：为缺失模块补写 module_design 文档（workbench_product_note_publish, kind:"module_design", moduleId）。\n   - D 类：以导图为准改写文档，冲突处在文档里加「⚠️ 与模块 X 冲突，已按导图修正」。\n3. 最后输出一份检查报告（Markdown 表格：偏差类型 / 位置 / 处理动作 / 是否需人工确认），并用 workbench_product_note_publish 存为 kind:"product_design"、title:"${product.name} · 设计一致性检查报告"（moduleId 留空）。\n4. 绝不修改导图本身，只通过工具改模块与文档。`
+    if (stage === 'ui_design') {
+      return `【阶段 5／UI 设计（页面清单 + 规范）】${product.name}
+
+你是资深产品设计师。请把产品的详细设计转成**页面级 UI 设计**。
+
+${base}
+
+已有设计文档：
+${docList}
+
+要求：
+1. 先读设计文档与导图，规划 3–6 个页面（覆盖主流程；不要为凑数拆分）。
+2. 用工具 **workbench_ui_doc_publish** 一次写完，参数：
+   { projectId:"<当前统一项目 id，见下方>", productId:"${product.id}"${mapArg}, name:"${product.name} · UI 设计", themeId:"glass", platform:"all",
+     spec:"设计规范 Markdown（6 节：色彩/字体/间距与圆角/组件变体/密度与动效/无障碍）",
+     pages:[{ id:"page-xxx", name, route, platform, goal, blocks:[{id,role,desc}], states:[], interactions:[], dataNeeds:[] }] }
+3. 每页必须有 id（page-<slug>）、route、至少 1 个 block；block id 用 blk-<pageSlug>-<n>；role 用 header/nav/list/form/card/table/footer/empty。
+4. 只写页面结构与交互，不写代码。`
+    }
+    if (stage === 'demo') {
+      return `【阶段 6／DEMO 页面】${product.name}
+
+你是前端工程师 + 视觉设计师。请按 UI 设计产出可交互的 HTML。
+
+${base}
+
+要求：
+1. 先读 UI 设计（页面清单与主题令牌）。
+2. 用工具 **workbench_demo_publish** 交付：{ demoId:"<本次 DEMO id，见下方>", html / files }。
+3. 每个页面必须带 data-page="<pageId>" 锚点，值必须与页面清单一致。
+4. 零外部依赖（禁 <link>、禁 src="http…"）；视觉严格服从主题令牌。
+5. 页面数量必须与清单一致。`
+    }
+    if (stage === 'test_doc') {
+      return `【阶段 7／测试设计文档（按角色）】${product.name}
+
+你是资深 QA 架构师。请写一份**按角色分组**的测试设计文档，作为后续用例的唯一依据。
+
+${base}
+
+要求：
+1. 先读 UI 设计的页面清单（含区块/状态/交互）与产品设计文档。
+2. 从产品特性推导 **3–6 个角色**（如新用户/老用户/管理员…），不要为凑数造角色。
+3. 按角色分节列出测试场景，每个场景写：关注点 / 前置条件 / 预期方向 / **涉及页面与区块（用页面清单的真实 id）**。
+4. 用工具 **workbench_test_doc_publish** 写入，参数 { projectId:"<统一项目 id>", planId:"<计划 id，可为空>", name:"${product.name} · 测试设计", content:"完整 Markdown（6 节结构）" }。
+5. 只写测试设计，不写具体用例步骤。`
+    }
+    return `【阶段 8／测试用例（含页面/区块追溯）】${product.name}
+
+你是资深 QA。请把测试设计文档提炼成可逐条执行的结构化用例。
+
+${base}
+
+已有测试设计文档与产品文档：
+${docList}
+
+要求：
+1. 以**测试设计文档为唯一依据**，覆盖每个角色、每个场景。
+2. 用工具 **workbench_testcase_publish** 逐条写入，参数：
+   { projectId:"<测试项目 id>", planId, title:"<页面> · <角色> · <场景>（≤60 字）", precondition, steps:[3–8 步],
+     expected:"可验证的预期", priority:"P0|P1|P2|P3", type:"functional|boundary|exception|permission|regression",
+     role:"<文档里的角色>", uiDesignId, demoId, pageId:"<文档里提到的 page-xxx>", blockId:"<可选>",
+     platform:"pc|mobile|tablet|all", designVersion:"<当前 UI 设计/DEMO 版本>" }
+3. 每条用例必须有真实 pageId；步骤要具体到「点哪个按钮 / 填什么值」；expected 必须可验证。
+4. 异常与边界用例至少占 20%。
+5. 完成后调用 workbench_test_result_publish 不需要；只汇报写了多少条、覆盖了哪些页面。`
   }
 
   /** 统一执行器：团队派发 + 页内会话 + 进度（四阶段共用）。 */
   async function runDesignStage(stage: DesignStage, opts: PipelineOptions): Promise<void> {
     const product = productOf(productSelected)
     if (!product?.workspacePath) { toast('产品未关联工作区'); return }
-    const label = stage === 'module_doc' ? '业务模块设计文档' : stage === 'extract_module' ? '从文档提炼模块'
-      : stage === 'product_doc' ? '产品设计文档' : '交叉检查与修复'
+    const label = stageLabel(stage)
     const prompt = pipelinePrompt(stage, product, opts)
+    /* 1.14：按阶段选 feature（ui.design / demo.build / 其余走 product.design） */
+    const feature = stage === 'ui_design' ? 'ui.design' : stage === 'demo' ? 'demo.build'
+      : stage === 'test_doc' || stage === 'test_cases' ? 'test.design' : 'product.design'
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
     const progressKind: 'modules' | 'notes' = stage === 'extract_module' ? 'modules' : 'notes'
     productProgressKind = progressKind
@@ -5369,7 +5438,7 @@ ${common}
     chat?.setStatus('dispatching')
     const started = await startAgentDispatch({
       ideaId: '', runId: '', teamId: '',
-      feature: 'product.design',
+      feature,
       goal: prompt,
       ideaTitle: product.name,
       ideaBrief: product.description,
@@ -5448,6 +5517,10 @@ ${common}
         <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="extract_module" ${pipelineStages().includes('extract_module') ? 'checked' : ''}> 2. 从设计文档提炼模块</label>
         <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="product_doc" ${pipelineStages().includes('product_doc') ? 'checked' : ''}> 3. 产品设计文档</label>
         <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="audit" ${pipelineStages().includes('audit') ? 'checked' : ''}> 4. 交叉检查并按导图修复</label>
+        <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="ui_design" ${pipelineStages().includes('ui_design') ? 'checked' : ''}> 5. UI 设计（页面清单 + 规范）</label>
+        <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="demo" ${pipelineStages().includes('demo') ? 'checked' : ''}> 6. DEMO 页面（HTML）</label>
+        <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="test_doc" ${pipelineStages().includes('test_doc') ? 'checked' : ''}> 7. 测试设计文档（按角色）</label>
+        <label class="pipeline-stage"><input type="checkbox" data-pipeline-stage="test_cases" ${pipelineStages().includes('test_cases') ? 'checked' : ''}> 8. 测试用例（含页面/区块追溯）</label>
       </div>
       <div class="mfield"><label>③ 产品设计文档形态（当前 ${moduleCount} 个模块，建议：${suggested === 'single' ? '单份' : '按模块分册'}）</label>
         <select id="wb-pipeline-doc-mode">
@@ -5525,8 +5598,17 @@ ${common}
   }
 
   function stageLabel(stage: DesignStage): string {
-    return stage === 'module_doc' ? '业务模块设计文档' : stage === 'extract_module' ? '从文档提炼模块'
-      : stage === 'product_doc' ? '产品设计文档' : '交叉检查与修复'
+    const map: Record<DesignStage, string> = {
+      module_doc: '业务模块设计文档',
+      extract_module: '从文档提炼模块',
+      product_doc: '产品设计文档',
+      audit: '交叉检查与修复',
+      ui_design: 'UI 设计（页面清单）',
+      demo: 'DEMO 页面',
+      test_doc: '测试设计文档（按角色）',
+      test_cases: '测试用例',
+    }
+    return map[stage] ?? stage
   }
 
   /** 继续下一步（分步模式下使用剩余阶段）。 */
