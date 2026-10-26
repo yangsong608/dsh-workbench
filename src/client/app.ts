@@ -6590,7 +6590,18 @@ ${mapLine}
   function platformLabel(value: string): string { return value === 'pc' ? 'PC' : value === 'mobile' ? '移动' : value === 'tablet' ? '平板' : '全部' }
   function testProjectOf(id: string | null | undefined): TestProject | undefined { return testProjects.find(p => p.id === id) }
   function testCasesOf(project: TestProject | undefined): TestCase[] { return project ? testCases.filter(c => c.projectId === project.id) : [] }
-  function testRunsOf(project: TestProject | undefined): TestRun[] { return project ? testRuns.filter(r => r.projectId === project.id) : [] }
+  function testRunsOf(project: TestProject | undefined): TestRun[] {
+    if (project === undefined) return []
+    /* 1.14：优先展示「有结果」的最新一轮；空 running 记录（历史遗留）排到最后 */
+    return testRuns
+      .filter(r => r.projectId === project.id)
+      .sort((a, b) => {
+        const ra = (a.results ?? []).length > 0 ? 1 : 0
+        const rb = (b.results ?? []).length > 0 ? 1 : 0
+        if (ra !== rb) return rb - ra
+        return String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? ''))
+      })
+  }
   function testRunOf(id: string | null | undefined): TestRun | undefined { return testRuns.find(r => r.id === id) }
   function testResultOf(run: TestRun, caseId: string): TestResult { return run.results.find(r => r.caseId === caseId) ?? { caseId, status: 'pending', note: '', bugId: '' } }
   /** 有效结果 = 用例仍存在的结果（用例被删除后的孤儿结果不计入 KPI，与卡片展示一致）。 */
@@ -8005,8 +8016,11 @@ ${lines}`
       if (act === 'test-refresh') { void loadTests(); return }
       if (act === 'test-tab') {
         testTab = (actEl.getAttribute('data-tab') as 'plans' | 'cases' | 'run' | 'report' | 'deploy') ?? 'cases'
-        /* 1.14：切到计划 Tab 时必须重新拉计划与待回归队列 */
-        if (testTab === 'plans') { void loadTestPlans().then(() => { if (ui.view === 'test') renderContent() }); return }
+        /* 1.14：计划与待回归队列在计划/执行两个 Tab 都要用，切换时统一补载 */
+        if (testTab === 'plans' || testTab === 'run') {
+          void loadTestPlans().then(() => { if (ui.view === 'test') renderContent() })
+          return
+        }
         renderContent(); return
       }
       if (act === 'test-plan-new') { void createTestPlan(); return }
