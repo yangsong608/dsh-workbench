@@ -434,6 +434,12 @@ CREATE INDEX IF NOT EXISTS idx_demo_versions ON demo_versions(demo_id, seq);
 CREATE INDEX IF NOT EXISTS idx_demo_files ON demo_files(demo_id, version_id);
 CREATE INDEX IF NOT EXISTS idx_themes_project ON themes(project_id, builtin);
 /* 1.14：UI 设计版本序列（用于判断测试用例是否过期——只用 updatedAt 会把「改主题」也判定为过期） */
+/* 1.15 C3：笔记/设计文档版本（只保留最近 20 版，避免 notes 体积膨胀） */
+CREATE TABLE IF NOT EXISTS note_versions (
+  id TEXT PRIMARY KEY, note_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual', created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ui_design_versions (
   id TEXT PRIMARY KEY, design_id TEXT NOT NULL, seq INTEGER NOT NULL,
   label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual',
@@ -1292,7 +1298,13 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO notes(id, notebook_id, title, content, tags, pinned, file_path, map_id, kind, node_id, module_id, doc_key, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(finalId, notebookId, title, content, JSON.stringify(tags), pinned, filePath, mapId, kind, nodeId, moduleId, docKey, createdAt, now)
     }
-    return toNote(this.db.prepare('SELECT * FROM notes WHERE id = ?').get(finalId))
+    const saved = toNote(this.db.prepare('SELECT * FROM notes WHERE id = ?').get(finalId))
+    /* 1.15 C3：内容真的变了才建版本（改标签/收藏不建），只留最近 20 版 */
+    try {
+      this.createNoteVersionIfChanged(saved.id, String(saved.title ?? ''), String(saved.content ?? ''),
+        str(input?.versionSource) || 'manual')
+    } catch (cause) { console.warn(`[dsh-workbench] 笔记版本创建失败：${String(cause)}`) }
+    return saved
   }
 
   deleteNote(id: string): void {
@@ -1547,6 +1559,52 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
         .run(`bugp-${randomUUID().slice(0, 12)}`, String(project.name), String(project.workspace_path), basename(String(project.workspace_path)), String(project.id), ts, ts)
     }
+  }
+
+  /* ---------- 1.15 C3 笔记/设计文档版本 ---------- */
+
+  private static readonly NOTE_VERSION_KEEP = 20
+
+  private noteVersionRow(row: any): any {
+    return {
+      id: row.id, noteId: row.note_id, seq: Number(row.seq ?? 0),
+      title: row.title ?? '', content: row.content ?? '', source: row.source ?? 'manual', createdAt: row.created_at,
+    }
+  }
+
+  listNoteVersions(noteId: string): any[] {
+    return (this.db.prepare('SELECT * FROM note_versions WHERE note_id = ? ORDER BY seq DESC').all(str(noteId)) as any[])
+      .map(row => this.noteVersionRow(row))
+  }
+
+  /** 内容变化时才建版本（改标签/收藏不建）；只保留最近 N 版。 */
+  private createNoteVersionIfChanged(noteId: string, title: string, content: string, source: string): any | null {
+    const list = this.listNoteVersions(noteId)
+    const cur = list[0]
+    if (cur !== undefined && cur.content === content && cur.title === title) return null
+    const seq = (cur?.seq ?? 0) + 1
+    const id = `nv-${randomUUID().slice(0, 12)}`
+    this.db.prepare('INSERT INTO note_versions(id, note_id, seq, title, content, source, created_at) VALUES(?,?,?,?,?,?,?)')
+      .run(id, str(noteId), seq, str(title).slice(0, 200), str(content), source, isoDateTimeSeconds())
+    /* 裁剪：只留最近 N 版 */
+    const keep = SqliteStore.NOTE_VERSION_KEEP
+    const excess = this.db.prepare('SELECT id FROM note_versions WHERE note_id = ? ORDER BY seq DESC LIMIT -1 OFFSET ?').all(str(noteId), keep) as any[]
+    for (const row of excess) this.db.prepare('DELETE FROM note_versions WHERE id = ?').run(String(row.id))
+    return this.noteVersionRow(this.db.prepare('SELECT * FROM note_versions WHERE id = ?').get(id))
+  }
+
+  /** 回滚笔记到指定版本（回滚本身也建版本，历史不丢）。 */
+  rollbackNoteVersion(noteId: string, versionId: string): any {
+    const note = (this.listNotes(true) as any[]).find((n: any) => String(n.id) === str(noteId))
+    if (note === undefined) throw new Error('笔记不存在')
+    const ver = this.db.prepare('SELECT * FROM note_versions WHERE id = ? AND note_id = ?').get(str(versionId), str(noteId)) as any
+    if (ver === undefined) throw new Error('版本不存在')
+    const saved = this.saveNote({
+      id: note.id, title: ver.title, content: ver.content,
+      tags: note.tags, kind: note.kind, docKey: note.docKey,
+      versionSource: 'rollback',
+    } as any)
+    return saved
   }
 
   /* ---------- 1.15 通用归档（A1：11 类对象统一软删除） ---------- */
@@ -6313,6 +6371,18 @@ export function apply(ctx: any): void {
             uiDesignId: str(body?.uiDesignId), demoId: str(body?.demoId), keepVersion: str(body?.keepVersion),
           }))
           send(res, 200, { ok: true, removed })
+          return
+        }
+        /* ---------- 1.15 C3 笔记版本 ---------- */
+        if (method === 'GET' && /^\/notes\/[^/]+\/versions$/.test(path)) {
+          const nid = decodeURIComponent(path.split('/').filter(Boolean)[1])
+          send(res, 200, { ok: true, versions: store.listNoteVersions(nid) })
+          return
+        }
+        if (method === 'POST' && /^\/notes\/[^/]+\/versions\/[^/]+\/rollback$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const saved = await serialized(() => store.rollbackNoteVersion(decodeURIComponent(parts[1]), decodeURIComponent(parts[3])))
+          send(res, 200, { ok: true, note: saved })
           return
         }
         /* ---------- 1.15 通用归档（A1/A2） ---------- */
