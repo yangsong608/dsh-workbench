@@ -890,6 +890,11 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .note-doc-summary{display:flex;gap:12px;font-size:9.5px;color:var(--text-3);margin:0 0 7px;flex-wrap:wrap}
 .note-doc-summary b{color:var(--text-2)}
 .note-pipeline-running{font-size:9.5px;color:var(--accent-ink)}
+/* 素材源（网站 / 截图） */
+.ai-inputs{display:flex;flex-direction:column;gap:3px;max-height:120px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--panel-2)}
+.ai-input-row{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-2)}
+.ai-input-ico{flex-shrink:0}
+.ai-input-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3)}
 /* 设计流水线 */
 .pipeline-maps{display:flex;flex-direction:column;gap:4px;max-height:130px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--panel-2)}
 .pipeline-maps label,.pipeline-stage{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-2)}

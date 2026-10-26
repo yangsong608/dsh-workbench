@@ -22,7 +22,7 @@ import { createAgentModule } from './agent.js'
 import { syncDelta, syncMeta, syncPush, writeTombstone, type SyncHooks } from './sync.js'
 import {
   clampText as clampGraphText, normalizeProductGraph, parseExternalRef, productGraphBytes,
-  productGraphFromV1, productGraphToV1, PRODUCT_GRAPH_LIMITS, type ProductMapGraph,
+  productGraphFromV1, productGraphToV1, PRODUCT_GRAPH_LIMITS, type ProductMapGraph, type ProductMapNode,
 } from '../shared/product-graph-model.js'
 
 const require = createRequire(import.meta.url)
@@ -411,6 +411,15 @@ class SqliteStore {
       if (!columns('notes').includes(col)) this.db.exec(`ALTER TABLE notes ADD COLUMN ${col} ${sql}`)
     }
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_doc_key ON notes(doc_key) WHERE doc_key <> ''")
+    /* 产品素材源：竞品网站 / 截图 / 文字，作为 AI 提炼导图的输入（挂在产品上，可跨导图复用） */
+    this.db.exec(`CREATE TABLE IF NOT EXISTS product_inputs (
+      id TEXT PRIMARY KEY, product_id TEXT NOT NULL, map_id TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'url', url TEXT NOT NULL DEFAULT '', file_path TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL DEFAULT '',
+      width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    )`)
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_product_inputs ON product_inputs(product_id, created_at)')
     /* 归档：三处统一用 archived_at（空=未归档），列表默认过滤、可切换查看 */
     for (const table of ['products', 'modules', 'notes']) {
       if (!columns(table).includes('archived_at')) this.db.exec(`ALTER TABLE ${table} ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''`)
@@ -1344,6 +1353,40 @@ CREATE TABLE IF NOT EXISTS products (
     } catch (cause) { console.warn(`[dsh-workbench] 入向引用清理失败：${String(cause)}`) }
   }
 
+  /**
+   * 追加/更新一个导图节点（供 AI 工具调用）。
+   * 语义：按 parentId 挂到树上；同名同 kind 且同父则更新，否则新增。
+   * 走 saveMapDraft，保证 draft_rev / 版本镜像 / 文件镜像一致。
+   */
+  addMapNode(input: any): any {
+    const productId = str(input?.productId)
+    const mapId = str(input?.mapId)
+    const row = this.db.prepare('SELECT * FROM product_maps WHERE id = ? AND product_id = ?').get(mapId, productId) as any
+    if (row === undefined) throw new Error('导图不存在或不属于该产品')
+    const name = str(input?.name).trim().slice(0, 24)
+    if (name === '') throw new Error('节点名称不能为空')
+    const kind = (['module', 'business', 'feature', 'requirement'].includes(str(input?.kind)) ? str(input.kind) : 'feature') as ProductMapNode['kind']
+    const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input.platform) as NonNullable<ProductMapNode['platform']> : undefined
+    const parentId = str(input?.parentId)
+    const graph = mapGraphOf(row)
+    const existing = graph.nodes.find(n => n.label === name && n.kind === kind
+      && (parentId === '' ? (n.parentId === null || n.parentId === graph.rootId) : n.parentId === parentId))
+    if (existing !== undefined) {
+      if (platform !== undefined) existing.platform = platform as any
+      if (str(input?.detail) !== '') existing.detail = str(input.detail).slice(0, 200)
+      return this.saveMapDraft({ mapId, graph }).map
+    }
+    const id = `pn-${randomUUID().slice(2, 8)}`
+    graph.nodes.push({
+      id, label: name, kind,
+      parentId: parentId === '' ? graph.rootId : parentId,
+      status: 'kept',
+      ...(platform === undefined ? {} : { platform }),
+      ...(str(input?.detail) === '' ? {} : { detail: str(input.detail).slice(0, 200) }),
+    })
+    return this.saveMapDraft({ mapId, graph }).map
+  }
+
   /** 草稿保存：乐观并发（rev 不一致抛 draft_conflict，携带当前草稿）。 */
   saveMapDraft(input: any): { rev: number; map: any } {
     const mapId = str(input?.mapId)
@@ -1642,6 +1685,46 @@ CREATE TABLE IF NOT EXISTS products (
     if (!this.db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(str(id))) throw new Error('目标不存在')
     this.db.prepare(`UPDATE ${table} SET archived_at=?, updated_at=? WHERE id=?`)
       .run(archived ? isoDateTimeSeconds() : '', isoDateTimeSeconds(), str(id))
+  }
+
+  /* ---------- 产品素材源（网站 / 截图 / 文字）：AI 提炼导图的输入 ---------- */
+  listProductInputs(productId: string, mapId = ''): any[] {
+    const rows = str(mapId) === '' || str(mapId) === 'all'
+      ? this.db.prepare('SELECT * FROM product_inputs WHERE product_id = ? ORDER BY created_at').all(str(productId))
+      : this.db.prepare('SELECT * FROM product_inputs WHERE product_id = ? AND (map_id = ? OR map_id = \'\') ORDER BY created_at').all(str(productId), str(mapId))
+    return (rows as any[]).map(row => ({
+      id: row.id, productId: row.product_id, mapId: row.map_id ?? '', kind: row.kind,
+      url: row.url ?? '', filePath: row.file_path ?? '', note: row.note ?? '', label: row.label ?? '',
+      mime: row.mime ?? '', width: Number(row.width ?? 0), height: Number(row.height ?? 0),
+      size: Number(row.size ?? 0), createdAt: row.created_at,
+    }))
+  }
+
+  /** 新增素材：url / image（已落盘的截图）/ text */
+  addProductInput(input: any): any {
+    const productId = str(input?.productId)
+    if (!this.db.prepare('SELECT id FROM products WHERE id = ?').get(productId)) throw new Error('产品不存在')
+    const kind = ['url', 'image', 'text'].includes(str(input?.kind)) ? str(input?.kind) : 'url'
+    const url = str(input?.url).slice(0, 1000)
+    if (kind === 'url') {
+      if (!/^https?:\/\//i.test(url)) throw new Error('链接必须以 http(s):// 开头')
+    }
+    if (kind === 'image' && str(input?.filePath) === '') throw new Error('截图缺少文件路径')
+    const id = `pin-${randomUUID().slice(0, 12)}`
+    const now = isoDateTimeSeconds()
+    this.db.prepare(`INSERT INTO product_inputs(id, product_id, map_id, kind, url, file_path, note, label, mime, width, height, size, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, productId, str(input?.mapId), kind, url, str(input?.filePath), str(input?.note).slice(0, 2000),
+           str(input?.label).slice(0, 120), str(input?.mime).slice(0, 60),
+           Math.max(0, Math.round(Number(input?.width) || 0)), Math.max(0, Math.round(Number(input?.height) || 0)),
+           Math.max(0, Math.round(Number(input?.size) || 0)), now)
+    return this.listProductInputs(productId).find(item => item.id === id)
+  }
+
+  deleteProductInput(id: string): void {
+    const row = this.db.prepare('SELECT file_path FROM product_inputs WHERE id = ?').get(str(id)) as any
+    if (row?.file_path) removeFile(String(row.file_path))
+    this.db.prepare('DELETE FROM product_inputs WHERE id = ?').run(str(id))
   }
 
   /* ---------- 统一模块 / 业务 / 端 ---------- */
@@ -1982,6 +2065,7 @@ class JsonStore {
   private demoProgress: any[] = []
   private modules: any[] = []
   private productProgress: any[] = []
+  private productInputs: any[] = []
   private testProjects: any[] = []
   private testCases: any[] = []
   private testRuns: any[] = []
@@ -2007,6 +2091,7 @@ class JsonStore {
         this.productMaps = list(parsed.productMaps)
         this.productMapVersions = list(parsed.productMapVersions)
         this.productProgress = list(parsed.productProgress)
+        this.productInputs = list(parsed.productInputs)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
         this.testProjects = list(parsed.testProjects)
@@ -2055,7 +2140,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -2125,7 +2210,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
@@ -2628,6 +2713,57 @@ class JsonStore {
   deleteModule(id: string): void {
     this.modules = this.modules.filter(m => m.id !== str(id))
     this.persistNews()
+  }
+
+  listProductInputs(productId: string, mapId = ''): any[] {
+    const map = str(mapId)
+    return this.productInputs.filter(i => i.productId === str(productId) && (map === '' || map === 'all' || i.mapId === '' || i.mapId === map))
+  }
+
+  addProductInput(input: any): any {
+    const productId = str(input?.productId)
+    if (!this.products.some(p => p.id === productId)) throw new Error('产品不存在')
+    const kind = ['url', 'image', 'text'].includes(str(input?.kind)) ? str(input.kind) : 'url'
+    const url = str(input?.url).slice(0, 1000)
+    if (kind === 'url' && !/^https?:\/\//i.test(url)) throw new Error('链接必须以 http(s):// 开头')
+    if (kind === 'image' && str(input?.filePath) === '') throw new Error('截图缺少文件路径')
+    const item = {
+      id: `pin-${randomUUID().slice(0, 12)}`, productId, mapId: str(input?.mapId), kind, url,
+      filePath: str(input?.filePath), note: str(input?.note).slice(0, 2000), label: str(input?.label).slice(0, 120),
+      mime: str(input?.mime).slice(0, 60), width: Math.max(0, Math.round(Number(input?.width) || 0)),
+      height: Math.max(0, Math.round(Number(input?.height) || 0)), size: Math.max(0, Math.round(Number(input?.size) || 0)),
+      createdAt: isoDateTimeSeconds(),
+    }
+    this.productInputs.push(item)
+    this.persistNews()
+    return item
+  }
+
+  deleteProductInput(id: string): void {
+    const row = this.productInputs.find(i => i.id === str(id))
+    if (row?.filePath) removeFile(String(row.filePath))
+    this.productInputs = this.productInputs.filter(i => i.id !== str(id))
+    this.persistNews()
+  }
+
+  addMapNode(input: any): any {
+    const productId = str(input?.productId)
+    const mapId = str(input?.mapId)
+    const map = this.productMaps.find(m => m.id === mapId && m.productId === productId)
+    if (map === undefined) throw new Error('导图不存在或不属于该产品')
+    const name = str(input?.name).trim().slice(0, 24)
+    if (name === '') throw new Error('节点名称不能为空')
+    const kind = (['module', 'business', 'feature', 'requirement'].includes(str(input?.kind)) ? str(input.kind) : 'feature') as ProductMapNode['kind']
+    const parentId = str(input?.parentId)
+    const graph = this.jsonMapGraph(map)
+    const existing = graph.nodes.find(n => n.label === name && n.kind === kind
+      && (parentId === '' ? (n.parentId === null || n.parentId === graph.rootId) : n.parentId === parentId))
+    if (existing !== undefined) return this.saveMapDraft({ mapId, graph: this.jsonMapGraph(map) }).map
+    graph.nodes.push({
+      id: `pn-${randomUUID().slice(2, 8)}`, label: name, kind,
+      parentId: parentId === '' ? graph.rootId : parentId, status: 'kept',
+    })
+    return this.saveMapDraft({ mapId, graph }).map
   }
 
   /** 设计文档清单（JSON 兜底实现，语义与 SqliteStore 一致）。 */
@@ -3368,6 +3504,25 @@ function toProductMap(row: any): any {
   }
 }
 
+/** 截图 dataURL 解码：只放行常见图片格式，单张上限 2MB。 */
+function decodeImageDataUrl(dataUrl: unknown): { mime: string; buffer: Buffer } | null {
+  if (typeof dataUrl !== 'string') return null
+  const match = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl.trim())
+  if (!match) return null
+  const buffer = Buffer.from(match[2], 'base64')
+  if (buffer.length === 0 || buffer.length > 2 * 1024 * 1024) return null
+  const mime = match[1].toLowerCase()
+  if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mime)) return null
+  return { mime, buffer }
+}
+
+/** 产品素材目录：<工作区>/.dsh-workbench/products/<产品id>/inputs */
+function productInputDir(product: any): string {
+  const workspace = str(product?.workspace_path ?? product?.workspacePath).trim()
+  if (workspace === '') throw new Error('产品未关联工作区，无法保存截图')
+  return join(workspace, '.dsh-workbench', 'products', str(product?.id), 'inputs')
+}
+
 /** 导图 JSON 规范化：保证有 nodes 数组且至少有一个根节点。 */
 function normalizeMindmap(raw: unknown, fallbackName: string): string {
   try {
@@ -3772,6 +3927,35 @@ function registerModuleTool(ctx: any, store: SqliteStore | JsonStore): void {
   if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(progressTool), 'workbench: product progress tool')
   else ctx.tools.register(progressTool)
   console.log('[dsh-workbench] 已注册工具 product_progress_publish')
+
+  /* 导图节点写入：把 AI 从素材提炼出的结构落成导图节点（走草稿保存，版本与镜像一致） */
+  const nodeTool = {
+    name: 'workbench_map_node_publish',
+    description: '向产品导图写入一个节点（模块/业务/功能/需求）。AI 从素材提炼导图结构时逐条调用；同名同 kind 同父会更新而非新增。',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        productId: { type: 'string' },
+        mapId: { type: 'string', description: '目标导图 id（必填，不要新建导图）' },
+        parentId: { type: 'string', description: '父节点 id；根节点留空' },
+        name: { type: 'string', description: '节点名称（≤12 字）' },
+        kind: { type: 'string', enum: ['module', 'business', 'feature', 'requirement'] },
+        platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'] },
+        detail: { type: 'string', description: '一句话说明（可选，≤200 字）' },
+      },
+      required: ['productId', 'mapId', 'name', 'kind'],
+    },
+    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `已写入节点「${v.name ?? ''}」` : `写入失败：${String(v?.error ?? '')}` }] },
+    async execute(args: any): Promise<any> {
+      try {
+        const map = await serialized(() => store.addMapNode(args))
+        return { ok: true, name: args?.name, nodes: Array.isArray(map?.graph?.nodes) ? map.graph.nodes.length : undefined }
+      } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
+    },
+  }
+  if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(nodeTool), 'workbench: map node tool')
+  else ctx.tools.register(nodeTool)
+  console.log('[dsh-workbench] 已注册工具 workbench_map_node_publish')
 }
 
 function registerTestCaseTool(ctx: any, store: SqliteStore | JsonStore): void {
@@ -4309,6 +4493,39 @@ export function apply(ctx: any): void {
             if (existing !== undefined) { patch.productId = existing.productId; if (patch.mapId === undefined) patch.mapId = existing.mapId; if (patch.name === undefined) patch.name = existing.name; if (patch.kind === undefined) patch.kind = existing.kind; if (patch.platform === undefined) patch.platform = existing.platform }
           }
           send(res, 200, { ok: true, module: await serialized(() => store.saveModule(patch)) })
+          return
+        }
+        if (method === 'GET' && path === '/products/inputs') {
+          send(res, 200, { inputs: store.listProductInputs(str(url.searchParams.get('productId')), str(url.searchParams.get('mapId'))) })
+          return
+        }
+        if (method === 'POST' && path === '/products/inputs') {
+          const body = await readJson(req)
+          const kind = str(body?.kind) || 'url'
+          if (kind === 'image') {
+            const product = store.listProducts(true).find(p => p.id === str(body?.productId))
+            if (product === undefined) { send(res, 404, { error: 'product_not_found' }); return }
+            const decoded = decodeImageDataUrl(body?.dataUrl)
+            if (decoded === null) { send(res, 400, { error: 'image_invalid', message: '截图格式不支持或超过 2MB' }); return }
+            const dir = productInputDir(product)
+            mkdirSync(dir, { recursive: true })
+            const ext = decoded.mime === 'image/png' ? 'png' : decoded.mime === 'image/gif' ? 'gif' : decoded.mime === 'image/jpeg' ? 'jpg' : 'webp'
+            const file = join(dir, `${randomUUID().slice(0, 8)}.${ext}`)
+            writeFileSync(file, decoded.buffer)
+            const input = await serialized(() => store.addProductInput({
+              productId: body?.productId, mapId: body?.mapId, kind: 'image', filePath: file,
+              mime: decoded.mime, width: body?.width, height: body?.height, size: decoded.buffer.length,
+              label: body?.label, note: body?.note,
+            }))
+            send(res, 200, { ok: true, input })
+            return
+          }
+          send(res, 200, { ok: true, input: await serialized(() => store.addProductInput(body ?? {})) })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/products/inputs/')) {
+          await serialized(() => store.deleteProductInput(decodeURIComponent(path.slice('/products/inputs/'.length))))
+          send(res, 200, { ok: true })
           return
         }
         if (method === 'POST' && path === '/archive') {

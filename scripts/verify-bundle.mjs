@@ -67,6 +67,8 @@ check('测试客户端用例/执行/报告', client.includes('test-case-list') &
 check('测试 Bug 录入/回归', client.includes('createBugFromTest') && client.includes('regressionRun') && host.includes('/bugs/status'))
 check('AI 会话统一走 sessions（无刷新）', client.includes('dispatchToNewSession') && client.includes('createSessionIn') && client.includes('sendToSession') && !client.includes('location.reload'))
 check('AI 发送走公开 retain（ready 可 resolve）', client.includes('.retain(') && client.includes('gateway') && client.includes('会话打开超时'))
+check('导图素材源：多网站/截图 → AI 提炼', client.includes('wb-map-ai-field') && client.includes('pm-ai-add-url') && client.includes('addAiImages') && client.includes('createMapFromAi') && host.includes('product_inputs') && host.includes('decodeImageDataUrl'))
+check('导图节点写入工具', host.includes('workbench_map_node_publish') && host.includes('addMapNode'))
 check('导图双引擎（mind-elixir/ECharts）+ 节点右键菜单', client.includes('MindElixir') && client.includes('buildProductForceOption') && client.includes('pm-engine') && client.includes('ctx-item'))
 check('导图三来源（自建/大纲/灵感）+ 版本序列', client.includes('wb-map-source') && client.includes('parseOutlineToProductGraph') && client.includes('productGraphFromIdea') && client.includes('pm-version-archive') && client.includes('pm-version-rollback') && client.includes('pm-version-diff'))
 check('导图版本/草稿乐观锁（宿主）', host.includes('product_map_versions') && host.includes('saveMapDraft') && host.includes('draft_conflict') && host.includes('rollbackMapVersion') && host.includes('product_maps SET graph_json'))

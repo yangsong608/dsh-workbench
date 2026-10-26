@@ -4080,6 +4080,202 @@ ${common}
     } catch (cause) { toast(`导入失败：${String((cause as Error).message ?? cause)}`) }
   }
 
+  /* ------------------------------ 导图素材源：网站 / 截图 → AI 提炼 ------------------------------ */
+  /** 新建导图面板里暂存的素材（保存导图时才落库；截图先上传拿到 filePath）。 */
+  interface DraftInput { kind: 'url' | 'image' | 'text'; url?: string; filePath?: string; label?: string; width?: number; height?: number; size?: number; mime?: string }
+  let draftInputs: DraftInput[] = []
+
+  function renderAiInputs(): void {
+    const host = $id('wb-ai-inputs')
+    if (host === null) return
+    if (draftInputs.length === 0) { host.innerHTML = '<div class="muted" style="font-size:10px">还没有素材：加链接或选截图</div>'; return }
+    host.innerHTML = draftInputs.map((item, index) => {
+      if (item.kind === 'image') {
+        return `<div class="ai-input-row"><span class="ai-input-ico">🖼</span><span class="ai-input-text" title="${esc(item.filePath ?? '')}">${esc(item.label ?? '截图')}</span><button class="icon-btn" data-act="pm-ai-remove" data-index="${index}" title="移除">✕</button></div>`
+      }
+      return `<div class="ai-input-row"><span class="ai-input-ico">🔗</span><span class="ai-input-text" title="${esc(item.url ?? '')}">${esc(item.url ?? '')}</span><button class="icon-btn" data-act="pm-ai-remove" data-index="${index}" title="移除">✕</button></div>`
+    }).join('')
+  }
+
+  function addAiUrl(): void {
+    const el = $id<HTMLInputElement>('wb-ai-url')
+    const url = el?.value.trim() ?? ''
+    if (url === '') return
+    if (!/^https?:\/\//i.test(url)) { toast('链接必须以 http(s):// 开头'); return }
+    if (draftInputs.some(i => i.kind === 'url' && i.url === url)) { toast('这个链接已经加过'); return }
+    draftInputs.push({ kind: 'url', url })
+    if (el !== null) el.value = ''
+    void renderAiInputs()
+  }
+
+  function removeAiInput(index: number): void {
+    if (index < 0 || index >= draftInputs.length) return
+    const item = draftInputs[index]
+    /* 截图已落盘：移除时顺手删文件，避免垃圾 */
+    if (item.kind === 'image' && item.filePath !== undefined) {
+      void fetch(`${API}/products/inputs/${encodeURIComponent(item.filePath)}`, { method: 'DELETE' }).catch(() => undefined)
+    }
+    draftInputs.splice(index, 1)
+    void renderAiInputs()
+  }
+
+  /** 截图压缩到 ≤1600px webp 后上传落盘，返回 filePath。 */
+  async function addAiImages(files: FileList | null): Promise<void> {
+    const product = productOf(productSelected)
+    if (product === undefined) { toast('先选择产品'); return }
+    if (files === null) return
+    for (const file of Array.from(files).slice(0, 9 - draftInputs.filter(i => i.kind === 'image').length)) {
+      if (!file.type.startsWith('image/')) continue
+      try {
+        const compressed = await compressImageFile(file)
+        const res = await fetch(`${API}/products/inputs`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            productId: product.id, mapId: productMapSelected, kind: 'image',
+            dataUrl: compressed.dataUrl, label: compressed.name,
+            width: compressed.width, height: compressed.height,
+          }),
+        })
+        const data = await res.json().catch(() => ({})) as any
+        if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+        draftInputs.push({ kind: 'image', filePath: data.input?.filePath ?? '', label: compressed.name, width: compressed.width, height: compressed.height, mime: 'image/webp', size: data.input?.size ?? 0 })
+      } catch (cause) {
+        toast(`截图添加失败：${String((cause as Error).message ?? cause)}`)
+      }
+    }
+    void renderAiInputs()
+  }
+
+  /** 与灵感页同一套压缩策略（≤1600px，webp 0.86）。 */
+  function compressImageFile(file: File): Promise<{ dataUrl: string; name: string; width: number; height: number }> {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file)
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const max = 1600
+          const scale = Math.min(1, max / Math.max(img.width, img.height))
+          const width = Math.max(1, Math.round(img.width * scale))
+          const height = Math.max(1, Math.round(img.height * scale))
+          const canvas = document.createElement('canvas')
+          canvas.width = width
+          canvas.height = height
+          const ctx = canvas.getContext('2d')
+          if (ctx === null) throw new Error('没有 canvas 上下文')
+          ctx.drawImage(img, 0, 0, width, height)
+          const dataUrl = canvas.toDataURL('image/webp', 0.86)
+          URL.revokeObjectURL(url)
+          resolve({ dataUrl, name: file.name || '截图', width, height })
+        } catch (cause) { URL.revokeObjectURL(url); reject(cause) }
+      }
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败')) }
+      img.src = url
+    })
+  }
+
+  /** 素材 → 导图的提炼提示词（页面结构 / 信息架构 / 功能点 → 产品导图）。 */
+  function mapFromInputsPrompt(product: Product, name: string, inputs: DraftInput[]): string {
+    const lines = inputs.map(item => {
+      if (item.kind === 'image') return `- 截图：${item.filePath}（请先读取该图片，识别页面结构与功能）`
+      if (item.kind === 'url') return `- 链接：${item.url}（抓取页面内容；失败就跳过并说明）`
+      return `- 文字：${item.kind}`
+    }).join('\n')
+    const note = $id<HTMLTextAreaElement>('wb-ai-note')?.value.trim() ?? ''
+    return `产品导图提炼任务：${product.name}\n\n你是资深产品经理 + 竞品分析师。请根据下面这些素材，提炼出一张**产品思维导图**（产品 → 模块 → 业务 → 功能 / 需求）。\n\n产品：${product.name}\n简介：${product.description || '未填写'}\n产品 ID：${product.id}\n工作区：${product.workspacePath}\n本次新建导图名称：${name}\n${note === '' ? '' : `关注点：${note}\n`}\n【素材】\n${lines}\n\n要求：\n1. 先逐个读取素材：截图读图、链接抓正文；把每个素材里出现的页面/板块/功能列成清单，并标注来自哪个素材。\n2. **归纳共性**：多个素材重复出现的结构（如「登录」「订单」「个人中心」）合并为一个节点；只在单个素材出现的，标为待确认。\n3. 输出结构：根节点=产品名；一级=模块（按业务能力划分，不按页面）；二级=业务/子模块；三级=功能或需求。节点命名 ≤12 字，动词或名词短语。\n4. 用工具落库，唯一交付方式：对每个节点调用一次 workbench_map_node_publish，参数 { productId:"${product.id}", mapId:"${productMapSelected}", parentId:"父节点 id（根为空）", name:"节点名", kind:"module|business|feature|requirement", platform:"pc|mobile|tablet|all" }；**不要**用 write/edit 直接改文件，也不要新建导图（导图已创建好）。\n5. 全部写完调用 product_progress_publish 汇报（kind:"notes", status:"running"→"done"）。\n6. 完成后汇总：用了几个素材、提炼出多少节点、哪些是「单素材孤证」需人工确认。\n\n注意：本次请只输出导图结构，不要写设计文档。`
+  }
+
+  /** 保存导图时：把素材落库（截图已落盘，url 追加），并派发提炼任务。 */
+  async function createMapFromAi(product: Product, name: string, description: string): Promise<void> {
+    if (draftInputs.length === 0) { toast('至少添加一个链接或截图'); return }
+    try {
+      /* 1) 建空导图 */
+      const mapRes = await fetch(`${API}/products/maps`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ map: { productId: product.id, name, description, graph: emptyProductGraph(name), source: 'ai' } }),
+      })
+      const mapData = await mapRes.json().catch(() => ({})) as any
+      if (!mapRes.ok || mapData.map === undefined) throw new Error(mapData.message ?? `HTTP ${mapRes.status}`)
+      const map = mapData.map as ProductMap
+      /* 2) 素材落库（截图此前已上传，这里补 url） */
+      for (const item of draftInputs) {
+        if (item.kind === 'image') continue
+        await fetch(`${API}/products/inputs`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ productId: product.id, mapId: map.id, kind: 'url', url: item.url }),
+        }).catch(() => undefined)
+      }
+      draftInputs = []
+      productMapSelected = map.id
+      await loadProductMaps()
+      closeModal()
+      renderContent()
+      /* 3) 派发提炼：素材以「已落库」为准（截图+链接都在），提示词直接按库里的清单生成 */
+      const saved = await fetchInputsForPrompt(product.id, map.id)
+      const prompt = mapFromInputsPrompt(product, name, saved)
+      await runMapExtraction(map.id, product, prompt)
+    } catch (cause) { toast(`创建失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  async function fetchInputsForPrompt(productId: string, mapId: string): Promise<DraftInput[]> {
+    try {
+      const res = await fetch(`${API}/products/inputs?productId=${encodeURIComponent(productId)}&mapId=${encodeURIComponent(mapId)}`)
+      if (!res.ok) return []
+      const data = await res.json() as { inputs?: any[] }
+      return (data.inputs ?? []).map(i => ({ kind: i.kind, url: i.url, filePath: i.filePath, label: i.label }))
+    } catch { return [] }
+  }
+
+  /** 派发「素材 → 导图」提炼任务（团队 + 页内会话 + 进度）。 */
+  async function runMapExtraction(mapId: string, product: Product, prompt: string): Promise<void> {
+    try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
+    productProgressKind = 'notes'
+    try {
+      await fetch(`${API}/products/progress`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ progress: { productId: product.id, kind: 'notes', mapId, step: 0, total: 0, status: 'running', message: 'AI 正在分析素材…' } }),
+      })
+    } catch { /* ignore */ }
+    await loadProductProgress()
+    if (ui.view === 'product') renderContent()
+    const chat = ensureProductChat()
+    chat?.open({ teamName: '', dispatchId: '', sessionId: '', timeoutMs: 20 * 60 * 1000 })
+    chat?.setStatus('dispatching')
+    const started = await startAgentDispatch({
+      ideaId: '', runId: '', teamId: '',
+      feature: 'product.design',
+      goal: prompt,
+      ideaTitle: product.name,
+      ideaBrief: product.description,
+      workspacePath: product.workspacePath,
+      timeoutMs: 20 * 60 * 1000,
+      allowNoIdea: true,
+    } as any, {
+      event: event => chat?.ingest(event),
+      history: events => chat?.ingestMany(events),
+      status: (status, note) => {
+        chat?.setStatus(status, note)
+        if (status === 'done' || status === 'failed') {
+          void fetch(`${API}/products/progress`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ progress: { productId: product.id, kind: 'notes', mapId, step: 0, total: 0, status: status === 'done' ? 'done' : 'failed', message: status === 'done' ? '导图提炼完成' : (note ?? '提炼失败') } }),
+          }).then(() => Promise.all([loadProductProgress(), loadProductMaps()]))
+            .then(() => { if (ui.view === 'product') renderContent() }).catch(() => undefined)
+        }
+      },
+      team: projection => chat?.setTeam(teamStateOf(projection)),
+    })
+    if (started === null) {
+      toast('派发失败：提示词已复制，可粘贴到新会话')
+      return
+    }
+    productDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
+    chat?.open({ teamName: started.teamName, dispatchId: started.dispatchId, sessionId: started.sessionId, timeoutMs: started.timeoutMs })
+    chat?.setStatus('running')
+    watchProductDispatch()
+    startProductProgressPolling('notes')
+    toast(started.teamName === '' ? '已派发素材分析' : `已派发给「${started.teamName}」分析素材`)
+  }
+
   /* ------------------------------ 多导图（自建 / 导入 / 从灵感选择） ------------------------------ */
   function openMapEditor(id?: string): void {
     const product = productOf(productSelected)
@@ -4098,18 +4294,37 @@ ${common}
         <option value="blank">自建空白（画布直接编辑）</option>
         <option value="outline">导入 Markdown 大纲</option>
         <option value="idea">从灵感选择（整图 / 分支）</option>
+        <option value="ai">AI 分析素材生成（网站 / 截图）</option>
       </select></div>
       <div class="mfield"><label>名称</label><input id="wb-map-name" placeholder="例如：收银主链路 / 移动端 / V2 改版"></div>
       <div class="mfield"><label>说明（可选）</label><input id="wb-map-desc" placeholder="这张导图负责的范围（多张导图互为补充）"></div>
       <div class="mfield" id="wb-map-outline-field"><label>粘贴 Markdown 大纲</label><textarea id="wb-map-outline" rows="8" placeholder="- 登录（模块）&#10;  - 手机验证码登录"></textarea></div>
+      <div class="mfield" id="wb-map-ai-field">
+        <label>分析素材 <span style="font-weight:400">网站链接 / 截图，多个一起分析</span></label>
+        <div id="wb-ai-inputs" class="ai-inputs"></div>
+        <div class="m-row" style="margin-top:6px">
+          <div class="m-col"><input type="url" id="wb-ai-url" placeholder="https://竞品或参考网站"></div>
+          <button type="button" class="btn" data-act="pm-ai-add-url">添加链接</button>
+          <button type="button" class="btn" data-act="pm-ai-pick">＋ 截图</button>
+        </div>
+        <input type="file" id="wb-ai-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
+        <div class="m-field" style="margin-top:6px"><label style="font-size:10px">补充说明（可选：关注哪类产品问题）</label>
+          <textarea id="wb-ai-note" rows="2" placeholder="例如：只提炼预约与排班相关的能力；忽略营销页"></textarea></div>
+        <div class="m-hint">AI 会先读取每张截图 / 抓取每个链接，归纳出「产品 → 模块 → 业务 → 功能/需求」的导图；素材会保存到产品目录，之后可复用或重跑。</div>
+      </div>
       <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">每张导图有独立版本序列；文件镜像在 <code>.dsh-workbench/products/&lt;id&gt;/maps/&lt;mapId&gt;.json</code>。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" data-act="pm-map-save" data-id="">创建</button></div>`)
     const sel = $id<HTMLSelectElement>('wb-map-source')
     const syncOutlineField = (): void => {
-      const field = $id('wb-map-outline-field')
-      if (field instanceof HTMLElement) field.style.display = sel?.value === 'outline' ? '' : 'none'
+      const outlineField = $id('wb-map-outline-field')
+      if (outlineField instanceof HTMLElement) outlineField.style.display = sel?.value === 'outline' ? '' : 'none'
+      const aiField = $id('wb-map-ai-field')
+      if (aiField instanceof HTMLElement) aiField.style.display = sel?.value === 'ai' ? '' : 'none'
+      void renderAiInputs()
     }
     sel?.addEventListener('change', syncOutlineField)
+    const aiFile = $id<HTMLInputElement>('wb-ai-file')
+    if (aiFile !== null) aiFile.onchange = () => { void addAiImages(aiFile.files); aiFile.value = '' }
     syncOutlineField()
   }
   async function saveMapFromModal(id: string): Promise<void> {
@@ -4121,6 +4336,10 @@ ${common}
     if (id === '' && source === 'idea') {
       closeModal()
       void openIdeaImport(name)
+      return
+    }
+    if (id === '' && source === 'ai') {
+      void createMapFromAi(product, name, description)
       return
     }
     if (name === '') { toast('先填名称'); return }
@@ -7115,6 +7334,9 @@ ${lines}`
       if (act === 'pm-import-outline') { importMindmapOutline(); return }
       if (act === 'pm-import-run') { void runMindmapImport(); return }
       if (act === 'pm-import-idea') { void openIdeaImport(); return }
+      if (act === 'pm-ai-add-url') { addAiUrl(); return }
+      if (act === 'pm-ai-pick') { $id<HTMLInputElement>('wb-ai-file')?.click(); return }
+      if (act === 'pm-ai-remove') { removeAiInput(Number(actEl.getAttribute('data-index') ?? '-1')); return }
       if (act === 'idea-import-next') { void openIdeaVersionPick(); return }
       if (act === 'idea-import-run') { void runIdeaImport(actEl.getAttribute('data-idea') ?? '', actEl.getAttribute('data-name') ?? ''); return }
       if (act === 'pm-version-archive') { void archiveMapVersion(); return }

@@ -166,7 +166,11 @@
 
 - **一个产品多张导图**：每张独立成「图」（如「收银主链路」「移动端」「V2 改版」），互为补充；每张存库并镜像到 `<工作区>/.dsh-workbench/products/<id>/maps/<mapId>.json`。
   - 笔记 / 模块 / Demo 都带 `mapId`；其他页签可用「全部导图 / 单张导图」切换范围。
-- **三条来源**：自建空白 / 导入 Markdown 大纲（可选未标记节点默认类型）/ **从灵感选择**（整图或分支子树，映射：方向→模块/业务、点子→功能、问题→需求(待定)、风险→需求(风险标签)，记 `source_ref` 溯源）。
+- **四条来源**：
+  - 自建空白；
+  - 导入 Markdown 大纲（可选未标记节点的默认类型）；
+  - **从灵感选择**（整图或分支子树，映射：方向→模块/业务、点子→功能、问题→需求(待定)、风险→需求(风险标签)，记 `source_ref` 溯源）；
+  - **AI 分析素材生成**：粘贴多个网站链接 + 上传多张截图（≤1600px webp 压缩），AI 逐个读取后归纳出「产品→模块→业务→功能/需求」，标注单素材孤证；素材存到 `<工作区>/.dsh-workbench/products/<id>/inputs/`，可复用重跑。
 - **双引擎画布**：编辑用 **mind-elixir**（Tab/Enter 加节点、F2 改名、拖拽换父级、折叠、撤销重做），关系用 **ECharts graph force**（分类配色、虚线关联、拖拽、缩放、悬停邻接高亮、跨图引用伪节点）。两者都是 vendor 资产，进入视图才加载。
 - **节点模型 v2**：`{v:2, rootId, nodes[], edges[]}`，节点 `kind` 对齐模块四级（root/module/business/feature/requirement），带 `platform` / `status`（采纳·待定·放弃）/ `tags` / `detail`；tree 边表达层级，relate 边表达关联。
 - **版本序列**：每张导图独立 `product_map_versions`（上限 50、至少留 1）。可**存档版本**、**A/B 对比**（新增/删除/改名 + 边变化）、**只读预览**、**回滚**（=新建 rollback 版本，历史不丢）、删除。草稿走乐观锁 `draft_rev`，冲突返回 409。
@@ -213,6 +217,7 @@
 
 | 工具 | 用途 |
 | --- | --- |
+| `workbench_map_node_publish` | 向导图写节点（供素材提炼使用；同名同 kind 同父幂等） |
 | `workbench_module_publish` | 写模块/业务/功能/需求（幂等 upsert，支持 `nodeId`） |
 | `workbench_product_note_publish` | 写设计文档（`kind` + `moduleId`/`featureId`，自动落 `doc_key`，回写模块 `note_id`/`status`） |
 | `product_progress_publish` | 模块/笔记生成进度上报 |
