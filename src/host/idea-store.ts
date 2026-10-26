@@ -162,6 +162,7 @@ export class IdeaStore {
       name: row.name,
       workspacePath: row.workspace_path,
       workspaceName: row.workspace_name,
+      projectId: row.project_id ?? '',
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))
@@ -171,6 +172,9 @@ export class IdeaStore {
    * 保存项目。同名（同工作区路径）视为同一个项目，避免「门户新增一次、灵感再建一次」。
    * 返回 created 标记，供前端提示「已从门户同步 N 个」。
    */
+  /** 由宿主注入：把「工作区 + 名称」映射到统一项目 id（四域共用一份项目清单）。 */
+  ensureUnifiedProject?: (workspacePath: string, name: string) => string
+
   saveProject(input: AnyMap): { project: AnyMap; created: boolean } {
     const ts = now()
     const name = String(input?.name ?? '').trim().slice(0, 60) || '未命名项目'
@@ -186,12 +190,13 @@ export class IdeaStore {
       : undefined
     const existing = byId ?? byPath
     const id = String(existing?.id ?? (wantedId !== '' ? wantedId : `ip-${randomUUID().slice(0, 8)}`))
+    const unifiedId = this.ensureUnifiedProject?.(workspacePath, name) ?? ''
     if (existing !== undefined) {
-      this.db.prepare('UPDATE idea_projects SET name=?, workspace_path=?, workspace_name=?, updated_at=? WHERE id=?')
-        .run(name, workspacePath, workspaceName, ts, id)
+      this.db.prepare('UPDATE idea_projects SET name=?, workspace_path=?, workspace_name=?, project_id=?, updated_at=? WHERE id=?')
+        .run(name, workspacePath, workspaceName, unifiedId, ts, id)
     } else {
-      this.db.prepare('INSERT INTO idea_projects(id, name, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?)')
-        .run(id, name, workspacePath, workspaceName, ts, ts)
+      this.db.prepare('INSERT INTO idea_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+        .run(id, name, workspacePath, workspaceName, unifiedId, ts, ts)
     }
     return { project: this.listProjects().find((p: AnyMap) => p.id === id) ?? {}, created: existing === undefined }
   }

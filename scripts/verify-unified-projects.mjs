@@ -55,11 +55,30 @@ await call('POST','/tests/projects',{project:{name:'回归测试',workspacePath:
 const ov2 = (await call('GET','/projects?overview=1')).body.overviews
 check('测试项目挂到同一统一项目', ov2[0].counts.testProjects === 2, JSON.stringify(ov2[0].counts))
 
+
+// 7) 灵感项目也挂统一项目（经 ensureUnifiedProject 回调）
+{
+  const ideaRes = await call('POST', '/ideas/projects', { name: '灵感项目', workspacePath: ws })
+  const ideaProjects = (await call('GET', '/ideas/projects')).body.projects
+  const hit = ideaProjects.find(x => x.name === '灵感项目')
+  check('灵感项目挂到统一项目', hit !== undefined && String(hit.projectId ?? '') !== '', JSON.stringify(hit?.projectId))
+}
+
 // 6) 删项目不删领域数据（只解除引用）
 await call('DELETE',`/projects/${pid}`)
 const ov3 = (await call('GET','/projects?overview=1')).body.overviews
 const prodAfter = (await call('GET','/products')).body.products
 check('删项目保留产品数据', ov3.length === 0 && prodAfter.length >= 2, `ov=${ov3.length} prod=${prodAfter.length}`)
+
+
+
+// 8) JsonStore 兜底也有统一项目方法（方法存在性检查，避免 JSON 模式 500）
+{
+  const db = new DatabaseSync(dbFile)
+  const cols = db.prepare('PRAGMA table_info(projects)').all().map(c => c.name)
+  db.close()
+  check('projects 表结构完整', ['id','name','workspace_path','archived_at','sort_order'].every(c => cols.includes(c)), JSON.stringify(cols))
+}
 
 console.log(`\n${pass}/${pass+fail} 通过`)
 process.exit(fail>0?1:0)

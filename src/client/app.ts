@@ -53,6 +53,8 @@ type BugSeverity = 'blocker' | 'major' | 'minor' | 'trivial'
 type BugPriority = 'P0' | 'P1' | 'P2' | 'P3'
 interface BugProject {
   id: string; name: string; workspacePath: string; workspaceName: string
+  /** 统一项目 id（四域共用） */
+  projectId?: string
   count?: number; createdAt: string; updatedAt: string
 }
 interface Bug {
@@ -63,6 +65,8 @@ interface Bug {
 }
 interface TestProject {
   id: string; name: string; description: string; workspacePath: string; productId: string; moduleId: string; platform: string; bugProjectId: string
+  /** 统一项目 id（四域共用） */
+  projectId?: string
   deployMode: 'local' | 'ssh'; sshHost: string; remoteDir: string; image: string; containerName: string
   hostPort: string; containerPort: string; caseCount?: number; runCount?: number; createdAt: string; updatedAt: string
 }
@@ -81,6 +85,8 @@ interface Product {
   id: string; name: string; description: string; workspacePath: string; notebookId: string
   mindmap: string; styles: string[]; createdAt: string; updatedAt: string
   archivedAt?: string
+  /** 统一项目 id（四域共用） */
+  projectId?: string
 }
 /** 一张导图：一个产品可有多张（互为补充），每张导图有独立版本序列。 */
 interface ProductMap {
@@ -539,29 +545,39 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       return card
     }
     /* 以统一项目为骨架：四域（产品 / Bug / 测试 / 灵感）共用一份项目清单，
-       避免「门户建了产品、Bug 页还要再建项目」这类分裂。无工作区的项目单独成卡。 */
-    const unified = new Map<string, string>()
+       避免「门户建了产品、Bug 页还要再建项目」这类分裂。
+       key 规则：有工作区用 workspacePath（与任务/Bug/测试一致），无工作区用 prj:<id>，
+       并把「统一项目 id → 卡片」记下来，供各域对象按 projectId 归位（避免重复成卡）。 */
+    const byProjectId = new Map<string, ProjectCard>()
     for (const project of projects) {
-      unified.set(project.id, project.name)
       const card = ensure(project.workspacePath || `prj:${project.id}`)
       card.name = project.name
       card.projectId = project.id
+      byProjectId.set(project.id, card)
+    }
+    /* 领域对象优先按 projectId 找到自己的卡；找不到再按路径新建（兼容未迁移的旧数据） */
+    const cardFor = (workspacePath: string, projectId?: string): ProjectCard => {
+      const hit = projectId !== undefined && projectId !== '' ? byProjectId.get(projectId) : undefined
+      if (hit !== undefined) return hit
+      const card = ensure(workspacePath || `prj:${projectId ?? Math.random().toString(36).slice(2, 8)}`)
+      if (projectId !== undefined && projectId !== '') { card.projectId = projectId; byProjectId.set(projectId, card) }
+      return card
     }
     for (const product of products) {
-      if (!product.workspacePath) continue
-      const card = ensure(product.workspacePath)
+      if (!product.workspacePath && !product.projectId) continue
+      const card = cardFor(product.workspacePath, product.projectId)
       card.product = product
       if (card.name === '') card.name = product.name
     }
     for (const project of bugProjects) {
-      if (!project.workspacePath) continue
-      const card = ensure(project.workspacePath)
+      if (!project.workspacePath && !project.projectId) continue
+      const card = cardFor(project.workspacePath, project.projectId)
       card.bugProject = project
       if (card.name === '') card.name = project.name
     }
     for (const project of testProjects) {
-      if (!project.workspacePath) continue
-      const card = ensure(project.workspacePath)
+      if (!project.workspacePath && !project.projectId) continue
+      const card = cardFor(project.workspacePath, project.projectId)
       card.tests.push(project)
       if (card.name === '') card.name = project.name
     }
@@ -6054,11 +6070,11 @@ ${mapLine}
         const list = bugDispatchList()
         if (list.length === 0) { toast('没有可提交的 Bug'); return }
         // 一个会话只能绑定一个工作区，跨项目时只提交首个项目的 Bug
-        const projects = Array.from(new Set(list.map(b => b.projectId)))
-        const project = bugProjectOf(projects[0])
+        const projectIds = Array.from(new Set(list.map(b => b.projectId)))
+        const project = bugProjectOf(projectIds[0])
         if (!project?.workspacePath) { toast('项目还没关联工作区，请先编辑项目'); return }
-        const submitted = projects.length > 1 ? list.filter(b => b.projectId === projects[0]) : list
-        if (projects.length > 1) toast(`选中的 Bug 跨 ${projects.length} 个项目，本次仅提交「${project.name}」的 ${submitted.length} 条`)
+        const submitted = projectIds.length > 1 ? list.filter(b => b.projectId === projectIds[0]) : list
+        if (projectIds.length > 1) toast(`选中的 Bug 跨 ${projectIds.length} 个项目，本次仅提交「${project.name}」的 ${submitted.length} 条`)
         await queueRepairSession(project, prompt, submitted.map(b => b.id))
         return
       }

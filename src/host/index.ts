@@ -1275,7 +1275,9 @@ CREATE TABLE IF NOT EXISTS products (
 
   /** 按工作区路径取/建统一项目（产品、Bug、测试、灵感建域对象时共用）。 */
   ensureProject(workspacePath: string, name: string): any {
-    const ws = normalizeWorkspacePath(workspacePath)
+    /* 路径校验失败时降级为「无工作区项目」，避免历史坏路径把产品/测试的保存整体搞挂 */
+    let ws = ''
+    try { ws = normalizeWorkspacePath(workspacePath) } catch { ws = '' }
     const existing = ws !== ''
       ? this.db.prepare('SELECT * FROM projects WHERE workspace_path = ?').get(ws) as any
       : this.db.prepare("SELECT * FROM projects WHERE workspace_path = '' AND name = ?").get(str(name).slice(0, 100)) as any
@@ -2239,6 +2241,7 @@ class JsonStore {
   private modules: any[] = []
   private productProgress: any[] = []
   private productInputs: any[] = []
+  private unifiedProjects: any[] = []
   private testProjects: any[] = []
   private testCases: any[] = []
   private testRuns: any[] = []
@@ -2265,6 +2268,7 @@ class JsonStore {
         this.productMapVersions = list(parsed.productMapVersions)
         this.productProgress = list(parsed.productProgress)
         this.productInputs = list(parsed.productInputs)
+        this.unifiedProjects = list(parsed.unifiedProjects)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
         this.testProjects = list(parsed.testProjects)
@@ -2313,7 +2317,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -2383,7 +2387,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
@@ -2886,6 +2890,72 @@ class JsonStore {
   deleteModule(id: string): void {
     this.modules = this.modules.filter(m => m.id !== str(id))
     this.persistNews()
+  }
+
+  /* ---------- 统一项目（JSON 兜底实现） ---------- */
+  listProjects(includeArchived = false): any[] {
+    return (this.unifiedProjects ?? [])
+      .filter((p: any) => includeArchived || !p.archivedAt)
+      .slice().sort((a: any, b: any) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.createdAt).localeCompare(String(b.createdAt)))
+  }
+
+  getProject(id: string): any | undefined {
+    return (this.unifiedProjects ?? []).find((p: any) => p.id === str(id))
+  }
+
+  ensureProject(workspacePath: string, name: string): any {
+    const raw = str(workspacePath).trim()
+    const ws = raw
+    const existing = ws !== ''
+      ? (this.unifiedProjects ?? []).find((p: any) => p.workspacePath === ws)
+      : (this.unifiedProjects ?? []).find((p: any) => p.workspacePath === '' && p.name === str(name).slice(0, 100))
+    if (existing !== undefined) return existing
+    const now = isoDateTimeSeconds()
+    const project = {
+      id: `prj-${randomUUID().slice(0, 12)}`, name: str(name).slice(0, 100) || '未命名项目', description: '',
+      workspacePath: ws, workspaceName: ws === '' ? '' : basename(ws), archivedAt: '', sortOrder: 0,
+      createdAt: now, updatedAt: now,
+    }
+    this.unifiedProjects = this.unifiedProjects ?? []
+    this.unifiedProjects.push(project)
+    this.persistNews()
+    return project
+  }
+
+  saveProject(input: any): any {
+    const now = isoDateTimeSeconds()
+    const id = str(input?.id)
+    const name = str(input?.name).trim().slice(0, 100)
+    if (name === '') throw new Error('项目名称不能为空')
+    this.unifiedProjects = this.unifiedProjects ?? []
+    const existing = id !== '' ? this.unifiedProjects.find((p: any) => p.id === id) : undefined
+    if (existing !== undefined) {
+      Object.assign(existing, { name, description: str(input?.description).slice(0, 5000), workspacePath: str(input?.workspacePath), workspaceName: basename(str(input?.workspacePath)), updatedAt: now })
+      this.persistNews()
+      return existing
+    }
+    const project = { id: id || `prj-${randomUUID().slice(0, 12)}`, name, description: str(input?.description).slice(0, 5000), workspacePath: str(input?.workspacePath), workspaceName: basename(str(input?.workspacePath)), archivedAt: '', sortOrder: 0, createdAt: now, updatedAt: now }
+    this.unifiedProjects.push(project)
+    this.persistNews()
+    return project
+  }
+
+  deleteProject(id: string): void {
+    this.unifiedProjects = (this.unifiedProjects ?? []).filter((p: any) => p.id !== str(id))
+    for (const item of [...this.products, ...this.bugProjects, ...this.testProjects]) {
+      if (item.projectId === str(id)) item.projectId = ''
+    }
+    this.persistNews()
+  }
+
+  listProjectOverviews(includeArchived = false): any[] {
+    return this.listProjects(includeArchived).map((project: any) => {
+      const products = this.products.filter((p: any) => p.projectId === project.id)
+      const bugProjects = this.bugProjects.filter((p: any) => p.projectId === project.id)
+      const testProjects = this.testProjects.filter((p: any) => p.projectId === project.id)
+      const bugs = this.bugs.filter((b: any) => bugProjects.some((p: any) => p.id === b.projectId))
+      return { project, products, bugProjects, testProjects, counts: { products: products.length, bugProjects: bugProjects.length, testProjects: testProjects.length, bugs: bugs.length } }
+    })
   }
 
   listProductInputs(productId: string, mapId = ''): any[] {
@@ -4474,6 +4544,10 @@ export function apply(ctx: any): void {
         /* run 结束后同步关闭对应团队派发：否则它会一直挂在 running，让该灵感后续派发永远 409。 */
         onRunClosed: (runId, status) => {
           try { agentModule?.store.finishDispatchByRun(runId, status) } catch (cause) { console.warn('[dsh-workbench] 派发收尾失败：', String(cause)) }
+        },
+        /* 灵感项目也挂到统一项目：同一工作区共用一份项目，四域不再各自维护清单 */
+        ensureUnifiedProject: (workspacePath: string, name: string) => {
+          try { return (store as any).ensureProject?.(workspacePath, name)?.id ?? '' } catch { return '' }
         },
       })
     }

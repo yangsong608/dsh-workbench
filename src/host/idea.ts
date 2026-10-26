@@ -34,6 +34,8 @@ export interface IdeaModuleOptions {
   prefix: string
   /** run 结束（finalize / cancel / 工具收尾）时回调，让团队派发同步收尾，避免长期占着 409。 */
   onRunClosed?: (runId: string, status: 'done' | 'failed' | 'cancelled') => void
+  /** 把「工作区 + 名称」映射到统一项目 id（灵感项目与产品/Bug/测试共用一份项目清单）。 */
+  ensureUnifiedProject?: (workspacePath: string, name: string) => string
 }
 
 export interface IdeaModule {
@@ -171,6 +173,7 @@ ${angleLine(custom)}
 export function createIdeaModule(options: IdeaModuleOptions): IdeaModule | null {
   if (options.db === null || options.db === undefined) return null
   const store = new IdeaStore(options.db)
+  if (typeof options.ensureUnifiedProject === 'function') store.ensureUnifiedProject = options.ensureUnifiedProject
   const prefix = options.prefix
 
   function handle(req: RouteRequest, res: RouteResponse, path: string, method: string, url: URL): Promise<boolean> {
