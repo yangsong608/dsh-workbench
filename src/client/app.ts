@@ -250,6 +250,7 @@ function nf(n: number): string { return Number.isFinite(n) ? String(n) : '0' }
 const PATHS: Record<string, string> = {
   logo: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><path d="M14 17h6M17 14v6"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  layout: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M9 9v11"/>',
   home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
   inbox: '<path d="M4 5h16v14H4z"/><path d="M4 13h4l2 3h4l2-3h4"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
@@ -1170,7 +1171,9 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       { view: 'bugs', title: 'Bug 管理', desc: '缺陷看板与 AI 修复', icon: 'bug', count: scopeBugs, tile: '#d83b3b' },
       { view: 'test', title: '测试', desc: '用例 / 执行 / 回归', icon: 'test', count: scopeTests, tile: '#0891b2' },
       { view: 'idea', title: '灵感', desc: '多角度发散 · 导图 / 力导', icon: 'spark', count: null, tile: '#5b5bd6' },
-      { view: 'product', title: '产品设计', desc: '导图 / 设计笔记 / Demo', icon: 'product', count: null, tile: '#5b5bd6' },
+      { view: 'product', title: '产品设计', desc: '导图 / 模块 / 设计文档', icon: 'product', count: null, tile: '#5b5bd6' },
+      { view: 'ui', title: 'UI 设计', desc: '页面清单 · 规范 · 线框', icon: 'layout', count: null, tile: '#4f46e5' },
+      { view: 'demo', title: 'DEMO', desc: '可交互原型 · 版本 · 按页优化', icon: 'play', count: null, tile: '#0ea5e9' },
       { view: 'notes', title: '记事本', desc: '笔记与 PDF 导出', icon: 'notebook', count: scopeNotes, tile: '#c27c0e' },
       { view: 'news', title: '新闻', desc: '定时检索与 AI 摘要', icon: 'news', count: null, tile: '#0f766e' },
     ]
