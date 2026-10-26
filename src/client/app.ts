@@ -490,7 +490,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let testError = ''
   let testSig = ''
   let testDeployLog = ''
-  let testGenSource: 'requirement' | 'notes' | 'demo' = 'requirement'
+  let testGenSource: 'requirement' | 'notes' | 'demo' | 'designdoc' = 'requirement'
   let testGenRequirement = ''
 
   let notes: Note[] = []
@@ -6599,7 +6599,7 @@ ${mapLine}
     const sig = JSON.stringify({ p: testProjects.map(p => [p.id, p.updatedAt]), c: testCases.length, r: testRuns.map(r => [r.id, r.status, r.results.length]) })
     if (!silent || sig !== testSig) { testSig = sig; if (($id('wb-modal')?.innerHTML ?? '') === '') renderContent() }
   }
-  function testPrompt(project: TestProject, source: 'requirement' | 'notes' | 'demo', requirement: string): string {
+  function testPrompt(project: TestProject, source: 'requirement' | 'notes' | 'demo' | 'designdoc', requirement: string): string {
     const product = productOf(project.productId)
     let context = ''
     if (source === 'notes' && product) {
@@ -6612,6 +6612,49 @@ ${mapLine}
       const demoLines = demoRows.map((d: { title: string; themeId: string; layoutMode: string; entryPath: string }) => `- ${d.title}（${themeOf(d.themeId).name} / ${d.layoutMode === 'multi' ? '多文件' : '单文件'}） → ${d.entryPath || '（未落盘）'}`).join('\n')
       const mindmapPath = product.workspacePath ? `${product.workspacePath}/.dsh-workbench/products/${product.id}/mindmap.json` : '（产品未关联工作区）'
       context = `产品 Demo（工作区文件，请直接读取）：\n${demoLines || '（还没有 Demo）'}\n\n导图 JSON：${mindmapPath}\n\n设计笔记：\n${productNoteList(product).map(n => `## ${n.title}\n${n.content.slice(0, 4000)}`).join('\n\n')}`
+    }
+    /* 1.14 第四种来源：从测试设计文档提炼（带页面/区块追溯） */
+    if (source === 'designdoc') {
+      const plan = testPlans[0]
+      const docNoteId = plan?.docNoteId ?? ''
+      const pages = testPlans.length > 0 ? '' : ''
+      const uiId = plan?.sourceUiDesignId ?? ''
+      return `测试用例提炼任务（从测试设计文档）
+
+你是资深 QA。请把**测试设计文档**提炼成可逐条执行的结构化用例。这是两段式的第二段：第一段已经写好了按角色分组的场景，现在只做结构化。
+
+【测试项目】projectId：${project.id} ｜ 名称：${project.name}
+【测试计划】planId：${plan?.id ?? '（无）'} ｜ 名称：${plan?.name ?? '（无）'}
+【测试设计文档】noteId：${docNoteId || '（尚未生成，请先在第一段生成）'}
+【UI 设计】uiDesignId：${uiId || '（无）'}
+【基线版本】designVersion：v1
+【默认端】${platformLabel(project.platform ?? 'all')}
+
+【如何取文档内容】
+用工具读 noteId 对应的笔记正文（或用 read/grep 读工作区镜像），以它为**唯一依据**。
+
+【已有用例标题（避免重复）】
+${testCasesOf(project).map(c => `- ${c.title}`).join('\n') || '（无）'}
+
+【交付要求】
+用工具 **workbench_testcase_publish** 逐条写入，每条必须带齐：
+- projectId："${project.id}"
+- planId："${plan?.id ?? ''}"
+- title：形如「首页 · 新用户 · 空态显示引导」（≤60 字）
+- precondition、steps（3–8 步，具体到点哪个按钮/填什么值）、expected（可验证）
+- priority：P0/P1/P2/P3；type：functional|boundary|exception|permission|regression
+- role：**必须来自文档里的角色清单**
+- uiDesignId："${uiId}"、pageId：**必须来自文档「页面与区块」列**、blockId：可选
+- designVersion："v1"
+
+硬约束：
+1. 每条用例必须有真实 pageId（page-home / page-booking / page-orders / page-order-detail / page-profile 之一）；
+2. 覆盖文档里每个角色与每个场景，不要漏；
+3. 异常与边界用例至少占 20%；
+4. 完成后汇报：写了多少条、覆盖了哪些页面、哪些角色。
+
+【额外要求】
+${requirement.trim() || '（无）'}`
     }
     const existingTitles = testCasesOf(project).map(c => `- ${c.title}`).join('\n')
     return `测试用例生成任务
@@ -6686,7 +6729,7 @@ ${existingTitles ? `\n【已有用例（勿重复生成同名/同覆盖用例）
     if (!project) { toast('先创建测试项目'); return }
     const productOptions = products.map(p => `<option value="${p.id}" ${p.id === project.productId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
     openModal(`<h3>AI 生成测试用例</h3>
-      <div class="mfield"><label>输入来源</label><select id="wb-test-source"><option value="requirement" ${testGenSource === 'requirement' ? 'selected' : ''}>手写需求</option><option value="notes" ${testGenSource === 'notes' ? 'selected' : ''}>产品设计笔记</option><option value="demo" ${testGenSource === 'demo' ? 'selected' : ''}>产品 Demo + 笔记</option></select></div>
+      <div class="mfield"><label>输入来源</label><select id="wb-test-source"><option value="requirement" ${testGenSource === 'requirement' ? 'selected' : ''}>手写需求</option><option value="notes" ${testGenSource === 'notes' ? 'selected' : ''}>产品设计笔记</option><option value="demo" ${testGenSource === 'demo' ? 'selected' : ''}>产品 Demo + 笔记</option><option value="designdoc" ${testGenSource === 'designdoc' ? 'selected' : ''}>从测试设计文档提炼（推荐·带页面追溯）</option></select></div>
       <div class="mfield"><label>关联产品</label><select id="wb-test-gen-product"><option value="">不选择</option>${productOptions}</select></div>
       <div class="mfield"><label>需求 / 额外要求</label><textarea id="wb-test-req" rows="5" placeholder="例如：测试工作台任务创建、四象限、日历视图；重点覆盖异常与权限">${esc(testGenRequirement)}</textarea></div>
       <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">AI 会新建工作区会话并逐条调用 workbench_testcase_publish；消耗额度。</div>
@@ -6695,16 +6738,35 @@ ${existingTitles ? `\n【已有用例（勿重复生成同名/同覆盖用例）
   async function runTestGen(): Promise<void> {
     const project = testProjectOf(testProjectSelected)
     if (!project) return
-    const source = ($id<HTMLSelectElement>('wb-test-source')?.value ?? 'requirement') as 'requirement' | 'notes' | 'demo'
+    const source = ($id<HTMLSelectElement>('wb-test-source')?.value ?? 'requirement') as 'requirement' | 'notes' | 'demo' | 'designdoc'
     const requirement = $id<HTMLTextAreaElement>('wb-test-req')?.value ?? ''
     if (source === 'requirement' && requirement.trim() === '') { toast('先输入需求'); $id<HTMLTextAreaElement>('wb-test-req')?.focus(); return }
-    if (source !== 'requirement' && project.productId === '') { toast('先给测试项目关联产品'); return }
+    if (source !== 'requirement' && source !== 'designdoc' && project.productId === '') { toast('先给测试项目关联产品'); return }
+    /* 从设计文档提炼：直接问 API 要计划（不依赖 testPlans 缓存，可能还没加载） */
+    if (source === 'designdoc') {
+      if (testPlans.length === 0) await loadTestPlans()
+      const plan = testPlans[0]
+      if (plan === undefined) { toast('先创建一个测试计划'); return }
+      if ((plan.docNoteId ?? '') === '') { toast('先在第一段生成测试设计文档'); return }
+    }
     testGenSource = source; testGenRequirement = requirement
     if (!window.confirm('AI 将新建会话并生成多条测试用例，继续？')) return
     const prompt = testPrompt(project, source, requirement)
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
-    closeModal(); toast('正在新建用例生成会话…')
-    try { await queueTestPrompt(prompt) } catch (cause) { toast(`提交失败：${String((cause as Error).message ?? cause)}`) }
+    closeModal()
+    /* 1.14：统一走团队派发（feature=test.design），与流水线一致，可在页内会话看到过程 */
+    const started = await startAgentDispatch({
+      ideaId: '', runId: '', teamId: '', feature: 'test.design',
+      goal: prompt, ideaTitle: project.name, ideaBrief: '',
+      workspacePath: project.workspacePath, timeoutMs: 20 * 60 * 1000, allowNoIdea: true,
+    } as any, {
+      status: (status: string, note?: string) => {
+        if (status === 'done') { toast('用例已生成'); void loadTests(true).then(() => { if (ui.view === 'test') renderContent() }) }
+        else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
+      },
+    } as any)
+    if (started === null) { toast('派发失败：提示词已复制，可粘贴到新会话'); return }
+    toast(`已派发给「${started.teamName}」提炼测试用例`)
   }
   async function startTestRun(): Promise<void> {
     const project = testProjectOf(testProjectSelected)

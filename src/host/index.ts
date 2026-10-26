@@ -1709,11 +1709,25 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /** 列出待回归用例。 */
+  /**
+   * 待回归用例。
+   * projectId 既可能是「测试项目 id」，也可能是「统一项目 id」（界面传的是后者）——
+   * 两种都支持：先按测试项目查，查不到再按统一项目下的测试项目集合查。
+   */
   listPendingRegression(projectId = ''): any[] {
-    const conds = ["status = 'pending-regression'"]
-    const params: any[] = []
-    if (str(projectId) !== '') { conds.push('project_id = ?'); params.push(str(projectId)) }
-    return (this.db.prepare(`SELECT * FROM test_cases WHERE ${conds.join(' AND ')} ORDER BY updated_at DESC`).all(...params) as any[])
+    const pid = str(projectId)
+    const rows = this.db.prepare("SELECT * FROM test_cases WHERE status = 'pending-regression' ORDER BY updated_at DESC").all() as any[]
+    if (pid === '') return rows.map(row => toTestCase(row))
+    /* 统一项目下的测试项目 id 集合（测试项目通过 workspace_path/product 关联，这里用 bugs 项目的 project_id 反查） */
+    const unifiedTestIds = new Set<string>()
+    for (const tp of this.listTestProjects() as any[]) {
+      const bugProjectId = str(tp.bugProjectId)
+      if (bugProjectId === '') continue
+      const bp = this.db.prepare('SELECT project_id FROM bug_projects WHERE id = ?').get(bugProjectId) as any
+      if (bp !== undefined && str(bp.project_id) === pid) unifiedTestIds.add(String(tp.id))
+    }
+    return rows
+      .filter(row => String(row.project_id) === pid || unifiedTestIds.has(String(row.project_id)))
       .map(row => toTestCase(row))
   }
 
@@ -5576,7 +5590,14 @@ function registerTestFlowTools(ctx: any, store: SqliteStore | JsonStore): void {
                 tags: ['测试', testCase.id],
               })
               for (const r of results) if (r.caseId === testCase.id) r.bugId = bug.id
+              /* 1.14 T10：把 bugId 回写到用例本身，否则 Bug resolved 时找不到关联用例、
+                 无法自动排队回归（run.results 里的 bugId 只是当轮快照）。 */
+              try { store.saveTestCase({ ...testCase, id: testCase.id, bugId: bug.id }) } catch { /* ignore */ }
             }
+          }
+          /* 1.14 T10：回归通过 → 状态从 pending-regression 回到 active */
+          if (str(args?.status) === 'pass' && String((testCase as any).status ?? '') === 'pending-regression') {
+            try { store.saveTestCase({ ...testCase, id: testCase.id, status: 'active' }) } catch { /* ignore */ }
           }
           run = store.saveTestRun({ ...run, results })
           return { ok: true, result: results.find((r: any) => r.caseId === testCase.id), runId: run.id, bug }
