@@ -381,6 +381,7 @@ class SqliteStore {
     this.ensureNotebooks()
     this.ensureProducts()
     this.ensureTests()
+    this.migrateUnifiedProjects()
     this.seedNotes()
     this.revision = Number(this.readMeta('revision') ?? 0)
     const seeded = Number(this.readMeta('seeded') ?? 0) === 1
@@ -1187,6 +1188,152 @@ CREATE TABLE IF NOT EXISTS products (
     return this.getExportConfig()
   }
 
+  /**
+   * 统一项目（projects 主表）。
+   *
+   * 背景：产品 / Bug / 测试 / 灵感原本各有一张「项目」表，字段几乎相同（name + workspace_path），
+   * 但互不相通——门户按 workspace_path 只读聚合，用户在门户建了「产品」，进 Bug 页还要再建一次。
+   *
+   * 现在统一为一张 `projects` 主表：
+   *  - 产品 / Bug 项目 / 测试项目 / 灵感项目 通过各自的 `project_id` 指向它（保留原表作为领域数据容器）；
+   *  - 老数据迁移时按 workspace_path + name 归并，保证同一个工作区只对应一个统一项目；
+   *  - 门户、Bug、测试、灵感的「项目」列表都从 `projects` 读，只有一份。
+   */
+  private migrateUnifiedProjects(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      workspace_path TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '',
+      archived_at TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`)
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_ws ON projects(workspace_path) WHERE workspace_path <> ''")
+    /* 领域表挂统一项目 id（products 复用自身 id 作为 project_id，保持兼容） */
+    const cols = (table: string): string[] => (this.db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => String(c.name))
+    for (const table of ['products', 'bug_projects', 'test_projects']) {
+      if (!cols(table).includes('project_id')) this.db.exec(`ALTER TABLE ${table} ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`)
+    }
+    const now = isoDateTimeSeconds()
+    /* 收集四域的「项目」候选：按 workspace_path 归并（空路径按 name 归并） */
+    const candidates: Array<{ name: string; workspacePath: string; createdAt?: string }> = []
+    for (const row of this.db.prepare("SELECT name, workspace_path, created_at FROM products WHERE archived_at = ''").all() as any[]) {
+      candidates.push({ name: String(row.name), workspacePath: String(row.workspace_path ?? ''), createdAt: row.created_at })
+    }
+    for (const row of this.db.prepare('SELECT name, workspace_path, created_at FROM bug_projects').all() as any[]) {
+      const name = String(row.name).replace(/^测试：/, '')
+      candidates.push({ name, workspacePath: String(row.workspace_path ?? ''), createdAt: row.created_at })
+    }
+    for (const row of this.db.prepare('SELECT name, workspace_path, created_at FROM test_projects').all() as any[]) {
+      candidates.push({ name: String(row.name), workspacePath: String(row.workspace_path ?? ''), createdAt: row.created_at })
+    }
+    /* 灵感项目在独立库（idea-store）里；这里只处理主库三域，灵感侧在 idea 模块里对齐 */
+    const byKey = new Map<string, { id: string; name: string; workspacePath: string; createdAt: string }>()
+    for (const item of candidates) {
+      const key = item.workspacePath !== '' ? `ws:${item.workspacePath}` : `name:${item.name}`
+      if (byKey.has(key)) continue
+      const existing = this.db.prepare(
+        item.workspacePath !== ''
+          ? 'SELECT id FROM projects WHERE workspace_path = ?'
+          : 'SELECT id FROM projects WHERE workspace_path = \'\' AND name = ?',
+      ).get(...(item.workspacePath !== '' ? [item.workspacePath] : [item.name])) as any
+      if (existing !== undefined) { byKey.set(key, { id: String(existing.id), name: item.name, workspacePath: item.workspacePath, createdAt: item.createdAt ?? now }); continue }
+      const id = `prj-${randomUUID().slice(0, 12)}`
+      this.db.prepare('INSERT INTO projects(id, name, description, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+        .run(id, item.name.slice(0, 100), '', item.workspacePath, basename(item.workspacePath || ''), item.createdAt ?? now, now)
+      byKey.set(key, { id, name: item.name, workspacePath: item.workspacePath, createdAt: item.createdAt ?? now })
+    }
+    /* 回填各域 project_id */
+    const pick = (workspacePath: string, name: string): string => {
+      const key = workspacePath !== '' ? `ws:${workspacePath}` : `name:${name}`
+      return byKey.get(key)?.id ?? ''
+    }
+    for (const row of this.db.prepare("SELECT id, name, workspace_path, project_id FROM products WHERE project_id = ''").all() as any[]) {
+      const pid = pick(String(row.workspace_path ?? ''), String(row.name))
+      if (pid !== '') this.db.prepare('UPDATE products SET project_id = ? WHERE id = ?').run(pid, row.id)
+    }
+    for (const row of this.db.prepare("SELECT id, name, workspace_path, project_id FROM bug_projects WHERE project_id = ''").all() as any[]) {
+      const pid = pick(String(row.workspace_path ?? ''), String(row.name).replace(/^测试：/, ''))
+      if (pid !== '') this.db.prepare('UPDATE bug_projects SET project_id = ? WHERE id = ?').run(pid, row.id)
+    }
+    for (const row of this.db.prepare("SELECT id, name, workspace_path, project_id FROM test_projects WHERE project_id = ''").all() as any[]) {
+      const pid = pick(String(row.workspace_path ?? ''), String(row.name))
+      if (pid !== '') this.db.prepare('UPDATE test_projects SET project_id = ? WHERE id = ?').run(pid, row.id)
+    }
+  }
+
+  /* ---------- 统一项目 CRUD ---------- */
+  listProjects(includeArchived = false): any[] {
+    const sql = includeArchived
+      ? 'SELECT * FROM projects ORDER BY sort_order, created_at'
+      : "SELECT * FROM projects WHERE archived_at = '' ORDER BY sort_order, created_at"
+    return (this.db.prepare(sql).all() as any[]).map(toProject)
+  }
+
+  getProject(id: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(str(id)) as any
+    return row === undefined ? undefined : toProject(row)
+  }
+
+  /** 按工作区路径取/建统一项目（产品、Bug、测试、灵感建域对象时共用）。 */
+  ensureProject(workspacePath: string, name: string): any {
+    const ws = normalizeWorkspacePath(workspacePath)
+    const existing = ws !== ''
+      ? this.db.prepare('SELECT * FROM projects WHERE workspace_path = ?').get(ws) as any
+      : this.db.prepare("SELECT * FROM projects WHERE workspace_path = '' AND name = ?").get(str(name).slice(0, 100)) as any
+    if (existing !== undefined) return toProject(existing)
+    const now = isoDateTimeSeconds()
+    const id = `prj-${randomUUID().slice(0, 12)}`
+    this.db.prepare('INSERT INTO projects(id, name, description, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+      .run(id, str(name).slice(0, 100) || '未命名项目', '', ws, basename(ws), now, now)
+    return toProject(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id))
+  }
+
+  /** 保存统一项目；改名会同步到各域展示（各域仍保留自己的 name 作领域内叫法）。 */
+  saveProject(input: any): any {
+    const now = isoDateTimeSeconds()
+    const id = str(input?.id)
+    const name = str(input?.name).trim().slice(0, 100)
+    if (name === '') throw new Error('项目名称不能为空')
+    const workspacePath = normalizeWorkspacePath(input?.workspacePath)
+    const existing = id !== '' ? this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as any : undefined
+    if (existing !== undefined) {
+      this.db.prepare('UPDATE projects SET name=?, description=?, workspace_path=?, workspace_name=?, sort_order=?, updated_at=? WHERE id=?')
+        .run(name, str(input?.description).slice(0, 5000), workspacePath, basename(workspacePath), Math.max(0, Math.round(Number(input?.sortOrder) || 0)), now, id)
+      return toProject(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id))
+    }
+    /* 同工作区已存在则复用（避免门户与领域各建一个） */
+    const dup = workspacePath !== '' ? this.db.prepare('SELECT * FROM projects WHERE workspace_path = ?').get(workspacePath) as any : undefined
+    if (dup !== undefined) {
+      if (str(input?.description) !== '') this.db.prepare('UPDATE projects SET description=?, updated_at=? WHERE id=?').run(str(input.description).slice(0, 5000), now, dup.id)
+      return toProject(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(dup.id))
+    }
+    const newId = id !== '' ? id : `prj-${randomUUID().slice(0, 12)}`
+    this.db.prepare('INSERT INTO projects(id, name, description, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+      .run(newId, name, str(input?.description).slice(0, 5000), workspacePath, basename(workspacePath), now, now)
+    return toProject(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(newId))
+  }
+
+  deleteProject(id: string): void {
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return
+    /* 解除各域引用（不删领域数据），避免悬空 */
+    for (const table of ['products', 'bug_projects', 'test_projects']) {
+      this.db.prepare(`UPDATE ${table} SET project_id = '' WHERE project_id = ?`).run(str(id))
+    }
+    this.db.prepare('DELETE FROM projects WHERE id = ?').run(str(id))
+  }
+
+  /** 项目概览：统一项目 → 各域对象与计数（门户卡片直接用这个）。 */
+  listProjectOverviews(includeArchived = false): any[] {
+    const projects = this.listProjects(includeArchived)
+    return projects.map(project => {
+      const products = (this.db.prepare('SELECT * FROM products WHERE project_id = ?').all(project.id) as any[]).map(toProduct)
+      const bugProjects = (this.db.prepare('SELECT * FROM bug_projects WHERE project_id = ?').all(project.id) as any[]).map(toBugProject)
+      const testProjects = (this.db.prepare('SELECT * FROM test_projects WHERE project_id = ?').all(project.id) as any[]).map(toTestProject)
+      const bugCount = Number((this.db.prepare('SELECT COUNT(*) AS n FROM bugs WHERE project_id IN (SELECT id FROM bug_projects WHERE project_id = ?)').get(project.id) as any)?.n ?? 0)
+      return { project, products, bugProjects, testProjects, counts: { products: products.length, bugProjects: bugProjects.length, testProjects: testProjects.length, bugs: bugCount } }
+    })
+  }
+
   /* ---------- 产品（导图 / 设计笔记 / Demo） ---------- */
   listProducts(includeArchived = false): any[] {
     const sql = includeArchived
@@ -1225,6 +1372,19 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO products(id, name, description, workspace_path, notebook_id, mindmap, styles, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
         .run(id, name, str(input?.description).slice(0, 5000), workspacePath, notebookId, mindmap, JSON.stringify(styles), existing?.created_at ?? now, now)
     }
+    /* 统一项目：产品建/改时确保同一工作区有对应 project，并回填 project_id */
+    try {
+      const unified = this.ensureProject(workspacePath, name)
+      this.db.prepare('UPDATE products SET project_id = ? WHERE id = ?').run(unified.id, id)
+      /* 同一项目下若还没有 Bug 项目，顺手建一个（修掉「门户建了项目，Bug 页还要再建」） */
+      const hasBug = this.db.prepare('SELECT id FROM bug_projects WHERE project_id = ? LIMIT 1').get(unified.id) as any
+      if (hasBug === undefined && workspacePath !== '') {
+        const bugId = `bugp-${randomUUID().slice(0, 12)}`
+        const ts = isoDateTimeSeconds()
+        this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+          .run(bugId, name, workspacePath, basename(workspacePath), unified.id, ts, ts)
+      }
+    } catch (cause) { console.warn(`[dsh-workbench] 统一项目关联失败：${String(cause)}`) }
     const row = this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as any
     /* 新产品即有首张导图（v2 图），避免「导图列表为空」的空窗 */
     if (this.defaultMapId(id) === '') {
@@ -1840,15 +2000,26 @@ CREATE TABLE IF NOT EXISTS products (
       hostPort: input?.hostPort !== undefined ? str(input?.hostPort) : (existing?.host_port ?? ''),
       containerPort: input?.containerPort !== undefined ? str(input?.containerPort) : (existing?.container_port ?? ''),
     }
+    const unifiedTest = this.ensureProject(workspacePath, name)
+    /* 同一统一项目下若还没有 Bug 项目，一并建好（与产品域一致） */
+    if (workspacePath !== '') {
+      const hasBug = this.db.prepare('SELECT id FROM bug_projects WHERE project_id = ? LIMIT 1').get(unifiedTest.id) as any
+      if (hasBug === undefined) {
+        const bugId = `bugp-${randomUUID().slice(0, 12)}`
+        const ts = isoDateTimeSeconds()
+        this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+          .run(bugId, name, workspacePath, basename(workspacePath), unifiedTest.id, ts, ts)
+      }
+    }
     if (existing) {
       this.db.prepare(`UPDATE test_projects SET name=?, description=?, workspace_path=?, product_id=?, module_id=?, platform=?, bug_project_id=?,
-        deploy_mode=?, ssh_host=?, remote_dir=?, image=?, container_name=?, host_port=?, container_port=?, updated_at=? WHERE id=?`)
-        .run(fields.name, fields.description, fields.workspacePath, fields.productId, fields.moduleId, fields.platform, fields.bugProjectId, fields.deployMode, fields.sshHost, fields.remoteDir, fields.image, fields.containerName, fields.hostPort, fields.containerPort, now, id)
+        deploy_mode=?, ssh_host=?, remote_dir=?, image=?, container_name=?, host_port=?, container_port=?, project_id=?, updated_at=? WHERE id=?`)
+        .run(fields.name, fields.description, fields.workspacePath, fields.productId, fields.moduleId, fields.platform, fields.bugProjectId, fields.deployMode, fields.sshHost, fields.remoteDir, fields.image, fields.containerName, fields.hostPort, fields.containerPort, unifiedTest.id, now, id)
     } else {
       this.db.prepare(`INSERT INTO test_projects(id, name, description, workspace_path, product_id, module_id, platform, bug_project_id,
-        deploy_mode, ssh_host, remote_dir, image, container_name, host_port, container_port, created_at, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, fields.name, fields.description, fields.workspacePath, fields.productId, fields.moduleId, fields.platform, fields.bugProjectId, fields.deployMode, fields.sshHost, fields.remoteDir, fields.image, fields.containerName, fields.hostPort, fields.containerPort, existing?.created_at ?? now, now)
+        deploy_mode, ssh_host, remote_dir, image, container_name, host_port, container_port, project_id, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, fields.name, fields.description, fields.workspacePath, fields.productId, fields.moduleId, fields.platform, fields.bugProjectId, fields.deployMode, fields.sshHost, fields.remoteDir, fields.image, fields.containerName, fields.hostPort, fields.containerPort, unifiedTest.id, existing?.created_at ?? now, now)
     }
     return toTestProject(this.db.prepare('SELECT * FROM test_projects WHERE id = ?').get(id))
   }
@@ -1953,6 +2124,7 @@ CREATE TABLE IF NOT EXISTS products (
       FROM bug_projects p ORDER BY p.created_at, p.id`).all() as any[]
     return rows.map(row => ({
       id: row.id, name: row.name, workspacePath: row.workspace_path ?? '', workspaceName: row.workspace_name ?? '',
+      projectId: row.project_id ?? '',
       count: Number(row.count ?? 0), createdAt: row.created_at, updatedAt: row.updated_at,
     }))
   }
@@ -1965,12 +2137,13 @@ CREATE TABLE IF NOT EXISTS products (
     const workspacePath = normalizeWorkspacePath(input?.workspacePath)
     const workspaceName = str(input?.workspaceName).trim() || (workspacePath === '' ? '' : basename(workspacePath))
     const existing = this.db.prepare('SELECT id, created_at FROM bug_projects WHERE id = ?').get(id) as any
+    const unified = this.ensureProject(workspacePath, name.replace(/^测试：/, ''))
     if (existing) {
-      this.db.prepare('UPDATE bug_projects SET name=?, workspace_path=?, workspace_name=?, updated_at=? WHERE id=?')
-        .run(name, workspacePath, workspaceName, now, id)
+      this.db.prepare('UPDATE bug_projects SET name=?, workspace_path=?, workspace_name=?, project_id=?, updated_at=? WHERE id=?')
+        .run(name, workspacePath, workspaceName, unified.id, now, id)
     } else {
-      this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, created_at, updated_at) VALUES(?,?,?,?,?,?)')
-        .run(id, name, workspacePath, workspaceName, existing?.created_at ?? now, now)
+      this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+        .run(id, name, workspacePath, workspaceName, unified.id, existing?.created_at ?? now, now)
     }
     return this.listBugProjects().find(p => p.id === id)
   }
@@ -3415,6 +3588,33 @@ function writeTestRunSnapshot(project: any, run: any): void {
   } catch (cause) { console.warn(`[dsh-workbench] 测试运行快照写入失败：${String(cause)}`) }
 }
 
+function toProject(row: any): any {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? '',
+    workspacePath: row.workspace_path ?? '',
+    workspaceName: row.workspace_name ?? '',
+    archivedAt: row.archived_at ?? '',
+    sortOrder: Number(row.sort_order ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function toBugProject(row: any): any {
+  return {
+    id: row.id,
+    name: row.name,
+    workspacePath: row.workspace_path ?? '',
+    workspaceName: row.workspace_name ?? '',
+    projectId: row.project_id ?? '',
+    count: Number(row.count ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 function toTestProject(row: any): any {
   return {
     id: row.id, name: row.name, description: row.description ?? '', workspacePath: row.workspace_path ?? '',
@@ -4493,6 +4693,23 @@ export function apply(ctx: any): void {
             if (existing !== undefined) { patch.productId = existing.productId; if (patch.mapId === undefined) patch.mapId = existing.mapId; if (patch.name === undefined) patch.name = existing.name; if (patch.kind === undefined) patch.kind = existing.kind; if (patch.platform === undefined) patch.platform = existing.platform }
           }
           send(res, 200, { ok: true, module: await serialized(() => store.saveModule(patch)) })
+          return
+        }
+        /* 统一项目：门户 / Bug / 测试 / 灵感共用一份 */
+        if (method === 'GET' && path === '/projects') {
+          const archived = url.searchParams.get('archived') === '1'
+          if (url.searchParams.get('overview') === '1') { send(res, 200, { overviews: store.listProjectOverviews(archived) }); return }
+          send(res, 200, { projects: store.listProjects(archived) })
+          return
+        }
+        if (method === 'POST' && path === '/projects') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, project: await serialized(() => store.saveProject(body?.project ?? body)) })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/projects/')) {
+          await serialized(() => store.deleteProject(decodeURIComponent(path.slice('/projects/'.length))))
+          send(res, 200, { ok: true })
           return
         }
         if (method === 'GET' && path === '/products/inputs') {

@@ -67,6 +67,7 @@ check('测试客户端用例/执行/报告', client.includes('test-case-list') &
 check('测试 Bug 录入/回归', client.includes('createBugFromTest') && client.includes('regressionRun') && host.includes('/bugs/status'))
 check('AI 会话统一走 sessions（无刷新）', client.includes('dispatchToNewSession') && client.includes('createSessionIn') && client.includes('sendToSession') && !client.includes('location.reload'))
 check('AI 发送走公开 retain（ready 可 resolve）', client.includes('.retain(') && client.includes('gateway') && client.includes('会话打开超时'))
+check('统一项目（产品/Bug/测试/灵感共用一份）', host.includes('migrateUnifiedProjects') && host.includes('ensureProject') && host.includes('listProjectOverviews') && client.includes('bug-enable-project') && client.includes('enableBugProject'))
 check('导图素材源：多网站/截图 → AI 提炼', client.includes('wb-map-ai-field') && client.includes('pm-ai-add-url') && client.includes('addAiImages') && client.includes('createMapFromAi') && host.includes('product_inputs') && host.includes('decodeImageDataUrl'))
 check('导图节点写入工具', host.includes('workbench_map_node_publish') && host.includes('addMapNode'))
 check('导图双引擎（mind-elixir/ECharts）+ 节点右键菜单', client.includes('MindElixir') && client.includes('buildProductForceOption') && client.includes('pm-engine') && client.includes('ctx-item'))

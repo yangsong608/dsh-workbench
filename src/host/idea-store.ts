@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS idea_projects (
   name TEXT NOT NULL,
   workspace_path TEXT NOT NULL DEFAULT '',
   workspace_name TEXT NOT NULL DEFAULT '',
+  project_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -112,7 +113,16 @@ export class IdeaStore {
     this.db = db
     this.db.exec(SCHEMA)
     this.migrateColumns()
+    this.migrateUnifiedProject()
     this.migrateLegacy()
+  }
+
+  /** 旧库补列：idea_projects.project_id（统一项目）。 */
+  private migrateUnifiedProject(): void {
+    try {
+      const cols = (this.db.prepare('PRAGMA table_info(idea_projects)').all() as any[]).map(c => String(c.name))
+      if (!cols.includes('project_id')) this.db.exec("ALTER TABLE idea_projects ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+    } catch (cause) { console.warn('[dsh-workbench] 灵感项目补列失败：', String(cause)) }
   }
 
   /** 旧库补列：ideas.custom_angles（1.7 新增）。 */

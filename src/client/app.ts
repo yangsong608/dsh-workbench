@@ -98,6 +98,8 @@ interface ProductMapVersion {
 /** 门户「项目」：以 DSH 工作区为聚合法，把产品 / Bug 项目 / 测试项目收在同一张卡上。 */
 interface ProjectCard {
   path: string; name: string
+  /** 统一项目 id（四域共用的那份项目） */
+  projectId?: string
   product?: Product; bugProject?: BugProject; tests: TestProject[]
 }
 interface Module {
@@ -427,6 +429,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let noteFilterMissing = false
   /** 是否显示已归档内容（产品/模块/文档）。 */
   let showArchived = false
+  /** 统一项目清单（门户 / Bug / 测试 / 灵感共用）。 */
+  let projects: Array<{ id: string; name: string; description?: string; workspacePath: string; workspaceName?: string; archivedAt?: string }> = []
   /** 页内会话（团队派发）句柄与当前派发。 */
   let productChat: ChatHandle | null = null
   let productDispatch: { dispatchId: string; sessionId: string; teamName: string } | null = null
@@ -533,6 +537,15 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       const card: ProjectCard = { path, name: '', tests: [] }
       map.set(path, card)
       return card
+    }
+    /* 以统一项目为骨架：四域（产品 / Bug / 测试 / 灵感）共用一份项目清单，
+       避免「门户建了产品、Bug 页还要再建项目」这类分裂。无工作区的项目单独成卡。 */
+    const unified = new Map<string, string>()
+    for (const project of projects) {
+      unified.set(project.id, project.name)
+      const card = ensure(project.workspacePath || `prj:${project.id}`)
+      card.name = project.name
+      card.projectId = project.id
     }
     for (const product of products) {
       if (!product.workspacePath) continue
@@ -2599,7 +2612,11 @@ ${note.content.slice(0, 20_000)}`
     const list = bugFiltered()
     const stat = bugStats(list)
     if (bugProjects.length === 0) {
-      return `<div class="notes-empty bug-empty"><div class="ne-icon">${ic('bug', 22)}</div><b>还没有 Bug 项目</b><span>先创建一个项目并关联 DSH 工作区，再录入 Bug。</span><button class="btn-primary" data-act="bug-project-new">${ic('plus', 14)}新建项目</button></div>`
+      return `<div class="notes-empty bug-empty"><div class="ne-icon">${ic('bug', 22)}</div><b>还没有 Bug 项目</b>
+        <span>${projects.length > 0 ? `已有 ${projects.length} 个项目，选一个启用 Bug 跟踪即可（会自动建立对应的 Bug 项目）。` : '先创建一个项目并关联 DSH 工作区，再录入 Bug。'}</span>
+        ${projects.length > 0
+          ? `<div class="portal-project-actions">${projects.map(p => `<button class="btn" data-act="bug-enable-project" data-id="${p.id}">${ic('bug', 12)}启用 ${esc(p.name)}</button>`).join('')}</div>`
+          : `<button class="btn-primary" data-act="bug-project-new">${ic('plus', 14)}新建项目</button>`}</div>`
     }
     const stats = `<div class="bug-stats">
       <div class="bug-stat"><b>${stat.total}</b><span>全部</span></div>
@@ -2662,16 +2679,38 @@ ${note.content.slice(0, 20_000)}`
       renderContent()
     })
   }
+  /** 从统一项目启用 Bug 跟踪（自动建对应 Bug 项目，避免重复手建）。 */
+  async function enableBugProject(projectId: string): Promise<void> {
+    const project = projects.find(p => p.id === projectId)
+    if (project === undefined) { toast('项目不存在'); return }
+    try {
+      const res = await fetch(`${API}/bugs/projects`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ project: { name: project.name, workspacePath: project.workspacePath, workspaceName: project.workspaceName ?? '' } }),
+      })
+      const data = await res.json().catch(() => ({})) as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      await loadBugs(true)
+      if (data.project !== undefined) bugProjectFilter = data.project.id
+      renderContent()
+      toast(`已为「${project.name}」启用 Bug 跟踪`)
+    } catch (cause) { toast(`启用失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
   async function loadBugs(silent = false): Promise<void> {
     if (bugLoading) return
     bugLoading = true
     if (!silent) { bugError = ''; if (ui.view === 'bugs') renderContent() }
     try {
-      const [res, mRes] = await Promise.all([fetch(`${API}/bugs`), fetch(`${API}/modules`)])
+      const [res, mRes, prjRes] = await Promise.all([fetch(`${API}/bugs`), fetch(`${API}/modules`), fetch(`${API}/projects`)])
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { projects?: BugProject[]; bugs?: Bug[] }
       bugProjects = Array.isArray(data.projects) ? data.projects : []
       bugs = Array.isArray(data.bugs) ? data.bugs : []
+      if (prjRes.ok) {
+        const pData = await prjRes.json() as { projects?: typeof projects }
+        projects = Array.isArray(pData.projects) ? pData.projects : []
+      }
       if (mRes.ok) { const m = await mRes.json() as { modules?: Module[] }; productModules = Array.isArray(m.modules) ? m.modules : [] }
       const valid = new Set(bugs.map(b => b.id))
       bugSelected = new Set(Array.from(bugSelected).filter(id => valid.has(id)))
@@ -7352,6 +7391,7 @@ ${lines}`
       if (act === 'product-node-delete') { void deleteProductNode(); return }
       if (act === 'product-gen-notes') { void generateProductNotes(); return }
       if (act === 'product-gen-modules') { void generateProductModules(); return }
+      if (act === 'bug-enable-project') { void enableBugProject(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-module-new') { openModuleEditor(); return }
       if (act === 'product-module-add') { openModuleEditor(undefined, actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-module-edit') { openModuleEditor(actEl.getAttribute('data-id') ?? ''); return }
