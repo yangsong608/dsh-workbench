@@ -759,35 +759,14 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .product-note b{display:block;font-size:11.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .product-note span{display:block;margin-top:3px;font-size:10px;line-height:1.5;color:var(--text-3);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .product-note i{display:block;margin-top:4px;font-style:normal;font-size:9px;color:var(--green)}
-.product-demo-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:9px;min-height:420px}
-.product-demo-list{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px;display:flex;flex-direction:column;gap:4px;max-height:calc(100vh - 250px);overflow:auto}
-.product-demo-row{border:1px solid transparent;border-radius:7px;padding:6px 7px;cursor:pointer;position:relative}
-.product-demo-row:hover{background:var(--hover)}
-.product-demo-row.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}
-.product-demo-row b{display:block;font-size:10.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.product-demo-row span{display:block;margin-top:2px;font-size:9px;color:var(--text-3)}
-.product-demo-row .icon-btn{position:absolute;top:5px;right:5px;opacity:0;transition:opacity .15s}
-.product-demo-row:hover .icon-btn{opacity:1}
-.product-demo-preview{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-height:420px;display:flex;flex-direction:column}
 .demo-viewport-bar{display:flex;align-items:center;gap:5px;padding:5px 8px;border-bottom:1px solid var(--line);background:var(--panel-2)}
 .demo-viewport-bar button{font-size:9.5px;padding:3px 9px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--text-3);cursor:pointer}
 .demo-viewport-bar button.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line));color:var(--text)}
 .demo-viewport-bar span{margin-left:auto;font-size:9px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
-.product-demo-preview .demo-frame{flex:1;width:100%;border:0;background:#fff;min-height:480px;transition:width .2s}
 .demo-frame-pc{width:100%}
 .demo-frame-tablet{width:834px;align-self:center;border-left:1px solid var(--line);border-right:1px solid var(--line)}
 .demo-frame-mobile{width:390px;align-self:center;border-left:1px solid var(--line);border-right:1px solid var(--line)}
 /* Demo 生成进度 */
-.demo-progress{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 11px;margin:0 0 8px}
-.demo-progress.failed{border-color:color-mix(in srgb,var(--red,#e5484d) 40%,var(--line))}
-.demo-progress.done{border-color:color-mix(in srgb,var(--green,#22c55e) 35%,var(--line))}
-.demo-progress-head{display:flex;align-items:center;gap:8px;font-size:10.5px}
-.demo-progress-head b{color:var(--text)}
-.demo-progress-head span{color:var(--text-3);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.demo-progress-bar{height:5px;border-radius:99px;background:var(--panel-3);margin:7px 0 4px;overflow:hidden}
-.demo-progress-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#fff));transition:width .3s}
-.demo-progress-log{font-size:9.5px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;margin-top:4px}
-.demo-progress-log i{font-style:normal;color:var(--text-3);opacity:.7;margin-right:6px}
 /* 导图画布（mind-elixir / ECharts 双引擎）与版本面板 */
 .pm-plot-wrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-height:460px;height:calc(100vh - 300px);position:relative}
 .pm-plot{width:100%;height:100%;min-height:456px;position:relative}
@@ -816,7 +795,6 @@ h1.page-title{font-size:29px;line-height:1.18;margin:0;font-weight:700;letter-sp
 .pm-version:hover .pm-map-ops .icon-btn{opacity:1}
 .pm-map-src{color:var(--text-3);opacity:.85}
 .diff-list{margin:4px 0 0;padding-left:16px;font-size:10.5px;color:var(--text-2);max-height:120px;overflow:auto}
-@media (max-width:1000px){.product-note-list{grid-template-columns:1fr}.product-demo-layout{grid-template-columns:190px minmax(0,1fr)}.product-ws{max-width:220px}}
 
 /* ---------- test ---------- */
 .test-case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}

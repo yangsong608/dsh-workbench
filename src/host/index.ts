@@ -1510,6 +1510,11 @@ CREATE TABLE IF NOT EXISTS products (
     for (const table of ['products', 'bug_projects', 'test_projects']) {
       this.db.prepare(`UPDATE ${table} SET project_id = '' WHERE project_id = ?`).run(str(id))
     }
+    /* ui_designs / demos 以 project_id 为根（NOT NULL），不能置空——改为一并删除，
+       否则会留下无法归属、也无法再被查询到的孤儿行。 */
+    const demos = this.db.prepare('SELECT id FROM demos WHERE project_id = ?').all(str(id)) as any[]
+    for (const demo of demos) this.deleteDemo(String(demo.id))
+    this.db.prepare('DELETE FROM ui_designs WHERE project_id = ?').run(str(id))
     this.db.prepare('DELETE FROM projects WHERE id = ?').run(str(id))
   }
 
@@ -2594,6 +2599,9 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   deleteUiDesign(id: string): void {
+    /* DEMO 是独立产物：解除与 UI 设计的关联，但不删 DEMO 本身 */
+    this.db.prepare("UPDATE demos SET ui_design_id = '', updated_at = ? WHERE ui_design_id = ?")
+      .run(isoDateTimeSeconds(), str(id))
     this.db.prepare('DELETE FROM ui_designs WHERE id = ?').run(str(id))
   }
 
@@ -2687,6 +2695,11 @@ CREATE TABLE IF NOT EXISTS products (
       error.code = 'builtin_locked'
       throw error
     }
+    /* 被引用的主题不能直接删：先把引用降级到内置 clean，避免渲染时找不到令牌 */
+    const fallback = this.db.prepare("SELECT id FROM themes WHERE id = 'clean'") as any
+    const fallbackId = String((fallback?.get() as any)?.id ?? 'clean')
+    this.db.prepare('UPDATE demos SET theme_id = ?, updated_at = ? WHERE theme_id = ?').run(fallbackId, isoDateTimeSeconds(), str(id))
+    this.db.prepare('UPDATE ui_designs SET theme_id = ?, updated_at = ? WHERE theme_id = ?').run(fallbackId, isoDateTimeSeconds(), str(id))
     this.db.prepare('DELETE FROM themes WHERE id = ?').run(str(id))
   }
 
@@ -5803,8 +5816,18 @@ export function apply(ctx: any): void {
             if (existsSync(candidate)) file = candidate
           }
           if (!existsSync(file)) { send(res, 404, { error: 'file_not_found' }); return }
+          const raw = readFileSync(file, 'utf8')
+          /* 单文件模式 + 指定页：返回整份文档，但把非目标页隐藏（保持 CSS/JS 上下文完整，
+             否则单独返回片段会丢掉主题样式，预览与真实体验不一致）。 */
+          if (demo.layoutMode !== 'multi' && pageId !== '') {
+            const scoped = raw.replace(/(<style[^>]*id=["']ud-page-scope["'][^>]*>[\s\S]*?<\/style>)/gi, '')
+              + `\n<style id="ud-page-scope">[data-page]:not([data-page="${pageId.replace(/["'\\]/g, '')}"]){display:none!important}</style>`
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(scoped)
+            return
+          }
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(readFileSync(file, 'utf8'))
+          res.end(raw)
           return
         }
         if (method === 'GET' && /^\/demos\/[^/]+$/.test(path)) {

@@ -55,6 +55,18 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
   let mounted = false
   let tab: 'preview' | 'files' | 'versions' = 'preview'
   let files: Array<{ path: string; role: string; bytes: number }> = []
+  /** 关联 UI 设计的页面清单（用于预览的页面切换）。 */
+  let pages: Array<{ id: string; name: string }> = []
+
+  async function loadPagesOf(demo: DemoItem): Promise<void> {
+    pages = []
+    if (demo.uiDesignId === '') return
+    try {
+      const data = await api(`/ui-designs/${encodeURIComponent(demo.uiDesignId)}`)
+      const list = data.design?.pages
+      pages = Array.isArray(list) ? list.map((p: any) => ({ id: String(p.id), name: String(p.name ?? p.id) })) : []
+    } catch { pages = [] }
+  }
 
   const current = (): DemoItem | undefined => demos.find(d => d.id === activeId) ?? demos[0]
 
@@ -88,6 +100,7 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
           const index = demos.findIndex(d => d.id === hit.id)
           if (index >= 0) demos[index] = { ...demos[index], ...detail.demo }
         }
+        await loadPagesOf(hit)
         files = await loadFiles(hit.id)
       }
     } catch (cause) {
@@ -113,8 +126,12 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
 
   function renderPreview(demo: DemoItem): string {
     const src = `${deps.api}/demos/${encodeURIComponent(demo.id)}/view${pageId !== '' ? `?page=${encodeURIComponent(pageId)}` : ''}`
+    const pagePicker = pages.length > 0
+      ? `<select class="ud-sel" data-demo="page" style="height:22px;font-size:9.5px">${pages.map(p => `<option value="${esc(p.id)}" ${(pageId === p.id || (pageId === '' && pages[0]?.id === p.id)) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`
+      : ''
     return `<div class="ud-frame-bar">
         ${(['pc', 'tablet', 'mobile'] as const).map(v => `<button class="ud-vp ${viewport === v ? 'on' : ''}" data-demo="vp" data-v="${v}">${v === 'pc' ? 'PC' : v === 'tablet' ? '平板' : '移动'}</button>`).join('')}
+        ${pagePicker}
         <span style="margin-left:auto;display:flex;gap:4px;align-items:center">
           <button class="ud-btn tiny" data-demo="optimize">✦ AI 优化此页</button>
           <button class="ud-btn tiny" data-demo="open">↗ 浏览器打开</button>
@@ -178,6 +195,7 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
       <div class="ud-actions">
         ${demo ? `<span class="ud-badge ${demo.layoutMode === 'multi' ? 'multi' : 'single'}" title="布局模式创建后不可更改">${demo.layoutMode === 'multi' ? '多文件 · 不可改' : '单文件 · 不可改'}</span>` : ''}
         ${demo ? `<select class="ud-sel" data-demo="theme">${themeOptions(demo.themeId)}</select>` : ''}
+        ${demo ? `<button class="ud-btn" data-demo="archive">${(demo.archivedAt ?? '') === '' ? '⌸ 归档' : '↩ 恢复'}</button>` : ''}
         <button class="ud-btn primary" data-demo="generate">${demo ? '重新生成' : '＋ 新建 DEMO'}</button>
       </div>
     </div>`
@@ -216,12 +234,31 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
         if (act === 'vp') { viewport = (el.getAttribute('data-v') ?? 'pc') as typeof viewport; render(); return }
         if (act === 'pick') { activeId = el.getAttribute('data-id') ?? ''; pageId = ''; void reload(); return }
         if (act === 'reload') { void reload(); return }
+        if (act === 'archive') {
+          if (demo) {
+            const next = (demo.archivedAt ?? '') === ''
+            if (!next || deps.confirm('归档后该 DEMO 会从列表隐藏（可在「显示已归档」查看）。继续？')) {
+              void (async () => {
+                try {
+                  await api('/demos/archive', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: demo.id, archived: next }) })
+                  await reload()
+                  deps.toast(next ? '已归档' : '已恢复')
+                } catch (cause) { deps.toast(`操作失败：${String((cause as Error).message ?? cause)}`) }
+              })()
+            }
+          }
+          return
+        }
         if (act === 'generate') { openGenerateModal(); return }
         if (act === 'optimize') { if (demo) openOptimizeModal(demo); return }
         if (act === 'open') { if (demo) window.open(`${deps.api}/demos/${encodeURIComponent(demo.id)}/view${pageId !== '' ? `?page=${encodeURIComponent(pageId)}` : ''}`, '_blank'); return }
         if (act === 'rollback') { if (demo) void rollback(demo, el.getAttribute('data-version') ?? ''); return }
       }
     })
+    const pageSel = root.querySelector<HTMLSelectElement>('[data-demo="page"]')
+    if (pageSel !== null) {
+      pageSel.onchange = () => { pageId = pageSel.value; render() }
+    }
     const themeSel = root.querySelector<HTMLSelectElement>('[data-demo="theme"]')
     if (themeSel !== null) {
       themeSel.onchange = () => {

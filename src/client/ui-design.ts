@@ -187,6 +187,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
         ${design ? `<span class="ud-badge ${design.status === 'ready' ? 'ready' : ''}">${esc(design.status)}</span>` : ''}
         ${design ? `<select class="ud-sel" data-ud="theme">${themeOptions(design.themeId)}</select>` : ''}
         ${design ? `<button class="ud-btn" data-ud="new-theme">＋ 新建主题</button>` : ''}
+        ${design ? `<button class="ud-btn" data-ud="archive">${(design.archivedAt ?? '') === '' ? '⌸ 归档' : '↩ 恢复'}</button>` : ''}
         <button class="ud-btn" data-ud="new">＋ 新建 UI 设计</button>
         <button class="ud-btn primary" data-ud="generate">✦ AI 生成 UI 设计</button>
       </div>
@@ -238,6 +239,21 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
         if (act === 'page-optimize') { if (design) void runOptimize(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'page-demo') { if (design) deps.onBuildDemo?.(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'spec-edit') { if (design) openSpecModal(design); return }
+        if (act === 'archive') {
+          if (design) {
+            const next = (design.archivedAt ?? '') === ''
+            if (!next || deps.confirm('归档后该 UI 设计会从列表隐藏（可在「显示已归档」查看）。继续？')) {
+              void (async () => {
+                try {
+                  await api('/ui-designs/archive', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: design.id, archived: next }) })
+                  await reload()
+                  deps.toast(next ? '已归档' : '已恢复')
+                } catch (cause) { deps.toast(`操作失败：${String((cause as Error).message ?? cause)}`) }
+              })()
+            }
+          }
+          return
+        }
         void event
       }
     })

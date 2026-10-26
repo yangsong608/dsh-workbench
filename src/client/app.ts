@@ -651,6 +651,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   }
   async function refreshPortal(): Promise<void> {
     await Promise.all([loadProducts(true), loadBugs(true), loadTests(true), loadThemes(true)])
+    await loadProjectDemos()
     restoreProject()
     if (ui.view === 'portal' || ui.view === 'bugs' || ui.view === 'test') renderAll()
   }
@@ -1241,8 +1242,13 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
 
   /** 当前项目 id（provider 缺失时回落到第一个项目）。 */
   function currentProjectId(): string {
-    const card = projectCards().find(c => c.path === ui.project)
-    return card?.projectId ?? ''
+    const cards = projectCards()
+    const hit = cards.find(c => c.path === ui.project)
+    if (hit?.projectId !== undefined && hit.projectId !== '') return hit.projectId
+    /* 兜底：当前选择不是统一项目（如 all/none/任务路径）时，取第一个有统一项目的卡片，
+       避免「项目存在但 UI 设计页显示未选项目」的死角。 */
+    const first = cards.find(c => c.projectId !== undefined && c.projectId !== '')
+    return first?.projectId ?? ''
   }
 
   /** 额外样式注入（模块自带的 CSS），每个 key 只注一次。 */
@@ -1258,6 +1264,19 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
 
   /** UI 设计 → DEMO 的交接种子。 */
   let demoDesignSeed: { designId: string; pageId: string } | null = null
+
+  /** 新 DEMO 列表（1.13；供「从 DEMO 生成测试用例」等跨视图场景使用）。 */
+  let projectDemos: Array<{ id: string; projectId: string; title: string; themeId: string; layoutMode: string; entryPath: string; archivedAt?: string }> = []
+  async function loadProjectDemos(): Promise<void> {
+    const projectId = currentProjectId()
+    if (projectId === '') { projectDemos = []; return }
+    try {
+      const res = await fetch(`${API}/demos?projectId=${encodeURIComponent(projectId)}`)
+      if (!res.ok) return
+      const data = await res.json() as { demos?: typeof projectDemos }
+      projectDemos = Array.isArray(data.demos) ? data.demos : []
+    } catch { /* 保留旧值 */ }
+  }
 
   /** 灵感视图常驻（编辑器实例不能每次重建），按当前视图显隐。 */
   function ensureIdeaView(): IdeaViewHandle | null {
@@ -3487,7 +3506,7 @@ ${lines}
   function renderProduct(): string {
     const product = productOf(productSelected)
     const header = `<div class="view-head"><div><div class="eyebrow">产品设计</div><h1 class="page-title">产品</h1>
-      <div class="page-sub">导图记录功能，AI 生成设计笔记与多风格 Demo；产物保存到关联工作区</div><div class="head-pills"><span><b>${products.length}</b> 产品</span><span><b>${productModules.length}</b> 模块</span><span><b>${productDemos.length}</b> Demo</span></div></div>
+      <div class="page-sub">导图记录功能，AI 生成设计笔记与多风格 Demo；产物保存到关联工作区</div><div class="head-pills"><span><b>${products.length}</b> 产品</span><span><b>${productModules.length}</b> 模块</span><span><b>${projectDemos.length}</b> DEMO</span></div></div>
       <div style="display:flex;gap:6px"><button class="btn" data-act="goto-ui">${ic('layout', 13)}UI 设计</button><button class="btn" data-act="goto-demo">${ic('play', 13)}DEMO</button><button class="btn" data-act="ai-dispatch" data-kind="product">${ic('spark', 13)}AI 协同</button><button class="btn-primary" data-act="product-new">${ic('plus', 14)}新建产品</button></div></div>`
     if (productError !== '') {
       return header + `<div class="news-banner">${ic('flag', 13)}<span>产品读取失败：${esc(productError)}</span><button class="btn" data-act="product-refresh">重试</button></div>`
@@ -3508,7 +3527,7 @@ ${lines}
         ${productMaps.map(map => `<option value="${map.id}"${!productMapScopeAll && map.id === productMapSelected ? ' selected' : ''}>${esc(map.name)}</option>`).join('')}
       </select>`
     const tabs = `<div class="product-tabs">
-      ${(['map', 'notes', 'modules'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
+      ${(['map', 'notes', 'modules'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : `模块（${productModuleList(product).length}）`}</button>`).join('')}
       ${scopeSelect}
     </div>`
     let body = ''
@@ -3779,7 +3798,7 @@ ${lines}
       const pData = await pRes.json() as { products?: Product[]; demos?: ProductDemo[]; modules?: Module[] }
       const nData = await nRes.json() as { notes?: Note[]; notebooks?: Notebook[] }
       products = Array.isArray(pData.products) ? pData.products : []
-      productDemos = Array.isArray(pData.demos) ? pData.demos : []
+      /* 旧 product_demos 已按 D6 清理（1.13）；DEMO 改由独立视图读 /demos */
       productModules = Array.isArray(pData.modules) ? pData.modules : []
       notes = Array.isArray(nData.notes) ? nData.notes : notes
       notebooks = Array.isArray(nData.notebooks) ? nData.notebooks : notebooks
@@ -3787,21 +3806,12 @@ ${lines}
       await loadProductMaps()
       const product = productOf(productSelected)
       if (product && productPicked.size === 0) productPicked = productDefaultPicked(product)
-      // Demo 进度（失败不阻塞主数据）
-      try {
-        const gRes = await fetch(`${API}/products/demo-progress?productId=${encodeURIComponent(productSelected ?? '')}`)
-        if (gRes.ok) {
-          const gData = await gRes.json() as { progress?: DemoProgress | null }
-          demoProgress = gData.progress ?? null
-        }
-      } catch { /* 进度拉取失败不影响主流程 */ }
       productError = ''
     } catch (cause) { if (!silent) productError = String((cause as Error).message ?? cause) }
     productLoading = false
     if (ui.view !== 'product') return
     const sig = JSON.stringify({
       p: products.map(p => [p.id, p.name, p.updatedAt, p.mindmap.length]),
-      d: productDemos.map(d => [d.id, d.createdAt]),
       n: notes.length,
       g: [demoProgress?.step, demoProgress?.status, demoProgress?.message],
     })
@@ -5677,7 +5687,7 @@ ${common}
         const res = await fetch(`${API}/products/demo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ productId: product.id, scope, kind: productDemoKind, platform: productPlatform, style: productStyle, featureId: scope === 'feature' ? group[0].id : '', title, html }) })
         const data = await res.json() as { demo?: ProductDemo; message?: string }
         if (!res.ok || !data.demo) throw new Error(data.message ?? `HTTP ${res.status}`)
-        productDemos = [data.demo, ...productDemos.filter(d => d.id !== data.demo!.id)]
+        /* 旧 product_demos 已下线（D6）；如需生成请走 DEMO 视图的新工具 */
         last = data.demo
         const step = i + 1
         await fetch(`${API}/products/demo-progress`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ progress: { productId: product.id, demoId: data.demo.id, step, total: targets.length, status: step === targets.length ? 'done' : 'running', message: `已渲染 ${step}/${targets.length}：${title}` } }) })
@@ -6104,7 +6114,7 @@ ${common}
 - 产品 ID：${product.id}
 - 工作区绝对路径：${product.workspacePath || '未关联'}
 ${mapLine}
-- 当前进度：${mods.length} 个模块/业务/功能节点 · ${noteCount} 篇设计笔记 · ${productDemoList(product).length} 个 Demo
+- 当前进度：${mods.length} 个模块/业务/功能节点 · ${noteCount} 篇设计笔记 · DEMO 已独立成页
 - 导图 JSON：${mapMindmap().slice(0, 4000)}
 
 请检查模块/业务/功能/需求与 PC/移动/平板平台覆盖，找出缺口，然后：
@@ -6312,9 +6322,12 @@ ${mapLine}
       context = productNoteList(product).map(n => `## ${n.title}\n${n.content.slice(0, 6000)}`).join('\n\n')
     } else if (source === 'demo' && product) {
       // Demo 给工作区绝对文件路径（工作区 Agent 可直接读取），相对 Web URL 够不着（A5）
-      const demos = productDemoList(product).map(d => `- ${d.title}（${PRODUCT_STYLES.find(s => s.id === d.style)?.name ?? d.style} / ${d.scope === 'all' ? '整个产品' : '单功能'}） → ${d.filePath || '（未落盘）'}`).join('\n')
+      // 1.13：旧 product_demos 已按 D6 清理，改从新 demos 表取（按项目归属）
+      const projectId = projectCards().find(c => c.path === product.workspacePath)?.projectId ?? ''
+      const demoRows = projectId === '' ? [] : projectDemos.filter((d: { projectId: string; archivedAt?: string }) => d.projectId === projectId && (d.archivedAt ?? '') === '')
+      const demoLines = demoRows.map((d: { title: string; themeId: string; layoutMode: string; entryPath: string }) => `- ${d.title}（${themeOf(d.themeId).name} / ${d.layoutMode === 'multi' ? '多文件' : '单文件'}） → ${d.entryPath || '（未落盘）'}`).join('\n')
       const mindmapPath = product.workspacePath ? `${product.workspacePath}/.dsh-workbench/products/${product.id}/mindmap.json` : '（产品未关联工作区）'
-      context = `产品 Demo（工作区文件，请直接读取）：\n${demos || '（还没有 Demo）'}\n\n导图 JSON：${mindmapPath}\n\n设计笔记：\n${productNoteList(product).map(n => `## ${n.title}\n${n.content.slice(0, 4000)}`).join('\n\n')}`
+      context = `产品 Demo（工作区文件，请直接读取）：\n${demoLines || '（还没有 Demo）'}\n\n导图 JSON：${mindmapPath}\n\n设计笔记：\n${productNoteList(product).map(n => `## ${n.title}\n${n.content.slice(0, 4000)}`).join('\n\n')}`
     }
     const existingTitles = testCasesOf(project).map(c => `- ${c.title}`).join('\n')
     return `测试用例生成任务

@@ -75,5 +75,35 @@ const hidden = j(await call('GET', `/demos?projectId=${project.id}`)).demos
 const shown = j(await call('GET', `/demos?projectId=${project.id}&archived=1`)).demos
 check('归档后默认隐藏', hidden.length === 0 && shown.length === 1)
 
+
+// 11) 级联一致性：删 UI 设计 → DEMO 保留但解除关联
+{
+  const design = j(await call('POST', '/ui-designs', { design: { projectId: project.id, name: '级联测试', pages: [{ id: 'page-x', route: '/x', blocks: [{ id: 'bx' }] }] } })).design
+  const d2 = j(await call('POST', '/demos', { demo: { projectId: project.id, uiDesignId: design.id, title: '级联 Demo', themeId: 'clean', layoutMode: 'single' } })).demo
+  await call('DELETE', `/ui-designs/${design.id}`)
+  const after = j(await call('GET', `/demos/${d2.id}`)).demo
+  check('删 UI 设计后 DEMO 保留但解除关联', after !== undefined && after.uiDesignId === '', JSON.stringify({ uiDesignId: after?.uiDesignId }))
+}
+
+// 12) 级联一致性：删主题 → 引用降级到 clean
+{
+  const t = j(await call('POST', '/themes', { theme: { id: 'temp-theme', name: '临时', tokens: { bg: '#111', surface: '#222', text: '#eee', accent: '#f60', radius: 8 } } })).theme
+  const d3 = j(await call('POST', '/demos', { demo: { projectId: project.id, title: '主题级联', themeId: t.id, layoutMode: 'single' } })).demo
+  await call('DELETE', '/themes/temp-theme')
+  const after = j(await call('GET', `/demos/${d3.id}`)).demo
+  check('删主题后引用降级到 clean', after?.themeId === 'clean', String(after?.themeId))
+}
+
+// 13) 级联一致性：删项目 → ui_designs/demos 一并删除（无孤儿）
+{
+  const p2 = j(await call('POST', '/projects', { project: { name: '待删项目', workspacePath: tmp } })).project
+  await call('POST', '/ui-designs', { design: { projectId: p2.id, name: '孤儿测试', pages: [{ id: 'page-y', route: '/y', blocks: [{ id: 'by' }] }] } })
+  await call('POST', '/demos', { demo: { projectId: p2.id, title: '孤儿 Demo', themeId: 'clean', layoutMode: 'single' } })
+  await call('DELETE', `/projects/${p2.id}`)
+  const designs = j(await call('GET', `/ui-designs?projectId=${p2.id}&archived=1`)).designs
+  const demoList = j(await call('GET', `/demos?projectId=${p2.id}&archived=1`)).demos
+  check('删项目不留孤儿（UI 设计与 DEMO 均已清）', designs.length === 0 && demoList.length === 0, `designs=${designs.length} demos=${demoList.length}`)
+}
+
 console.log(`\n${pass}/${pass + fail} 通过`)
 process.exit(fail > 0 ? 1 : 0)
