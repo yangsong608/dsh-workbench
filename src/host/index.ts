@@ -1258,6 +1258,15 @@ CREATE TABLE IF NOT EXISTS products (
       const pid = pick(String(row.workspace_path ?? ''), String(row.name))
       if (pid !== '') this.db.prepare('UPDATE test_projects SET project_id = ? WHERE id = ?').run(pid, row.id)
     }
+    /* 关键：为每个「有工作区但还没有 Bug 项目」的统一项目补建一个 Bug 项目。
+       否则迁移完门户能选项目、Bug 页却是空的（用户还得手建）。每次启动都检查，兼顾存量数据。 */
+    for (const project of this.db.prepare("SELECT id, name, workspace_path FROM projects WHERE workspace_path <> '' AND archived_at = ''").all() as any[]) {
+      const has = this.db.prepare('SELECT id FROM bug_projects WHERE project_id = ? LIMIT 1').get(project.id) as any
+      if (has !== undefined) continue
+      const ts = isoDateTimeSeconds()
+      this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
+        .run(`bugp-${randomUUID().slice(0, 12)}`, String(project.name), String(project.workspace_path), basename(String(project.workspace_path)), String(project.id), ts, ts)
+    }
   }
 
   /* ---------- 统一项目 CRUD ---------- */

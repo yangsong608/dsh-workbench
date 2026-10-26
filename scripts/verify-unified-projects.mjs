@@ -80,5 +80,27 @@ check('删项目保留产品数据', ov3.length === 0 && prodAfter.length >= 2, 
   check('projects 表结构完整', ['id','name','workspace_path','archived_at','sort_order'].every(c => cols.includes(c)), JSON.stringify(cols))
 }
 
+
+// 9) 迁移兜底：已有统一项目但缺 Bug 项目时，启动即为每个项目补建
+{
+  const db = new DatabaseSync(dbFile)
+  // 造一个「有项目、无 Bug 项目」的状态：删掉所有 bug_projects
+  db.exec('DELETE FROM bug_projects')
+  const before = db.prepare('SELECT COUNT(*) n FROM bug_projects').get().n
+  db.close()
+  // 重新 apply 一次（模拟重启）
+  const reg2 = []
+  const host2 = await import(`file://${root}/lib/index.js?reboot=${Date.now()}`)
+  host2.apply({ webServer: { register(r) { reg2.push(r) } }, tools: { register() {} } })
+  const route2 = reg2.find(r => r.path === '/workbench-api')
+  const call2 = (m, u, b) => new Promise(res => {
+    const req = { url: `/workbench-api${u}`, method: m, json: async () => b ?? {} }
+    route2.handler(req, { status: 0, writeHead(s) { this.status = s }, end(p) { res({ status: this.status, body: p ? JSON.parse(p) : null }) } })
+  })
+  const prjs = (await call2('GET', '/projects')).body.projects.filter(p => p.workspacePath !== '')
+  const bugs = (await call2('GET', '/bugs')).body.projects
+  check('重启后为缺 Bug 项目的统一项目自动补建', before === 0 && bugs.length >= prjs.length, `before=${before} prjs=${prjs.length} bugs=${bugs.length}`)
+}
+
 console.log(`\n${pass}/${pass+fail} 通过`)
 process.exit(fail>0?1:0)
