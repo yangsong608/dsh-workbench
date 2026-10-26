@@ -19,7 +19,12 @@ export interface UiDesignDeps {
   ensureStyles: (css: string) => void
   onGenerate?: (design: UiDesign) => void
   onBuildDemo?: (design: UiDesign, pageId?: string) => void
+  /** 打开测试页（点覆盖度徽标时）。 */
+  onOpenTest?: () => void
 }
+
+/** 单页测试覆盖度（来自 /tests/coverage）。 */
+export interface PageCoverage { pageId: string; name: string; total: number; passed: number; failed: number; pending: number }
 
 export interface UiDesignPageBlock { id: string; role: string; desc: string }
 export interface UiDesignPage {
@@ -52,6 +57,16 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
   let loading = false
   let mounted = false
   let specDraft = ''
+  /** 页面覆盖度（uiDesignId → 每页统计） */
+  let coverage: PageCoverage[] = []
+
+  async function loadCoverage(designId: string): Promise<void> {
+    if (designId === '') { coverage = []; return }
+    try {
+      const data = await api(`/tests/coverage?uiDesignId=${encodeURIComponent(designId)}`)
+      coverage = Array.isArray(data.pages) ? data.pages : []
+    } catch { coverage = [] }
+  }
 
   const current = (): UiDesign | undefined => designs.find(d => d.id === activeId) ?? designs[0]
 
@@ -77,6 +92,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
       if (!designs.some(d => d.id === activeId)) activeId = designs[0]?.id ?? ''
       const hit = current()
       specDraft = hit?.id === current()?.id ? (specDraft || '') : ''
+      if (hit !== undefined) await loadCoverage(hit.id)
     } catch (cause) {
       deps.toast(`加载 UI 设计失败：${String((cause as Error).message ?? cause)}`)
     }
@@ -104,6 +120,16 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
           ${(page.states ?? []).length > 0 ? `<span class="ud-tag st">${(page.states ?? []).length} 状态</span>` : ''}
           ${(page.interactions ?? []).length > 0 ? `<span class="ud-tag st">${(page.interactions ?? []).length} 交互</span>` : ''}
         </div>
+        ${(() => {
+          const cov = coverage.find(c => c.pageId === page.id)
+          if (cov === undefined || cov.total === 0) {
+            return `<div class="ud-cov ud-cov-none" data-ud="coverage" data-page="${esc(page.id)}">未测</div>`
+          }
+          const bad = cov.failed > 0
+          return `<div class="ud-cov${bad ? ' bad' : ''}" data-ud="coverage" data-page="${esc(page.id)}" title="点击查看测试页">
+            用例 ${cov.total} · <span style="color:var(--ud-green)">过 ${cov.passed}</span>${bad ? ` · <span style="color:var(--ud-red)">败 ${cov.failed}</span>` : ''}${cov.pending > 0 ? ` · 待 ${cov.pending}` : ''}
+          </div>`
+        })()}
         <div class="ops">
           <button class="ud-btn tiny" data-ud="page-edit" data-page="${esc(page.id)}">编辑</button>
           <button class="ud-btn tiny" data-ud="page-optimize" data-page="${esc(page.id)}">AI 优化此页</button>
@@ -262,6 +288,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
         if (act === 'page-edit') { if (design) openPageModal(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'page-optimize') { if (design) void runOptimize(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'page-demo') { if (design) deps.onBuildDemo?.(design, el.getAttribute('data-page') ?? ''); return }
+        if (act === 'coverage') { deps.onOpenTest?.(); return }
         if (act === 'spec-edit') { if (design) openSpecModal(design); return }
         if (act === 'archive') {
           if (design) {

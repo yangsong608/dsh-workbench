@@ -68,6 +68,13 @@ export const UI_DEMO_CSS = String.raw`
 .ud-tag.st{color:var(--ud-amber);border-color:color-mix(in srgb,var(--ud-amber) 35%,var(--ud-line))}
 .ud-page .ops{display:flex;gap:4px}
 
+/* 页面覆盖度徽标 */
+.ud-cov{display:inline-block;font-size:9px;border-radius:5px;padding:1px 6px;margin-bottom:5px;
+  border:1px solid color-mix(in srgb,var(--ud-green) 35%,var(--ud-line));color:var(--ud-text-2);cursor:pointer}
+.ud-cov:hover{background:var(--ud-hover)}
+.ud-cov.bad{border-color:color-mix(in srgb,var(--ud-red) 40%,var(--ud-line))}
+.ud-cov-none{border-color:var(--ud-line);color:var(--ud-text-3)}
+
 /* ---------- UI 设计：规范 + 令牌 ---------- */
 .ud-spec-wrap{display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:10px}
 .ud-spec{font-size:11.5px;color:var(--ud-text-2);line-height:1.75;max-height:520px;overflow:auto}

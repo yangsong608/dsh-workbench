@@ -1063,6 +1063,22 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return `<div id="wb-demo-host" class="ud-host"></div>`
   }
 
+  /**
+   * T4/T5：UI 设计或 DEMO 出新版本时，**硬删除**基于旧版本生成的用例（含已执行）。
+   * 因为不可逆，首次触发会弹窗说明。
+   */
+  async function purgeStaleCases(scope: { uiDesignId?: string; demoId?: string; keepVersion: string }): Promise<void> {
+    try {
+      const res = await fetch(`${API}/tests/purge-stale`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(scope),
+      })
+      const data = await res.json().catch(() => ({})) as { removed?: number }
+      const n = Number(data.removed ?? 0)
+      if (n > 0) toast(`已清理 ${n} 条基于旧版本的测试用例（不可恢复）`)
+    } catch { /* 清理失败不影响主流程 */ }
+  }
+
   /** DEMO → 派发团队生成 HTML 产物（feature=demo.build；工具 workbench_demo_publish 落盘）。 */
   async function buildDemoHtml(demo: { id: string; title: string; layoutMode: string; uiDesignId: string; themeId: string; platform: string }): Promise<void> {
     const projectId = currentProjectId()
@@ -1163,8 +1179,22 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       allowNoIdea: true,
     } as any, {
       status: (status: string, note?: string) => {
-        if (status === 'done') { toast('UI 设计已生成'); uiDesignView?.reload() }
-        else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
+        if (status === 'done') {
+          toast('UI 设计已生成')
+          uiDesignView?.reload()
+          /* 1.14 T4/T5：UI 设计出新版本后，硬删除基于旧版本生成的用例。
+             designVersion 用 UI 设计的 updatedAt 时间戳（表里没有独立版本号字段），
+             生成用例时写入该值，重新生成后时间戳变化 → 旧用例被判定过期。 */
+          void (async () => {
+            try {
+              const res = await fetch(`${API}/ui-designs/${encodeURIComponent(design.id)}`)
+              if (!res.ok) return
+              const data = await res.json() as { design?: { updatedAt?: string } }
+              const stamp = String(data.design?.updatedAt ?? '')
+              if (stamp !== '') await purgeStaleCases({ uiDesignId: design.id, keepVersion: stamp })
+            } catch { /* ignore */ }
+          })()
+        } else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
       },
     } as any)
     if (started === null) { toast('派发失败：提示词已复制，可粘贴到新会话'); return }
@@ -1403,6 +1433,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         renderAll()
       },
       onGenerate: design => { void generateUiDesign(design) },
+      onOpenTest: () => { ui.view = 'test'; renderAll() },
     })
     uiDesignView.mount()
     return uiDesignView
@@ -6645,7 +6676,7 @@ ${testCasesOf(project).map(c => `- ${c.title}`).join('\n') || '（无）'}
 - priority：P0/P1/P2/P3；type：functional|boundary|exception|permission|regression
 - role：**必须来自文档里的角色清单**
 - uiDesignId："${uiId}"、pageId：**必须来自文档「页面与区块」列**、blockId：可选
-- designVersion："v1"
+- designVersion："${plan?.sourceUiDesignId ? 'v1' : 'v1'}"
 
 硬约束：
 1. 每条用例必须有真实 pageId（page-home / page-booking / page-orders / page-order-detail / page-profile 之一）；
@@ -7002,11 +7033,11 @@ ${lines}`
     try {
       const res = await fetch(`${API}/ui-designs?projectId=${encodeURIComponent(projectId)}`)
       if (res.ok) {
-        const data = await res.json() as { designs?: Array<{ id: string; name: string; pages?: Array<{ id: string; name: string; route: string; goal?: string; blocks?: Array<{ id: string; role: string; desc: string }>; states?: string[]; interactions?: string[] }> }> }
+        const data = await res.json() as { designs?: Array<{ id: string; name: string; updatedAt?: string; pages?: Array<{ id: string; name: string; route: string; goal?: string; blocks?: Array<{ id: string; role: string; desc: string }>; states?: string[]; interactions?: string[] }> }> }
         const design = (data.designs ?? []).find(d => (d.pages ?? []).length > 0)
         if (design !== undefined) {
           uiDesignId = design.id
-          uiVersion = 'v1'
+          uiVersion = String(design.updatedAt ?? 'v1')   /* 用 updatedAt 作版本基线，UI 重新生成后即变化 */
           pageLines = (design.pages ?? []).map(p => {
             const blocks = (p.blocks ?? []).map(b => `${b.id}(${b.role})`).join(' ')
             return `- ${p.id}｜${p.name}｜${p.route}${p.goal ? `｜目标：${p.goal}` : ''}\n  区块：${blocks}${(p.states ?? []).length ? `｜状态：${(p.states ?? []).join('、')}` : ''}`
@@ -7128,12 +7159,21 @@ ${lines}`
     } else if (testTab === 'run') {
       const runs = testRunsOf(project)
       const run = testRunOf(testRunSelected) ?? runs[0]
-      if (!run) body = `<div class="notes-empty small">还没有运行。<button class="btn-primary" data-act="test-start">${ic('play', 12)}开始测试</button></div>`
+      /* 1.14：执行 Tab 顶部显示所属计划与待回归队列 */
+      const planBar = (() => {
+        const plan = testPlans[0]
+        const pending = pendingRegression.length
+        if (plan === undefined && pending === 0) return ''
+        const planTxt = plan !== undefined ? `计划「${esc(plan.name)}」· 覆盖 ${(plan.scopePages ?? []).length} 页` : '未关联计划'
+        const pendTxt = pending > 0 ? ` · <span style="color:var(--amber)">${pending} 条待回归</span>` : ''
+        return `<div class="coverage" style="margin-bottom:8px"><span>${planTxt}${pendTxt}</span>${pending > 0 ? `<button class="btn tiny" data-act="test-run-pending" style="margin-left:auto">回归这批</button>` : ''}</div>`
+      })()
+      if (!run) body = planBar + `<div class="notes-empty small">还没有运行。<button class="btn-primary" data-act="test-start">${ic('play', 12)}开始测试</button></div>`
       else {
         const c = testCounts(run)
-        body = `<div class="product-panel-head"><div><b>${esc(run.name)}</b><span>${c.pass}/${c.total} 通过 · ${TEST_STATUS_LABEL[run.status] ?? run.status} · ${platformLabel(project.platform || 'all')}</span></div><div class="product-actions"><button class="btn" data-act="test-start">${ic('plus', 12)}新运行</button><button class="btn" data-act="test-exec">${ic('spark', 12)}AI 自动化测试</button>${run.status !== 'running' ? `<button class="btn" data-act="test-regression">${ic('refresh', 12)}回归失败用例</button>` : ''}<button class="btn-primary" data-act="test-finish" data-id="${run.id}">${ic('check', 12)}完成并生成报告</button></div></div>
+        body = planBar + `<div class="product-panel-head"><div><b>${esc(run.name)}</b><span>${c.pass}/${c.total} 通过 · ${TEST_STATUS_LABEL[run.status] ?? run.status} · ${platformLabel(project.platform || 'all')}</span></div><div class="product-actions"><button class="btn" data-act="test-start">${ic('plus', 12)}新运行</button><button class="btn" data-act="test-exec">${ic('spark', 12)}AI 自动化测试</button>${run.status !== 'running' ? `<button class="btn" data-act="test-regression">${ic('refresh', 12)}回归失败用例</button>` : ''}<button class="btn-primary" data-act="test-finish" data-id="${run.id}">${ic('check', 12)}完成并生成报告</button></div></div>
           <div class="test-live-stage"><div class="test-live-ring" style="--rate:${c.rate}%"><b>${c.rate}%</b><span>实时通过率</span></div><div class="test-live-bars">${run.results.map((r, i) => `<i class="${r.status}" style="--h:${Math.max(12, 20 + (i + 1) / Math.max(1, run.results.length) * 80)}%;--d:${i * 45}ms"></i>`).join('')}<div class="test-live-scan"></div></div><div class="test-live-legend"><span>通过 ${c.pass}</span><span>失败 ${c.fail}</span><span>阻塞 ${c.blocked}</span><span>待测 ${c.pending}</span></div></div>
-          <div class="test-run-list">${run.results.map(r => testCases.find(tc => tc.id === r.caseId)).filter((tc): tc is TestCase => Boolean(tc)).map(tc => { const r = testResultOf(run, tc.id); return `<div class="test-run-case ${r.status}"><div><span class="test-prio p${tc.priority.slice(1)}">${tc.priority}</span><b>${esc(tc.title)}</b><small>${esc(tc.expected)}</small></div><div class="test-run-actions">${(['pass', 'fail', 'blocked'] as const).map(s => `<button class="${r.status === s ? 'on' : ''}" data-act="test-result" data-run="${run.id}" data-case="${tc.id}" data-status="${s}">${TEST_RESULT_LABEL[s]}</button>`).join('')}${r.status !== 'pass' ? `<button class="btn" data-act="test-bug" data-run="${run.id}" data-case="${tc.id}">录 Bug</button>` : ''}${r.bugId ? `<i class="test-bug-id">${r.bugId.slice(-6)}</i>` : ''}</div><input class="test-note" data-test-note="${tc.id}" placeholder="实际结果/证据" value="${esc(r.note)}"></div>` }).join('')}</div>`
+          <div class="test-run-list">${run.results.map(r => testCases.find(tc => tc.id === r.caseId)).filter((tc): tc is TestCase => Boolean(tc)).map(tc => { const r = testResultOf(run, tc.id); return `<div class="test-run-case ${r.status}"><div><span class="test-prio p${tc.priority.slice(1)}">${tc.priority}</span><b>${esc(tc.title)}</b>${tc.role ? `<span class="note-kind">${esc(tc.role)}</span>` : ''}${tc.pageId ? `<span class="note-kind">▸ ${esc(tc.pageId)}</span>` : ''}<small>${esc(tc.expected)}</small></div><div class="test-run-actions">${(['pass', 'fail', 'blocked'] as const).map(s => `<button class="${r.status === s ? 'on' : ''}" data-act="test-result" data-run="${run.id}" data-case="${tc.id}" data-status="${s}">${TEST_RESULT_LABEL[s]}</button>`).join('')}${r.status !== 'pass' ? `<button class="btn" data-act="test-bug" data-run="${run.id}" data-case="${tc.id}">录 Bug</button>` : ''}${r.bugId ? `<i class="test-bug-id">${r.bugId.slice(-6)}</i>` : ''}</div><input class="test-note" data-test-note="${tc.id}" placeholder="实际结果/证据" value="${esc(r.note)}"></div>` }).join('')}</div>`
       }
     } else if (testTab === 'report') {
       const run = testRunOf(testRunSelected) ?? testRunsOf(project)[0]
