@@ -1187,11 +1187,12 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
              生成用例时写入该值，重新生成后时间戳变化 → 旧用例被判定过期。 */
           void (async () => {
             try {
-              const res = await fetch(`${API}/ui-designs/${encodeURIComponent(design.id)}`)
+              /* 用真实版本 id（不是 updatedAt）——改主题/改名不会建新版本，也就不会误删用例 */
+              const res = await fetch(`${API}/ui-designs/${encodeURIComponent(design.id)}/versions`)
               if (!res.ok) return
-              const data = await res.json() as { design?: { updatedAt?: string } }
-              const stamp = String(data.design?.updatedAt ?? '')
-              if (stamp !== '') await purgeStaleCases({ uiDesignId: design.id, keepVersion: stamp })
+              const data = await res.json() as { versions?: Array<{ id: string }> }
+              const cur = data.versions?.[0]?.id ?? ''
+              if (cur !== '') await purgeStaleCases({ uiDesignId: design.id, keepVersion: cur })
             } catch { /* ignore */ }
           })()
         } else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
@@ -7048,7 +7049,15 @@ ${lines}`
         const design = (data.designs ?? []).find(d => (d.pages ?? []).length > 0)
         if (design !== undefined) {
           uiDesignId = design.id
-          uiVersion = String(design.updatedAt ?? 'v1')   /* 用 updatedAt 作版本基线，UI 重新生成后即变化 */
+          /* 版本基线：取当前版本 id（真实版本号，不是时间戳） */
+          try {
+            const vRes = await fetch(`${API}/ui-designs/${encodeURIComponent(design.id)}/versions`)
+            if (vRes.ok) {
+              const vData = await vRes.json() as { versions?: Array<{ id: string }> }
+              uiVersion = String(vData.versions?.[0]?.id ?? 'v1')
+            }
+          } catch { /* ignore */ }
+          if (uiVersion === '') uiVersion = 'v1'
           pageLines = (design.pages ?? []).map(p => {
             const blocks = (p.blocks ?? []).map(b => `${b.id}(${b.role})`).join(' ')
             return `- ${p.id}｜${p.name}｜${p.route}${p.goal ? `｜目标：${p.goal}` : ''}\n  区块：${blocks}${(p.states ?? []).length ? `｜状态：${(p.states ?? []).join('、')}` : ''}`

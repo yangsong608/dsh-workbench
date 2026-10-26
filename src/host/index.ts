@@ -433,6 +433,15 @@ CREATE INDEX IF NOT EXISTS idx_demos_project ON demos(project_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_demo_versions ON demo_versions(demo_id, seq);
 CREATE INDEX IF NOT EXISTS idx_demo_files ON demo_files(demo_id, version_id);
 CREATE INDEX IF NOT EXISTS idx_themes_project ON themes(project_id, builtin);
+/* 1.14：UI 设计版本序列（用于判断测试用例是否过期——只用 updatedAt 会把「改主题」也判定为过期） */
+CREATE TABLE IF NOT EXISTS ui_design_versions (
+  id TEXT PRIMARY KEY, design_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual',
+  summary TEXT NOT NULL DEFAULT '',
+  pages TEXT NOT NULL DEFAULT '[]', page_count INTEGER NOT NULL DEFAULT 0,
+  block_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 `
 
 class SqliteStore {
@@ -1432,6 +1441,27 @@ CREATE TABLE IF NOT EXISTS products (
       try { insert.run(theme.id, theme.name, theme.hint, theme.platform, JSON.stringify(theme.tokens), theme.spec, now, now) }
       catch (cause) { console.warn(`[dsh-workbench] 内置主题写入失败 ${theme.id}：${String(cause)}`) }
     }
+    /* UI 设计版本表（旧库补建）+ 为已有设计补一条 v1 */
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS ui_design_versions (
+        id TEXT PRIMARY KEY, design_id TEXT NOT NULL, seq INTEGER NOT NULL,
+        label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual',
+        summary TEXT NOT NULL DEFAULT '',
+        pages TEXT NOT NULL DEFAULT '[]', page_count INTEGER NOT NULL DEFAULT 0,
+        block_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      )`)
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_ui_versions ON ui_design_versions(design_id, seq)')
+      /* 为还没有版本的 UI 设计补一条「初始版本」 */
+      const designs = this.db.prepare("SELECT id, pages, name FROM ui_designs WHERE id NOT IN (SELECT DISTINCT design_id FROM ui_design_versions)").all() as any[]
+      const ins = this.db.prepare('INSERT INTO ui_design_versions(id, design_id, seq, label, source, summary, pages, page_count, block_count, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      for (const d of designs) {
+        const pages = safeJson(d.pages, []) as any[]
+        const blocks = pages.reduce((n: number, p: any) => n + ((p.blocks ?? []).length), 0)
+        ins.run(`uidv-${randomUUID().slice(0, 12)}`, String(d.id), 1, '初始版本', 'migrate',
+          '由旧数据补建', JSON.stringify(pages), pages.length, blocks, now)
+      }
+    } catch (cause) { console.warn(`[dsh-workbench] UI 设计版本表迁移失败：${String(cause)}`) }
     /* 旧 Demo 清理标记（由 migrateDemoCleanup 使用；此处仅确保 meta 表存在语义清晰） */
     void now
   }
@@ -1687,6 +1717,9 @@ CREATE TABLE IF NOT EXISTS products (
     if (demoId !== '') { conds.push('demo_id = ?'); params.push(demoId) }
     const where = conds.join(uiDesignId !== '' && demoId !== '' ? ' OR ' : '')
     const rows = this.db.prepare(`SELECT id, design_version FROM test_cases WHERE ${where}`).all(...params) as any[]
+    /* 1.14：design_version 现在存的是版本 id（uidv-xxx）。keep 为空则全删；
+       否则只删「版本 id 与当前版本不一致」的用例。兼容旧数据（v1/时间戳）：
+       旧值一律视为过期（因为无法判定，宁可让用户重新生成）。 */
     const stale = keep === '' ? rows : rows.filter(r => String(r.design_version ?? '') !== keep)
     if (stale.length === 0) return 0
     const del = this.db.prepare('DELETE FROM test_cases WHERE id = ?')
@@ -2755,6 +2788,45 @@ CREATE TABLE IF NOT EXISTS products (
     } catch (cause) { console.warn(`[dsh-workbench] 删除 DEMO 目录失败：${String(cause)}`) }
   }
 
+  /* ---------- UI 设计版本（1.14：判断测试用例是否过期） ---------- */
+
+  private uiVersionRow(row: any): any {
+    return {
+      id: row.id, designId: row.design_id, seq: Number(row.seq ?? 0),
+      label: row.label ?? '', source: row.source ?? 'manual', summary: row.summary ?? '',
+      pages: safeJson(row.pages, []), pageCount: Number(row.page_count ?? 0),
+      blockCount: Number(row.block_count ?? 0), createdAt: row.created_at,
+    }
+  }
+
+  listUiDesignVersions(designId: string): any[] {
+    return (this.db.prepare('SELECT * FROM ui_design_versions WHERE design_id = ? ORDER BY seq DESC').all(str(designId)) as any[])
+      .map(row => this.uiVersionRow(row))
+  }
+
+  /**
+   * 为 UI 设计建版本。只有当页面清单真的变化时才建（改主题/改名不算）。
+   * source：ai（生成）/ manual（手工改页面）/ migrate（旧数据补建）
+   */
+  private createUiVersionIfChanged(designId: string, pages: any[], source: string, label = ''): any | null {
+    const list = this.listUiDesignVersions(designId)
+    const current = list[0]
+    const json = JSON.stringify(pages ?? [])
+    if (current !== undefined && JSON.stringify(current.pages ?? []) === json) return null  /* 内容没变，不建版本 */
+    const seq = (current?.seq ?? 0) + 1
+    const blocks = (pages ?? []).reduce((n: number, p: any) => n + ((p.blocks ?? []).length), 0)
+    const id = `uidv-${randomUUID().slice(0, 12)}`
+    this.db.prepare(`INSERT INTO ui_design_versions(id, design_id, seq, label, source, summary, pages, page_count, block_count, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, str(designId), seq, label || `v${seq}`, source, '', json, (pages ?? []).length, blocks, isoDateTimeSeconds())
+    return this.uiVersionRow(this.db.prepare('SELECT * FROM ui_design_versions WHERE id = ?').get(id))
+  }
+
+  /** 当前版本（最新）。 */
+  currentUiVersion(designId: string): any | undefined {
+    return this.listUiDesignVersions(designId)[0]
+  }
+
   /* ---------- UI 设计（D1 项目为根；页面清单为 DEMO 契约） ---------- */
 
   /** 页面清单 schema 校验：每页必须有 id/route/blocks[]，id 唯一。 */
@@ -2856,7 +2928,11 @@ CREATE TABLE IF NOT EXISTS products (
         VALUES(?,?,?,?,'',?,?,?,?,?,?,'',?,?)`)
         .run(id, projectId, productId, mapId, name, themeId, platform, pagesJson, docKey, status, now, now)
     }
-    return this.uiDesignRow(this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(id))
+    const saved = this.uiDesignRow(this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(id))
+    /* 1.14：页面清单真正变化时才建版本（改主题/改名不建） */
+    try { this.createUiVersionIfChanged(saved.id, checked.value, str(input?.versionSource) || 'manual', str(input?.versionLabel)) }
+    catch (cause) { console.warn(`[dsh-workbench] UI 版本创建失败：${String(cause)}`) }
+    return saved
   }
 
   /** 按页更新（D4：只改目标页，其它页不变）。 */
@@ -6135,6 +6211,12 @@ export function apply(ctx: any): void {
             uiDesignId: str(body?.uiDesignId), demoId: str(body?.demoId), keepVersion: str(body?.keepVersion),
           }))
           send(res, 200, { ok: true, removed })
+          return
+        }
+        /* UI 设计版本（1.14） */
+        if (method === 'GET' && /^\/ui-designs\/[^/]+\/versions$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          send(res, 200, { ok: true, versions: store.listUiDesignVersions(decodeURIComponent(parts[1])) })
           return
         }
         /* 用例追溯链校验 + 页面覆盖度（1.14 T2/覆盖度回流） */
