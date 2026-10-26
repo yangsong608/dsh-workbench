@@ -107,7 +107,9 @@ button{font:inherit;color:inherit}
 .icon-btn.on{background:var(--accent-soft);color:var(--accent-ink)}
 .save{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:5px;margin:0 4px;white-space:nowrap}
 .save i{width:6px;height:6px;border-radius:50%;background:var(--green);display:block}
-.btn-primary{height:29px;padding:0 13px;border:0;border-radius:7px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(91,91,214,.3)}
+/* 主按钮：背景用 --wb-btn-accent（默认品牌紫）。
+   不直接用 var(--accent)：某些主题的 accent 是近白色（实测 #f9fafb），会导致白底白字按钮隐形。 */
+.btn-primary{height:29px;padding:0 13px;border:0;border-radius:7px;background:var(--wb-btn-accent,#5b5bd6);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(91,91,214,.3)}
 .btn-primary:hover{filter:brightness(1.06)}
 .workspace{flex:1;min-height:0;display:flex}
 .content{flex:1;min-width:0;overflow:auto;padding:20px 24px 48px}
