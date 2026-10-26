@@ -1246,13 +1246,21 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       `4. 只写页面结构与交互，不写代码。`,
     ].filter(line => line !== '').join('\n')
     try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
+    /* 1.15：打开页内会话，让用户能看到过程并随时停止 */
+    const chat = ensureProductChat()
+    chat?.open({ teamName: '', dispatchId: '', sessionId: '', timeoutMs: 20 * 60 * 1000 })
+    chat?.setStatus('dispatching')
     const started = await startAgentDispatch({
       ideaId: '', runId: '', teamId: '', feature: 'ui.design',
       goal: prompt, ideaTitle: design.name, ideaBrief: product?.description ?? '',
       workspacePath: product?.workspacePath ?? '', timeoutMs: 20 * 60 * 1000,
       allowNoIdea: true,
     } as any, {
+      event: (event: any) => chat?.ingest(event),
+      history: (events: any[]) => chat?.ingestMany(events),
+      team: (state: any) => chat?.setTeam(state),
       status: (status: string, note?: string) => {
+        chat?.setStatus(status, note)
         if (status === 'done') {
           toast('UI 设计已生成')
           uiDesignView?.reload()
@@ -1274,6 +1282,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     } as any)
     if (started === null) { toast('派发失败：提示词已复制，可粘贴到新会话'); return }
     uiDesignDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
+    /* 同步到 productDispatch：页内会话的「停止」按钮靠它定位当前任务 */
+    productDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
     toast(`已派发给「${started.teamName}」生成 UI 设计（进度可在页内会话查看）`)
     /* 轮询 UI 设计是否出现（工具写入后会新增记录） */
     const t0 = Date.now()
@@ -5187,17 +5197,27 @@ ${common}
     }
   }
 
+  /** 1.15 B2：通用取消——走 /cancel 端点（保留部分结果，不新建记录）。 */
+  async function cancelDispatch(dispatchId: string, chat?: { setStatus: (s: string, n?: string) => void } | null): Promise<void> {
+    if (dispatchId === '') return
+    try {
+      const res = await fetch(`${API}/agents/dispatches/${encodeURIComponent(dispatchId)}/cancel`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: '用户手动停止' }),
+      })
+      const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string; note?: string; dispatch?: { status?: string } }
+      if (!res.ok) throw new Error(data.error === 'not_running' ? '该任务已不在运行中' : (data.error ?? `HTTP ${res.status}`))
+      toast(data.note ?? '已停止')
+      chat?.setStatus('stopped', data.note ?? '')
+      return
+    } catch (cause) { toast(`停止失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
   async function stopProductDispatch(): Promise<void> {
     if (productDispatch === null) return
-    try {
-      await fetch(`${API}/agents/dispatches/${encodeURIComponent(productDispatch.dispatchId)}`, {
-        method: 'PATCH', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ status: 'cancelled', error: '用户手动停止' }),
-      })
-      await sendToSession(productDispatch.sessionId, '请主理人立即停止当前团队工作，保留已完成的结果，并用一句话说明已停止。').catch(() => undefined)
-      toast('已请求停止')
-    } catch (cause) { toast(`停止失败：${String((cause as Error).message ?? cause)}`) }
-    productChat?.setStatus('stopped')
+    /* 先通知主理人收尾，再走 /cancel 置状态（顺序反了会因状态已终态而被拒） */
+    await sendToSession(productDispatch.sessionId, '请主理人立即停止当前团队工作，保留已完成的结果，并用一句话说明已停止。').catch(() => undefined)
+    await cancelDispatch(productDispatch.dispatchId, productChat)
   }
 
   /** 进度轮询：3 秒一次，直到 done/failed；同时刷新模块列表让产物即时出现。 */

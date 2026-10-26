@@ -336,6 +336,31 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           }
           fail(res, 405, '不支持的方法'); return true
         }
+        /* 1.15 B2：独立取消派发（不必 force 顶掉，也不新建记录） */
+        if (c === 'cancel') {
+          if (method !== 'POST') { fail(res, 405, '不支持的方法'); return true }
+          const dispatch = store.getDispatch(b)
+          if (dispatch === null) { fail(res, 404, '派发不存在'); return true }
+          const st = String((dispatch as AnyMap).status ?? '')
+          if (!['dispatching', 'running'].includes(st)) {
+            send(res, 409, { ok: false, error: 'not_running', status: st }); return true
+          }
+          /* 已有产出则标 partial（保留部分结果），否则 cancelled */
+          const hasOutput = Number((dispatch as AnyMap).tokens ?? 0) > 0
+            || store.listEvents(b).some((e: AnyMap) => String(e.type ?? '').includes('tool/result'))
+          const body = await readJson(req).catch(() => ({})) as AnyMap
+          const next = store.updateDispatch(b, {
+            status: hasOutput ? 'partial' : 'cancelled',
+            error: String(body?.reason ?? (hasOutput ? '用户手动停止（已保留部分结果）' : '用户手动停止')),
+          })
+          send(res, 200, {
+            ok: true, dispatch: next,
+            note: hasOutput
+              ? '已标记停止，已产生的部分结果保留。注意：AI 可能仍在跑完当前步，但后续不再计入本次任务。'
+              : '已停止。',
+          })
+          return true
+        }
         if (c === 'events') {
           if (method === 'POST') {
             const body = await readJson(req)
