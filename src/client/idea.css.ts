@@ -46,6 +46,25 @@ export const IDEA_CSS = String.raw`
 .chat-dot{width:7px;height:7px;border-radius:50%;background:var(--text-3)}
 .chat-status{font-size:10px;padding:1px 6px;border-radius:99px;background:var(--panel-2);color:var(--text-3)}
 .chat-status.running,.chat-status.dispatching{background:color-mix(in srgb,#2563eb 14%,transparent);color:#1d4ed8}
+/* 1.15 C1 成员看板：谁在跑、跑什么、成功/失败各几个 */
+.chat-board{padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.chat-board-head{font-size:10.5px;color:var(--text-2);margin-bottom:5px}
+.chat-board-head .ok{color:var(--green)}
+.chat-board-head .run{color:var(--accent)}
+.chat-board-head .bad{color:var(--red)}
+.chat-board-cards{display:flex;gap:5px;overflow-x:auto;padding-bottom:2px}
+.chat-board-card{display:flex;gap:5px;align-items:flex-start;min-width:120px;max-width:180px;padding:5px 7px;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+.chat-board-card.running{border-color:color-mix(in srgb,#2563eb 45%,var(--line))}
+.chat-board-card.done{border-color:color-mix(in srgb,#16a34a 40%,var(--line))}
+.chat-board-card.failed,.chat-board-card.timeout{border-color:color-mix(in srgb,#dc2626 40%,var(--line))}
+.chat-board-dot{width:6px;height:6px;border-radius:99px;background:var(--text-3);flex:none;margin-top:4px}
+.chat-board-card.running .chat-board-dot{background:#2563eb}
+.chat-board-card.done .chat-board-dot{background:#16a34a}
+.chat-board-card.failed .chat-board-dot,.chat-board-card.timeout .chat-board-dot{background:#dc2626}
+.chat-board-main{min-width:0}
+.chat-board-main b{display:block;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-board-status{font-size:9px;color:var(--text-3)}
+.chat-board-task{font-size:9px;color:var(--text-3);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .chat-status.done{background:color-mix(in srgb,#0f9f6e 14%,transparent);color:#0b7a54}
 .chat-status.failed,.chat-status.timeout,.chat-status.cancelled{background:color-mix(in srgb,#d83b3b 12%,transparent);color:#b42323}
 .chat-count{font-size:10px;color:var(--text-3)}

@@ -16,14 +16,52 @@ export interface ChatItem {
 }
 export interface ChatMeta { teamName: string; dispatchId: string; sessionId: string; timeoutMs: number }
 
-export interface TeamState { members: number; tasksDone: number; tasksTotal: number }
+export interface TeamMemberState {
+  id: string; name: string; role: string
+  /** pending | running | done | failed | timeout | idle */
+  status: string
+  /** 当前任务标题（投影里有就给） */
+  task: string
+}
 
-/** 从 Lead 会话的 agentTeam 投影提取成员/任务计数（读不到返回 null）。 */
+export interface TeamState {
+  members: number; tasksDone: number; tasksTotal: number
+  /** 1.15 C1：成员明细（看板用） */
+  memberList: TeamMemberState[]
+  running: number; done: number; failed: number
+}
+
+/** 从 Lead 会话的 agentTeam 投影提取成员/任务信息（读不到返回 null）。 */
 export function teamStateOf(projection: any): TeamState | null {
   if (projection === null || typeof projection !== 'object') return null
-  const members = Array.isArray(projection.members) ? projection.members.filter((member: any) => member?.role !== 'lead' || member?.phase !== 'failed') : []
+  const rawMembers = Array.isArray(projection.members) ? projection.members : []
+  /* 排除主理人（lead）：看板统计的是执行成员。
+     旧条件 `role !== 'lead' || phase !== 'failed'` 是或关系，会把 running 的 lead 也留下，
+     导致 running 计数虚高（实测 running 显示 2 而实际只有 1 个成员在跑）。 */
+  const members = rawMembers.filter((member: any) => member?.role !== 'lead')
   const tasks = Array.isArray(projection.tasks) ? projection.tasks.filter((task: any) => task?.status !== 'deleted') : []
-  return { members: members.length, tasksDone: tasks.filter((task: any) => task?.status === 'completed').length, tasksTotal: tasks.length }
+  /* 成员状态：投影里可能是 phase / status 两种字段，统一归一化 */
+  const memberList: TeamMemberState[] = members.map((m: any) => {
+    const raw = String(m?.status ?? m?.phase ?? 'idle')
+    const status = ['pending', 'running', 'done', 'failed', 'timeout'].includes(raw) ? raw
+      : raw === 'completed' ? 'done' : raw === 'error' ? 'failed' : 'idle'
+    /* 找该成员当前任务（投影 tasks 里 assignee 匹配且未完成的那条） */
+    const mine = tasks.find((t: any) => String(t?.assigneeId ?? t?.assignee ?? '') === String(m?.id ?? '')
+      && t?.status !== 'completed')
+    return {
+      id: String(m?.id ?? m?.name ?? ''), name: String(m?.name ?? m?.handle ?? '成员'),
+      role: String(m?.role ?? ''), status, task: String(mine?.subject ?? mine?.title ?? ''),
+    }
+  })
+  return {
+    members: members.length,
+    tasksDone: tasks.filter((task: any) => task?.status === 'completed').length,
+    tasksTotal: tasks.length,
+    memberList,
+    running: memberList.filter(m => m.status === 'running').length,
+    done: memberList.filter(m => m.status === 'done').length,
+    failed: memberList.filter(m => m.status === 'failed' || m.status === 'timeout').length,
+  }
 }
 
 export interface ChatDeps {
@@ -170,6 +208,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
       <button class="btn tiny" data-chat-act="stop">停止</button>
       <button class="icon-btn" data-chat-act="close" title="收起">×</button>
     </div>
+    <div class="chat-board" id="agent-chat-board"></div>
     <div class="chat-list" id="agent-chat-list"></div>
     <div class="chat-compose"><textarea id="agent-chat-input" rows="2" placeholder="追加指令，Enter 发送（Shift+Enter 换行）"></textarea>
       <button class="btn-primary" data-chat-act="send">发送</button></div>`
@@ -179,6 +218,30 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
   const title = host.querySelector('.chat-title') as HTMLElement
   const statusEl = host.querySelector('.chat-status') as HTMLElement
   const countEl = host.querySelector('.chat-count') as HTMLElement
+  const boardEl = host.querySelector('#agent-chat-board') as HTMLElement
+
+  /** 1.15 C1：成员看板——谁在跑、跑什么、成功/失败各几个。 */
+  function paintBoard(): void {
+    if (team === null || team.memberList.length === 0) { boardEl.innerHTML = ''; boardEl.style.display = 'none'; return }
+    boardEl.style.display = ''
+    const statusLabel: Record<string, string> = {
+      pending: '待启动', running: '运行中', done: '已完成', failed: '失败', timeout: '超时', idle: '空闲',
+    }
+    const cards = team.memberList.map(m => `
+      <div class="chat-board-card ${m.status}">
+        <span class="chat-board-dot"></span>
+        <div class="chat-board-main">
+          <b>${deps.esc(m.name)}</b>
+          <span class="chat-board-status">${statusLabel[m.status] ?? m.status}</span>
+          ${m.task !== '' ? `<div class="chat-board-task">${deps.esc(m.task)}</div>` : ''}
+        </div>
+      </div>`).join('')
+    boardEl.innerHTML = `<div class="chat-board-head">
+        <b>${team.members}</b> 成员 ·
+        <span class="ok">${team.done} 完成</span>${team.running > 0 ? ` · <span class="run">${team.running} 运行中</span>` : ''}${team.failed > 0 ? ` · <span class="bad">${team.failed} 失败</span>` : ''}
+        ${team.tasksTotal > 0 ? ` · 任务 ${team.tasksDone}/${team.tasksTotal}` : ''}
+      </div><div class="chat-board-cards">${cards}</div>`
+  }
 
   function paintStatus(): void {
     statusEl.textContent = status
@@ -186,6 +249,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     /* 只保留投影口径：running/total 这套 setCounts 从未被任何地方调用（死代码），
        曾经会让人以为「成员 N/M」在某些场景可用，实际永远为空。要恢复请先接上数据源。 */
     countEl.textContent = team !== null ? `成员 ${team.members} · 任务 ${team.tasksDone}/${team.tasksTotal}` : ''
+    paintBoard()
     host.classList.toggle('is-running', status === 'running' || status === 'dispatching')
     if (note !== '') statusEl.title = note
   }
