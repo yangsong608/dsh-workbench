@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS test_plans (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_test_plans_project ON test_plans(project_id, updated_at);
-CREATE INDEX IF NOT EXISTS idx_test_cases_scope ON test_cases(ui_design_id, page_id);
+
 CREATE TABLE IF NOT EXISTS test_runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -1050,6 +1050,8 @@ CREATE TABLE IF NOT EXISTS test_projects (
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )`)
     try { this.db.exec('CREATE INDEX IF NOT EXISTS idx_test_plans_project ON test_plans(project_id, updated_at)') } catch { /* ignore */ }
+    /* 索引必须在补列之后建：旧库 SCHEMA 执行时还没有 ui_design_id/page_id 列 */
+    try { this.db.exec('CREATE INDEX IF NOT EXISTS idx_test_cases_scope ON test_cases(ui_design_id, page_id)') } catch { /* ignore */ }
   }
 
   private ensureProducts(): void {
