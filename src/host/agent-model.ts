@@ -233,16 +233,28 @@ export function buildTeamKickoff(input: KickoffInput): string {
       return `- ${member.name}（handle="${member.handle}"，role=${member.role}，fileWrite=${member.fileWrite}${suffix}）：${member.intro || member.role}`
     })
     .join('\n')
+  /* 按 feature 决定任务标题与「交付方式」——此前所有 feature 都套用「灵感发散」模板，
+     导致 demo.build / ui.design 的 AI 以为自己在做灵感发散，去调 workbench_idea_expand。 */
+  const feature = String(input.featureLabel ?? '')
+  const isIdea = feature === '' || feature.startsWith('idea')
+  const isUi = feature === 'ui.design'
+  const isDemo = feature === 'demo.build'
+  const taskTitle = isIdea
+    ? '请用 Agent Teams 完成一次灵感发散。'
+    : isUi ? '请用 Agent Teams 完成一次「UI 设计」任务。'
+    : isDemo ? '请用 Agent Teams 完成一次「DEMO 页面生成」任务。'
+    : '请用 Agent Teams 完成一次团队任务。'
+  const subject = isIdea ? '灵感' : '任务'
   const lines = [
-    `你是「${input.team.name}」的主理人（Lead）。请用 Agent Teams 完成一次灵感发散。`,
+    `你是「${input.team.name}」的主理人（Lead）。${taskTitle}`,
     '',
     `## 目标`,
-    input.goal || '围绕这个灵感做多方向发散，产出可直接落图的节点。',
+    input.goal || '完成分配给你的任务。',
     '',
-    `## 灵感`,
+    `## ${subject}`,
     `- 标题：${input.idea.title}`,
     `- 正文：${input.idea.brief || '（无）'}`,
-    `- ideaId：${input.ideaId}；runId：${input.runId}`,
+    isIdea ? `- ideaId：${input.ideaId}；runId：${input.runId}` : `- 任务标识：${input.ideaId || '（不适用）'}`,
     `- 工作区：${input.workspacePath || '（未指定，使用默认工作目录）'}`,
     '',
     `## 团队（最多 ${AGENT_LIMITS.membersPerTeam} 人，本次按下表创建）`,
@@ -253,17 +265,24 @@ export function buildTeamKickoff(input: KickoffInput): string {
     roster,
     '',
     `## 执行顺序（必须遵守）`,
-    `1. 先建任务板：每个发散方向一条任务（team_task_create / agent_teams_create_task 二选一，优先 team_task_create）。`,
+    `1. 先建任务板：按上面「目标」里的要求拆成若干子任务（team_task_create 优先）。`,
     `2. 再创建成员：用 spawn_teammate 按上表 handle 创建（不要创建上表之外的成员）。`,
     `3. 分配任务：同时进行的成员不超过 ${AGENT_LIMITS.maxRunningMembers} 个。`,
-    `4. 成员把点子写回灵感：调用 workbench_idea_expand，参数 ideaId="${input.ideaId}"、runId="${input.runId}"，nodes 的 parentId 指向方向节点 id；每个方向 3–5 条。`,
-    `5. 全部完成后调用 workbench_idea_progress，参数 status="done"。`,
-    `6. 最后用中文给出一段总结（做了哪些方向、产物在哪、有什么缺口）。`,
+    isUi
+      ? `4. 产出写库：**必须调用工具 workbench_ui_doc_publish** 一次写完（参数见「目标」里的输出契约），不要用 write/edit 直接改文件。`
+      : isDemo
+      ? `4. 产出写库：**必须调用工具 workbench_demo_publish** 交付 HTML（参数见「目标」里的输出契约），不要用 write/edit 直接改文件。`
+      : `4. 成员把点子写回灵感：调用 workbench_idea_expand，参数 ideaId="${input.ideaId}"、runId="${input.runId}"，nodes 的 parentId 指向方向节点 id；每个方向 3–5 条。`,
+    isIdea ? `5. 全部完成后调用 workbench_idea_progress，参数 status="done"。` : '',
+    `${isIdea ? '6' : '5'}. 最后用中文给出一段总结（做了什么、产物在哪、有什么缺口）。`,
     '',
     `## 约束`,
     `- 成员失败或超时：重派一次；仍失败就在总结里写明，不要静默跳过。`,
     `- fileWrite=read 的成员禁止改工作区文件；所有成员都禁止改与本任务无关的文件。`,
-    `- 只写灵感节点，不新建仓库文件；需要写文件时先确认任务范围。`,
+    isIdea
+      ? `- 只写灵感节点，不新建仓库文件；需要写文件时先确认任务范围。`
+      : `- 只通过指定工具写库（见上），不要新建或修改仓库里的其它文件。`,
+    `- **禁止使用 bash / write / edit 等文件工具**：本任务只需调用上面指定的工作台工具；若你觉得需要用 shell 检查文件，那是多余步骤，直接调用工具交付即可。`,
     `- 整体预算：${input.timeoutMinutes} 分钟；超时前必须完成或给出部分结果。`,
   ]
   if (input.memory !== undefined && input.memory !== '') lines.push('', '## 记忆（由工作台注入，可直接使用）', input.memory)
@@ -287,6 +306,8 @@ export const BINDABLE_FEATURES = [
   { id: 'product.design', label: '产品 · 设计发散' },
   { id: 'bug.fix', label: 'Bug · 修复建议' },
   { id: 'test.design', label: '测试 · 用例设计' },
+  { id: 'ui.design', label: 'UI 设计 · 页面清单与规范' },
+  { id: 'demo.build', label: 'DEMO · 页面 HTML 生成' },
 ] as const
 export type BindableFeature = (typeof BINDABLE_FEATURES)[number]['id']
 const FEATURE_IDS = new Set<string>(BINDABLE_FEATURES.map(feature => feature.id))

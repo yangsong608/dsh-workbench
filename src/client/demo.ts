@@ -22,6 +22,8 @@ export interface DemoDeps {
   clearSeed: () => void
   openModal: (html: string) => void
   closeModal: () => void
+  /** 派发 AI 生成 DEMO 产物（HTML）。 */
+  onBuild?: (demo: DemoItem) => void
 }
 
 export interface DemoVersion {
@@ -202,7 +204,8 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
         ${demo ? `<span class="ud-badge ${demo.layoutMode === 'multi' ? 'multi' : 'single'}" title="布局模式创建后不可更改">${demo.layoutMode === 'multi' ? '多文件 · 不可改' : '单文件 · 不可改'}</span>` : ''}
         ${demo ? `<select class="ud-sel" data-demo="theme">${themeOptions(demo.themeId)}</select>` : ''}
         ${demo ? `<button class="ud-btn" data-demo="archive">${(demo.archivedAt ?? '') === '' ? '⌸ 归档' : '↩ 恢复'}</button>` : ''}
-        <button class="ud-btn primary" data-demo="generate">${demo ? '重新生成' : '＋ 新建 DEMO'}</button>
+        ${demo ? `<button class="ud-btn" data-demo="build">✦ AI 生成页面</button>` : ''}
+        <button class="ud-btn primary" data-demo="generate">${demo ? '重新创建' : '＋ 新建 DEMO'}</button>
       </div>
     </div>`
     if (demo === undefined) {
@@ -257,6 +260,12 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
           return
         }
         if (act === 'generate') { openGenerateModal(); return }
+        if (act === 'build') {
+          if (demo === undefined) { deps.toast('先创建一个 DEMO'); return }
+          if (deps.onBuild === undefined) { deps.toast('生成通道未接入'); return }
+          deps.onBuild(demo)
+          return
+        }
         if (act === 'optimize') { if (demo) openOptimizeModal(demo); return }
         if (act === 'open') { if (demo) window.open(`${deps.api}/demos/${encodeURIComponent(demo.id)}/view${pageId !== '' ? `?page=${encodeURIComponent(pageId)}` : ''}`, '_blank'); return }
         if (act === 'rollback') { if (demo) void rollback(demo, el.getAttribute('data-version') ?? ''); return }
