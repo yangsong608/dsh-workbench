@@ -30,7 +30,7 @@ export interface IdeaDeps {
   /** 智能体团队（页内会话）。缺省时退回传统单会话派发。 */
   agent?: {
     teams: () => Array<{ id: string; name: string; memberCount: number }>
-    dispatch: (input: { ideaId: string; runId: string; teamId: string; feature?: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }, handlers: { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void }) => Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null>
+    dispatch: (input: { ideaId: string; runId: string; teamId: string; feature?: string; goal: string; ideaTitle: string; ideaBrief: string; workspacePath: string; timeoutMs: number }, handlers: { event?: (event: any) => void; history?: (events: any[]) => void; status?: (status: string, note?: string) => void; team?: (projection: any) => void }) => Promise<{ dispatchId: string; sessionId: string; teamName: string; timeoutMs: number } | null>
     prompt: (sessionId: string, text: string) => Promise<void>
     stop: (dispatchId: string, sessionId: string) => Promise<void>
     openSession: (sessionId: string) => void
@@ -1395,7 +1395,7 @@ export function createIdeaView(host: HTMLElement, deps: IdeaDeps): IdeaViewHandl
     }
   }
 
-  async function addFiles(files: FileList | null): Promise<void> {
+  async function addFiles(files: FileList | File[] | null): Promise<void> {
     if (form === null || files === null) return
     const list = Array.from(files).slice(0, 9 - form.images.length)
     for (const file of list) {
