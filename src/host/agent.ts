@@ -522,6 +522,7 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
       parameters: { type: 'object', additionalProperties: false, properties: {
         query: { type: 'string' }, teamId: { type: 'string' }, projectPath: { type: 'string' }, limit: { type: 'number' },
       }, required: ['query'] },
+      output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `命中 ${(v.memories ?? []).length} 条记忆` : `搜索失败：${String(v?.error ?? '')}` }] },
       execute: async (args: any) => {
         const query = String(args?.query ?? '').toLowerCase().trim()
         if (query === '') return { ok: false, error: 'query 不能为空' }
@@ -538,6 +539,7 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
         content: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'project', 'team'] },
         teamId: { type: 'string' }, projectPath: { type: 'string' },
       }, required: ['content', 'scope'] },
+      output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `已写入记忆（${String(v.memory?.scope ?? '')}）` : `写入失败：${String(v?.error ?? '')}` }] },
       execute: async (args: any) => {
         try {
           const memory = store.addMemory({ content: args?.content, scope: args?.scope, teamId: args?.teamId, projectPath: args?.projectPath, source: 'agent' })
@@ -551,6 +553,7 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
       parameters: { type: 'object', additionalProperties: false, properties: {
         projectPath: { type: 'string' }, query: { type: 'string' }, topK: { type: 'number' },
       }, required: ['projectPath', 'query'] },
+      output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `命中 ${(v.hits ?? []).length} 个片段` : `检索失败：${String(v?.error ?? '')}` }] },
       execute: async (args: any) => {
         const projectPath = String(args?.projectPath ?? '')
         const query = String(args?.query ?? '')
@@ -565,6 +568,7 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
         type: 'object', additionalProperties: false,
         properties: { teamId: { type: 'string', description: '可选；只看某支团队。' } },
       },
+      output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? (v.team !== undefined ? `团队「${String(v.team?.name ?? '')}」` : `共 ${(v.teams ?? []).length} 支团队`) : `读取失败：${String(v?.error ?? '')}` }] },
       execute: async (args: any) => {
         try {
           const teamId = String(args?.teamId ?? '')
