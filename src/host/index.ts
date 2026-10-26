@@ -2001,6 +2001,141 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM product_inputs WHERE id = ?').run(str(id))
   }
 
+  /* ---------- UI 设计（D1 项目为根；页面清单为 DEMO 契约） ---------- */
+
+  /** 页面清单 schema 校验：每页必须有 id/route/blocks[]，id 唯一。 */
+  private validatePages(raw: unknown): { ok: boolean; error?: string; value?: any[] } {
+    let pages: unknown = raw
+    if (typeof raw === 'string') { try { pages = JSON.parse(raw) } catch { return { ok: false, error: 'pages 不是合法 JSON' } } }
+    if (!Array.isArray(pages)) return { ok: false, error: 'pages 必须是数组' }
+    const seen = new Set<string>()
+    const out: any[] = []
+    for (const item of pages) {
+      if (item === null || typeof item !== 'object') return { ok: false, error: '页面必须是对象' }
+      const p = item as Record<string, unknown>
+      const id = str(p.id).trim().slice(0, 64)
+      if (id === '') return { ok: false, error: '页面缺少 id' }
+      if (seen.has(id)) return { ok: false, error: `页面 id 重复：${id}` }
+      seen.add(id)
+      const route = str(p.route).trim().slice(0, 200)
+      if (route === '') return { ok: false, error: `页面 ${id} 缺少 route` }
+      const blocksRaw = Array.isArray(p.blocks) ? p.blocks : []
+      const blocks: any[] = []
+      for (const b of blocksRaw) {
+        if (b === null || typeof b !== 'object') continue
+        const blk = b as Record<string, unknown>
+        const bid = str(blk.id).trim().slice(0, 80)
+        if (bid === '') continue
+        blocks.push({ id: bid, role: str(blk.role).slice(0, 24) || 'section', desc: str(blk.desc).slice(0, 300) })
+      }
+      if (blocks.length === 0) return { ok: false, error: `页面 ${id} 至少要有 1 个区块` }
+      out.push({
+        id, name: str(p.name).trim().slice(0, 60) || id, route,
+        platform: ['pc', 'mobile', 'tablet', 'all'].includes(str(p.platform)) ? str(p.platform) : 'all',
+        goal: str(p.goal).slice(0, 500), blocks,
+        states: asArray(p.states).map(s => str(s).slice(0, 60)).filter(Boolean).slice(0, 20),
+        interactions: asArray(p.interactions).map(s => str(s).slice(0, 120)).filter(Boolean).slice(0, 20),
+        dataNeeds: asArray(p.dataNeeds).map(s => str(s).slice(0, 60)).filter(Boolean).slice(0, 20),
+      })
+    }
+    return { ok: true, value: out }
+  }
+
+  private uiDesignRow(row: any): any {
+    return {
+      id: row.id, projectId: row.project_id, productId: row.product_id ?? '',
+      mapId: row.map_id ?? '', noteId: row.note_id ?? '', name: row.name,
+      themeId: row.theme_id ?? '', platform: row.platform ?? 'all',
+      pages: safeJson(row.pages, []), docKey: row.doc_key ?? '',
+      status: row.status ?? 'draft', archivedAt: row.archived_at ?? '',
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }
+  }
+
+  listUiDesigns(projectId: string, includeArchived = false): any[] {
+    const conds: string[] = []
+    const params: any[] = []
+    if (projectId !== '') { conds.push('project_id = ?'); params.push(str(projectId)) }
+    if (!includeArchived) conds.push("archived_at = ''")
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : ''
+    return (this.db.prepare(`SELECT * FROM ui_designs ${where} ORDER BY updated_at DESC`).all(...params) as any[])
+      .map(row => this.uiDesignRow(row))
+  }
+
+  getUiDesign(id: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(str(id)) as any
+    return row === undefined ? undefined : this.uiDesignRow(row)
+  }
+
+  saveUiDesign(input: any): any {
+    const now = isoDateTimeSeconds()
+    const projectId = str(input?.projectId)
+    if (projectId === '' || !this.db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) throw new Error('项目不存在')
+    const name = str(input?.name).trim().slice(0, 100)
+    if (name === '') throw new Error('UI 设计名称不能为空')
+    const mapId = str(input?.mapId)
+    const id = str(input?.id) || `uid-${randomUUID().slice(0, 12)}`
+    const existing = this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(id) as any
+    const pagesIn = input?.pages !== undefined ? input.pages : (existing !== undefined ? safeJson(existing.pages, []) : [])
+    const checked = this.validatePages(pagesIn)
+    if (!checked.ok) throw new Error(checked.error ?? '页面清单非法')
+    /* 幂等键（D1）：ui:<project>:<mapId|self> */
+    const docKey = str(input?.docKey) || `ui:${projectId}:${mapId || 'self'}`
+    const themeId = str(input?.themeId)
+    if (themeId !== '' && this.db.prepare('SELECT id FROM themes WHERE id = ?').get(themeId) === undefined) throw new Error('主题不存在')
+    const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input.platform) : 'all'
+    const status = ['draft', 'ready'].includes(str(input?.status)) ? str(input.status) : (existing?.status ?? 'draft')
+    const productId = str(input?.productId)
+    const pagesJson = JSON.stringify(checked.value)
+    /* 同 doc_key 已存在则视为更新（避免重复创建） */
+    const byKey = this.db.prepare('SELECT id FROM ui_designs WHERE doc_key = ?').get(docKey) as any
+    if (existing === undefined && byKey !== undefined && str(input?.id) === '') {
+      this.db.prepare('UPDATE ui_designs SET name=?, pages=?, theme_id=?, platform=?, product_id=?, status=?, updated_at=? WHERE id=?')
+        .run(name, pagesJson, themeId, platform, productId, status, now, byKey.id)
+      return this.uiDesignRow(this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(byKey.id))
+    }
+    if (existing !== undefined) {
+      this.db.prepare('UPDATE ui_designs SET name=?, product_id=?, map_id=?, theme_id=?, platform=?, pages=?, doc_key=?, status=?, updated_at=? WHERE id=?')
+        .run(name, productId, mapId, themeId, platform, pagesJson, docKey, status, now, id)
+    } else {
+      this.db.prepare(`INSERT INTO ui_designs(id, project_id, product_id, map_id, note_id, name, theme_id, platform, pages, doc_key, status, archived_at, created_at, updated_at)
+        VALUES(?,?,?,?,'',?,?,?,?,?,?,'',?,?)`)
+        .run(id, projectId, productId, mapId, name, themeId, platform, pagesJson, docKey, status, now, now)
+    }
+    return this.uiDesignRow(this.db.prepare('SELECT * FROM ui_designs WHERE id = ?').get(id))
+  }
+
+  /** 按页更新（D4：只改目标页，其它页不变）。 */
+  patchUiDesignPage(designId: string, pageId: string, patch: any): any {
+    const design = this.getUiDesign(designId)
+    if (design === undefined) throw new Error('UI 设计不存在')
+    const index = (design.pages as any[]).findIndex(p => p.id === pageId)
+    if (index < 0) throw new Error('页面不存在')
+    const before = (design.pages as any[])[index]
+    const merged = { ...before, ...(patch ?? {}), id: before.id }
+    const pages = (design.pages as any[]).slice()
+    pages[index] = merged
+    const checked = this.validatePages(pages)
+    if (!checked.ok) throw new Error(checked.error ?? '页面非法')
+    /* 断言其它页未变 */
+    const after = checked.value as any[]
+    for (let i = 0; i < pages.length; i++) {
+      if (i === index) continue
+      if (JSON.stringify(after[i]) !== JSON.stringify((design.pages as any[])[i])) throw new Error('按页更新影响了其它页面')
+    }
+    return this.saveUiDesign({ ...design, id: design.id, pages: after, docKey: design.docKey })
+  }
+
+  deleteUiDesign(id: string): void {
+    this.db.prepare('DELETE FROM ui_designs WHERE id = ?').run(str(id))
+  }
+
+  archiveUiDesign(id: string, archived: boolean): void {
+    if (this.db.prepare('SELECT id FROM ui_designs WHERE id = ?').get(str(id)) === undefined) throw new Error('UI 设计不存在')
+    this.db.prepare('UPDATE ui_designs SET archived_at=?, updated_at=? WHERE id=?')
+      .run(archived ? isoDateTimeSeconds() : '', isoDateTimeSeconds(), str(id))
+  }
+
   /* ---------- 主题库（D2/D3：规范 spec + 令牌 tokens 双产物） ---------- */
 
   private themeRow(row: any): any {
@@ -3485,6 +3620,11 @@ class JsonStore {
 function safeJson(raw: unknown, fallback: unknown): unknown {
   if (typeof raw !== 'string') return fallback
   try { return JSON.parse(raw) } catch { return fallback }
+}
+
+/** 保证是数组（字符串数组字段校验用）。 */
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
 }
 
 function toSubtask(s: any): unknown {
@@ -5016,6 +5156,42 @@ export function apply(ctx: any): void {
         if (method === 'POST' && path === '/themes/archive') {
           const body = await readJson(req)
           await serialized(() => store.archiveTheme(str(body?.id), body?.archived !== false))
+          send(res, 200, { ok: true })
+          return
+        }
+        /* ---------- UI 设计（A3） ---------- */
+        if (method === 'GET' && path === '/ui-designs') {
+          send(res, 200, {
+            designs: store.listUiDesigns(str(url.searchParams.get('projectId')), url.searchParams.get('archived') === '1'),
+          })
+          return
+        }
+        if (method === 'POST' && path === '/ui-designs') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, design: await serialized(() => store.saveUiDesign(body?.design ?? body)) })
+          return
+        }
+        if ((method === 'PATCH' || method === 'PUT') && /^\/ui-designs\/[^/]+\/pages\/[^/]+$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const body = await readJson(req)
+          send(res, 200, { ok: true, design: await serialized(() => store.patchUiDesignPage(decodeURIComponent(parts[1]), decodeURIComponent(parts[3]), body?.patch ?? body)) })
+          return
+        }
+        if (method === 'POST' && path === '/ui-designs/archive') {
+          const body = await readJson(req)
+          await serialized(() => store.archiveUiDesign(str(body?.id), body?.archived !== false))
+          send(res, 200, { ok: true })
+          return
+        }
+        if (method === 'GET' && /^\/ui-designs\/[^/]+$/.test(path)) {
+          const id = decodeURIComponent(path.slice('/ui-designs/'.length))
+          const design = store.getUiDesign(id)
+          if (design === undefined) { send(res, 404, { error: 'ui_design_not_found' }); return }
+          send(res, 200, { design })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/ui-designs/')) {
+          await serialized(() => store.deleteUiDesign(decodeURIComponent(path.slice('/ui-designs/'.length))))
           send(res, 200, { ok: true })
           return
         }
