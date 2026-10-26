@@ -12,9 +12,9 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createIdeaModule, buildIdeaPrompt } from './idea.js'
@@ -1999,6 +1999,142 @@ CREATE TABLE IF NOT EXISTS products (
     const row = this.db.prepare('SELECT file_path FROM product_inputs WHERE id = ?').get(str(id)) as any
     if (row?.file_path) removeFile(String(row.file_path))
     this.db.prepare('DELETE FROM product_inputs WHERE id = ?').run(str(id))
+  }
+
+  /**
+   * 只读文件树（B3）：根固定 <项目工作区>/.dsh-workbench/demos/<demoId>。
+   * 安全：resolve 后必须在本根前缀内；深度 ≤6；单次 ≤500 项；只返回元信息。
+   */
+  listDemoFiles(projectId: string, demoId: string, versionId = ''): { root: string; files: Array<{ path: string; role: string; bytes: number; mtime: string }> } {
+    const project = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(str(projectId)) as any
+    const workspace = str(project?.workspace_path)
+    if (workspace === '') throw new Error('项目未关联工作区')
+    const baseRoot = resolve(workspace, '.dsh-workbench', 'demos')
+    const demoRoot = resolve(baseRoot, str(demoId))
+    if (!demoRoot.startsWith(baseRoot + sep)) throw new Error('非法路径')
+    if (!existsSync(demoRoot)) return { root: demoRoot, files: [] }
+    /* 版本目录：默认取最新 v* */
+    let target = demoRoot
+    if (versionId !== '') {
+      const seq = Number(str(versionId).replace(/^v/, ''))
+      if (Number.isFinite(seq) && seq > 0) target = resolve(demoRoot, `v${seq}`)
+    } else {
+      const dirs = readdirSync(demoRoot).filter(n => /^v\d+$/.test(n))
+        .sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)))
+      if (dirs.length > 0) target = resolve(demoRoot, dirs[0])
+    }
+    if (!target.startsWith(demoRoot + sep) && target !== demoRoot) throw new Error('非法版本路径')
+    if (!existsSync(target)) return { root: target, files: [] }
+    const files: Array<{ path: string; role: string; bytes: number; mtime: string }> = []
+    const indexRows = this.db.prepare('SELECT path, role FROM demo_files WHERE demo_id = ?').all(str(demoId)) as any[]
+    const roleOf = new Map(indexRows.map(r => [String(r.path), String(r.role)]))
+    const walk = (dir: string, depth: number): void => {
+      if (depth > 6 || files.length >= 500) return
+      for (const name of readdirSync(dir)) {
+        if (files.length >= 500) return
+        const full = resolve(dir, name)
+        if (!full.startsWith(demoRoot + sep)) continue
+        const info = statSync(full)
+        if (info.isDirectory()) { walk(full, depth + 1); continue }
+        const rel = full.slice(target.length + 1).split(sep).join('/')
+        const pageMatch = /^pages\/([A-Za-z0-9_-]+)\.html$/.exec(rel)
+        const role = roleOf.get(rel) ?? (rel === 'index.html' ? 'entry' : pageMatch !== null ? 'page' : 'asset')
+        files.push({ path: rel, role, bytes: info.size, mtime: info.mtime.toISOString() })
+      }
+    }
+    walk(target, 0)
+    files.sort((a, b) => a.path.localeCompare(b.path))
+    return { root: target, files }
+  }
+
+  /**
+   * 按页优化（D4）：取目标页 HTML → 交给 AI 重写 → 校验其它页未变 → 写新版本。
+   * 这里实现「替换 + 校验」的确定性部分；AI 调用在客户端派发后通过 patchDemoPage 落库。
+   */
+  extractDemoPage(demoId: string, pageId: string): { html: string; pageCount: number } {
+    const demo = this.getDemo(demoId)
+    if (demo === undefined) throw new Error('DEMO 不存在')
+    const entry = String(demo.entryPath)
+    if (!existsSync(entry)) throw new Error('产物文件不存在')
+    const full = readFileSync(entry, 'utf8')
+    if (demo.layoutMode === 'multi') {
+      const dir = dirname(entry)
+      const candidate = join(dir, 'pages', `${sanitizeFilename(pageId)}.html`)
+      if (!existsSync(candidate)) throw new Error(`页面文件不存在：${pageId}`)
+      return { html: readFileSync(candidate, 'utf8'), pageCount: 1 }
+    }
+    const block = this.slicePageBlock(full, pageId)
+    if (block === null) throw new Error(`产物里找不到 data-page="${pageId}"`)
+    return { html: block, pageCount: 1 }
+  }
+
+  /** 从整份 HTML 里截出某个 data-page 的顶层块（按标签配对计数）。 */
+  private slicePageBlock(html: string, pageId: string): string | null {
+    const marker = new RegExp(`<(div|section|main|article)\\b[^>]*data-page=["']${pageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]*>`, 'i')
+    const hit = marker.exec(html)
+    if (hit === null) return null
+    const tag = hit[1].toLowerCase()
+    const openRe = new RegExp(`<${tag}\\b`, 'gi')
+    const closeRe = new RegExp(`</${tag}\\s*>`, 'gi')
+    let depth = 0
+    let index = hit.index
+    while (index < html.length) {
+      openRe.lastIndex = index
+      closeRe.lastIndex = index
+      const nextOpen = openRe.exec(html)
+      const nextClose = closeRe.exec(html)
+      if (nextClose === null) return null
+      if (nextOpen !== null && nextOpen.index < nextClose.index) { depth++; index = nextOpen.index + 1; continue }
+      depth--
+      index = nextClose.index + nextClose[0].length
+      if (depth === 0) return html.slice(hit.index, index)
+    }
+    return null
+  }
+
+  /** 把新片段写回（单文件）或写文件（多文件），并校验其它页未变。 */
+  patchDemoPage(demoId: string, pageId: string, html: string): any {
+    const demo = this.getDemo(demoId)
+    if (demo === undefined) throw new Error('DEMO 不存在')
+    const entry = String(demo.entryPath)
+    if (!existsSync(entry)) throw new Error('产物文件不存在')
+    const patch = str(html)
+    if (patch === '') throw new Error('新片段为空')
+    if (/<html[\s>]|<body[\s>]/i.test(patch)) throw new Error('只允许返回单页片段，不能是整份文档')
+    if (!new RegExp(`data-page=["']${pageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`).test(patch)) {
+      throw new Error(`片段必须保留 data-page="${pageId}"`)
+    }
+    const before = readFileSync(entry, 'utf8')
+    let after = before
+    if (demo.layoutMode === 'multi') {
+      const dir = dirname(entry)
+      const target = join(dir, 'pages', `${sanitizeFilename(pageId)}.html`)
+      if (!existsSync(target)) throw new Error(`页面文件不存在：${pageId}`)
+      writeFileSync(target, patch, 'utf8')
+    } else {
+      const block = this.slicePageBlock(before, pageId)
+      if (block === null) throw new Error(`产物里找不到 data-page="${pageId}"`)
+      after = before.replace(block, patch)
+      /* 校验三件套 */
+      const countBefore = (before.match(/data-page=["']/g) ?? []).length
+      const countAfter = (after.match(/data-page=["']/g) ?? []).length
+      if (countBefore !== countAfter) throw new Error('区块锚点数量变化，拒绝写入')
+      const otherBefore = this.countPageAnchorsExcept(before, pageId)
+      const otherAfter = this.countPageAnchorsExcept(after, pageId)
+      if (otherBefore !== otherAfter) throw new Error('其它页面受影响，拒绝写入')
+      writeFileSync(entry, after, 'utf8')
+    }
+    const version = this.createDemoVersion({
+      demoId, entryPath: entry, label: `按页优化 · ${pageId}`, source: 'page-patch',
+      targetPage: pageId, pageCount: (demo as any).pageCount ?? 0,
+      summary: '按页优化',
+    })
+    return { versionId: version.id, seq: version.seq, pageId }
+  }
+
+  private countPageAnchorsExcept(html: string, pageId: string): number {
+    const all = Array.from(html.matchAll(/data-page=["']([A-Za-z0-9_-]+)["']/g)).map(m => m[1])
+    return all.filter(id => id !== pageId).length
   }
 
   /** 工具入口：AI 写 UI 设计（一次写完页面清单 + 规范）。 */
@@ -5504,6 +5640,24 @@ export function apply(ctx: any): void {
           send(res, 200, { ok: true })
           return
         }
+        /* ---------- 生成上下文（B4：把素材/文档/主题一次取齐） ---------- */
+        if (method === 'GET' && path === '/ui-demo/context') {
+          const projectId = str(url.searchParams.get('projectId'))
+          const productId = str(url.searchParams.get('productId'))
+          const mapId = str(url.searchParams.get('mapId'))
+          const inputs = store.listProductInputs(productId, mapId)
+          const themes = store.listThemes({ projectId })
+          const designs = store.listUiDesigns(projectId, false)
+          send(res, 200, {
+            ok: true,
+            project: store.getProject(projectId) ?? null,
+            product: productId !== '' ? (store.listProducts(true).find(p => p.id === productId) ?? null) : null,
+            inputs: inputs.map(i => ({ id: i.id, kind: i.kind, url: i.url, filePath: i.filePath, label: i.label, width: i.width, height: i.height })),
+            themes: themes.map(t => ({ id: t.id, name: t.name, spec: t.spec, tokens: t.tokens, platform: t.platform })),
+            designs: designs.map(d => ({ id: d.id, name: d.name, pages: d.pages })),
+          })
+          return
+        }
         /* ---------- UI 设计（A3） ---------- */
         if (method === 'GET' && path === '/ui-designs') {
           send(res, 200, {
@@ -5582,6 +5736,33 @@ export function apply(ctx: any): void {
           const body = await readJson(req)
           await serialized(() => store.archiveDemo(str(body?.id), body?.archived !== false))
           send(res, 200, { ok: true })
+          return
+        }
+        if (method === 'GET' && path === '/files/tree') {
+          try {
+            const result = store.listDemoFiles(
+              str(url.searchParams.get('projectId')),
+              str(url.searchParams.get('demoId')),
+              str(url.searchParams.get('version')),
+            )
+            send(res, 200, { ok: true, root: result.root, files: result.files })
+          } catch (cause: any) { send(res, 400, { error: 'tree_failed', message: String(cause?.message ?? cause) }) }
+          return
+        }
+        if (method === 'GET' && /^\/demos\/[^/]+\/pages\/[^/]+$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          try {
+            const page = store.extractDemoPage(decodeURIComponent(parts[1]), decodeURIComponent(parts[3]))
+            send(res, 200, { ok: true, ...page })
+          } catch (cause: any) { send(res, 400, { error: 'page_extract_failed', message: String(cause?.message ?? cause) }) }
+          return
+        }
+        if (method === 'PATCH' && /^\/demos\/[^/]+\/pages\/[^/]+$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const body = await readJson(req)
+          try {
+            send(res, 200, { ok: true, ...(await serialized(() => store.patchDemoPage(decodeURIComponent(parts[1]), decodeURIComponent(parts[3]), str(body?.html)))) })
+          } catch (cause: any) { send(res, 400, { error: 'page_patch_rejected', message: String(cause?.message ?? cause) }) }
           return
         }
         if (method === 'GET' && /^\/demos\/[^/]+\/view$/.test(path)) {
