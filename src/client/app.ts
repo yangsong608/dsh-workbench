@@ -877,6 +877,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         <div class="side-sec">
           <div class="side-head">研发</div>
           ${sideItem('产品设计', { icon: 'product', view: 'product', active: ui.view === 'product' })}
+          ${sideItem('UI 设计', { icon: 'layout', view: 'ui', active: ui.view === 'ui' })}
+          ${sideItem('DEMO', { icon: 'play', view: 'demo', active: ui.view === 'demo' })}
           ${sideItem('Bug 管理', { icon: 'bug', view: 'bugs', active: ui.view === 'bugs' })}
           ${sideItem('测试', { icon: 'test', view: 'test', active: ui.view === 'test' })}
           ${sideItem('灵感', { icon: 'spark', view: 'idea', active: ui.view === 'idea' })}
