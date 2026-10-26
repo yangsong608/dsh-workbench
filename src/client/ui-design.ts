@@ -59,6 +59,25 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
   let specDraft = ''
   /** 页面覆盖度（uiDesignId → 每页统计） */
   let coverage: PageCoverage[] = []
+  /** 1.15 B1：UI 设计版本列表 */
+  let versions: Array<{ id: string; seq: number; label: string; source: string; pageCount: number; blockCount: number; createdAt: string }> = []
+
+  async function loadVersions(designId: string): Promise<void> {
+    if (designId === '') { versions = []; return }
+    try {
+      const data = await api(`/ui-designs/${encodeURIComponent(designId)}/versions`)
+      versions = Array.isArray(data.versions) ? data.versions : []
+    } catch { versions = [] }
+  }
+
+  async function rollbackVersion(designId: string, versionId: string, seq: number): Promise<void> {
+    if (!deps.confirm(`回滚到 v${seq}？当前页面清单会被覆盖（会新建一条回滚版本，历史不丢）。`)) return
+    try {
+      await api(`/ui-designs/${encodeURIComponent(designId)}/versions/${encodeURIComponent(versionId)}/rollback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      deps.toast(`已回滚到 v${seq}`)
+      await reload()
+    } catch (cause) { deps.toast(`回滚失败：${String((cause as Error).message ?? cause)}`) }
+  }
 
   async function loadCoverage(designId: string): Promise<void> {
     if (designId === '') { coverage = []; return }
@@ -92,7 +111,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
       if (!designs.some(d => d.id === activeId)) activeId = designs[0]?.id ?? ''
       const hit = current()
       specDraft = hit?.id === current()?.id ? (specDraft || '') : ''
-      if (hit !== undefined) await loadCoverage(hit.id)
+      if (hit !== undefined) { await loadCoverage(hit.id); await loadVersions(hit.id) }
     } catch (cause) {
       deps.toast(`加载 UI 设计失败：${String((cause as Error).message ?? cause)}`)
     }
@@ -246,6 +265,23 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
     } else if (tab === 'wire') {
       body = `<div class="ud-panel"><div class="ud-panel-head"><div><b>线框预览</b><span>按页面清单本地渲染，不调用 AI</span></div></div>
         <div class="ud-panel-body">${renderWire(design)}</div></div>`
+    } else if (tab === 'versions') {
+      const srcLabel: Record<string, string> = { ai: 'AI 生成', manual: '手工编辑', migrate: '旧数据迁移', rollback: '回滚' }
+      const rows = versions.length === 0
+        ? '<div class="ud-empty">还没有版本记录。改动页面清单后会自动生成版本。</div>'
+        : versions.map((v, i) => {
+          const isCurrent = i === 0
+          return `<div class="ud-vrow${isCurrent ? ' current' : ''}">
+            <div style="flex:1">
+              <b>v${v.seq}</b>${isCurrent ? ' <span class="ud-cov" style="cursor:default">当前</span>' : ''}
+              <span style="color:var(--ud-text-3);font-size:10px;margin-left:6px">${esc(srcLabel[v.source] ?? v.source)}</span>
+              <div style="font-size:10px;color:var(--ud-text-3);margin-top:2px">${v.pageCount} 页 · ${v.blockCount} 区块 · ${esc(String(v.createdAt).slice(0, 16))}</div>
+            </div>
+            ${isCurrent ? '' : `<button class="ud-btn tiny" data-ud="version-rollback" data-version="${esc(v.id)}" data-seq="${v.seq}">回滚到此版</button>`}
+          </div>`
+        }).join('')
+      body = `<div class="ud-panel"><div class="ud-panel-head"><div><b>版本记录（${versions.length}）</b><span>页面清单变化才建版本；改主题/改名不建</span></div></div>
+        <div class="ud-panel-body">${rows}</div></div>`
     } else {
       body = `<div class="ud-panel"><div class="ud-panel-head"><div><b>版本</b><span>存档 / 对比 / 回滚</span></div>
         <button class="ud-btn tiny">存档当前</button></div><div class="ud-panel-body">${renderVersions()}</div></div>`
@@ -289,6 +325,10 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
         if (act === 'page-optimize') { if (design) void runOptimize(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'page-demo') { if (design) deps.onBuildDemo?.(design, el.getAttribute('data-page') ?? ''); return }
         if (act === 'coverage') { deps.onOpenTest?.(); return }
+        if (act === 'version-rollback') {
+          if (design) void rollbackVersion(design.id, el.getAttribute('data-version') ?? '', Number(el.getAttribute('data-seq') ?? 0))
+          return
+        }
         if (act === 'spec-edit') { if (design) openSpecModal(design); return }
         if (act === 'archive') {
           if (design) {

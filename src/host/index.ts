@@ -2904,6 +2904,23 @@ CREATE TABLE IF NOT EXISTS products (
     return this.uiVersionRow(this.db.prepare('SELECT * FROM ui_design_versions WHERE id = ?').get(id))
   }
 
+  /** 回滚 UI 设计到指定版本：用该版 pages 覆盖当前，并建一条 source=rollback 的新版本。 */
+  rollbackUiDesignVersion(designId: string, versionId: string): any {
+    const id = str(designId)
+    const vid = str(versionId)
+    const design = this.getUiDesign(id)
+    if (design === undefined) throw new Error('UI 设计不存在')
+    const ver = this.db.prepare('SELECT * FROM ui_design_versions WHERE id = ? AND design_id = ?').get(vid, id) as any
+    if (ver === undefined) throw new Error('版本不存在')
+    const pages = safeJson(ver.pages, [])
+    const saved = this.saveUiDesign({
+      id, projectId: design.projectId, name: design.name, themeId: design.themeId,
+      platform: design.platform, status: design.status, pages,
+      versionSource: 'rollback', versionLabel: `回滚自 v${ver.seq}`,
+    })
+    return saved
+  }
+
   /** 当前版本（最新）。 */
   currentUiVersion(designId: string): any | undefined {
     return this.listUiDesignVersions(designId)[0]
@@ -6327,6 +6344,15 @@ export function apply(ctx: any): void {
             return
           }
           send(res, 200, { ok: true })
+          return
+        }
+        /* UI 设计版本回滚（1.15 B1） */
+        if (method === 'POST' && /^\/ui-designs\/[^/]+\/versions\/[^/]+\/rollback$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const body = await readJson(req).catch(() => ({})) as any
+          void body
+          const saved = await serialized(() => store.rollbackUiDesignVersion(decodeURIComponent(parts[1]), decodeURIComponent(parts[3])))
+          send(res, 200, { ok: true, design: saved })
           return
         }
         /* UI 设计版本（1.14） */

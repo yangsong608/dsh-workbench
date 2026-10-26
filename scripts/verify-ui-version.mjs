@@ -58,5 +58,14 @@ check('只删旧版本用例（删 1 条）', purged.removed === 1, JSON.stringi
 const left = (await call('GET', `/tests?projectId=${TP.id}`)).body.cases
 check('当前版本用例保留', left.length === 1 && left[0].title === '新版用例', JSON.stringify(left.map(c => c.title)))
 
+// 7) 回滚：回到 v1（1 页），应新建一条 source=rollback 的 v3
+const rb = await call('POST', `/ui-designs/${d.id}/versions/${v1}/rollback`, {})
+check('回滚成功', rb.status === 200 && rb.body?.ok === true, JSON.stringify(rb.body).slice(0, 80))
+check('回滚后页面数回到 v1 的 1 页', (rb.body?.design?.pages ?? []).length === 1, `pages=${(rb.body?.design?.pages ?? []).length}`)
+const vers3 = (await call('GET', `/ui-designs/${d.id}/versions`)).body.versions
+check('回滚本身也建版本（共 3 版）', vers3.length === 3 && vers3[0].seq === 3, JSON.stringify(vers3.map(v => v.seq)))
+check('回滚版本 source=rollback', vers3[0].source === 'rollback', vers3[0].source)
+check('历史版本未被删除', vers3.some(v => v.seq === 1) && vers3.some(v => v.seq === 2))
+
 console.log(`\n${pass}/${pass + fail} 通过`)
 process.exit(fail > 0 ? 1 : 0)
