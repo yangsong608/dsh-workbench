@@ -2001,6 +2001,153 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM product_inputs WHERE id = ?').run(str(id))
   }
 
+  /* ---------- DEMO（D5：layout_mode 创建后不可变；版本可回滚） ---------- */
+
+  private demoRow(row: any): any {
+    return {
+      id: row.id, projectId: row.project_id, productId: row.product_id ?? '',
+      uiDesignId: row.ui_design_id ?? '', themeId: row.theme_id,
+      layoutMode: row.layout_mode === 'multi' ? 'multi' : 'single',
+      scope: row.scope ?? 'all', kind: row.kind ?? 'page', title: row.title,
+      entryPath: row.entry_path ?? '', platform: row.platform ?? 'all',
+      status: row.status ?? 'ready', currentVersionId: row.current_version_id ?? '',
+      archivedAt: row.archived_at ?? '', createdAt: row.created_at, updatedAt: row.updated_at,
+    }
+  }
+
+  private demoVersionRow(row: any): any {
+    return {
+      id: row.id, demoId: row.demo_id, seq: Number(row.seq ?? 0),
+      label: row.label ?? '', source: row.source ?? 'manual',
+      targetPage: row.target_page ?? '', summary: row.summary ?? '',
+      entryPath: row.entry_path ?? '', bytes: Number(row.bytes ?? 0),
+      pageCount: Number(row.page_count ?? 0), createdAt: row.created_at,
+    }
+  }
+
+  listDemos(projectId: string, includeArchived = false): any[] {
+    const conds: string[] = []
+    const params: any[] = []
+    if (projectId !== '') { conds.push('project_id = ?'); params.push(str(projectId)) }
+    if (!includeArchived) conds.push("archived_at = ''")
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : ''
+    return (this.db.prepare(`SELECT * FROM demos ${where} ORDER BY updated_at DESC`).all(...params) as any[])
+      .map(row => this.demoRow(row))
+  }
+
+  getDemo(id: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM demos WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return undefined
+    const demo = this.demoRow(row)
+    demo.versions = this.listDemoVersions(demo.id)
+    return demo
+  }
+
+  listDemoVersions(demoId: string): any[] {
+    return (this.db.prepare('SELECT * FROM demo_versions WHERE demo_id = ? ORDER BY seq DESC').all(str(demoId)) as any[])
+      .map(row => this.demoVersionRow(row))
+  }
+
+  saveDemo(input: any): any {
+    const now = isoDateTimeSeconds()
+    const title = str(input?.title).trim().slice(0, 120)
+    const id = str(input?.id) || `demo-${randomUUID().slice(0, 12)}`
+    const existing = this.db.prepare('SELECT * FROM demos WHERE id = ?').get(id) as any
+    /* 更新时 projectId 可省略（沿用原值）；创建时必须给 */
+    const projectId = str(input?.projectId) || (existing !== undefined ? String(existing.project_id) : '')
+    if (projectId === '' || !this.db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) throw new Error('项目不存在')
+    if (title === '' && existing === undefined) throw new Error('DEMO 名称不能为空')
+    /* D5：layoutMode 只在创建时接受 */
+    if (existing !== undefined && input?.layoutMode !== undefined && str(input.layoutMode) !== String(existing.layout_mode)) {
+      const error: any = new Error('布局模式创建后不可更改')
+      error.code = 'layout_mode_immutable'
+      throw error
+    }
+    const layoutMode = existing !== undefined ? String(existing.layout_mode) : (str(input?.layoutMode) === 'multi' ? 'multi' : 'single')
+    const themeId = str(input?.themeId) || (existing !== undefined ? String(existing.theme_id) : '')
+    if (themeId === '') throw new Error('必须指定主题')
+    if (this.db.prepare('SELECT id FROM themes WHERE id = ?').get(themeId) === undefined) throw new Error('主题不存在')
+    const uiDesignId = str(input?.uiDesignId) || (existing !== undefined ? String(existing.ui_design_id) : '')
+    if (uiDesignId !== '' && this.db.prepare('SELECT id FROM ui_designs WHERE id = ?').get(uiDesignId) === undefined) throw new Error('UI 设计不存在')
+    const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input.platform) : 'all'
+    const scope = str(input?.scope) === 'page' ? 'page' : 'all'
+    const kind = str(input?.kind) === 'system' ? 'system' : 'page'
+    const productId = str(input?.productId) || (existing !== undefined ? String(existing.product_id) : '')
+    const entryPath = str(input?.entryPath) || (existing !== undefined ? String(existing.entry_path) : '')
+    const status = ['ready', 'draft', 'failed'].includes(str(input?.status)) ? str(input.status) : (existing?.status ?? 'draft')
+    if (existing !== undefined) {
+      this.db.prepare('UPDATE demos SET product_id=?, ui_design_id=?, theme_id=?, scope=?, kind=?, title=?, entry_path=?, platform=?, status=?, updated_at=? WHERE id=?')
+        .run(productId, uiDesignId, themeId, scope, kind, title || String(existing.title), entryPath, platform, status, now, id)
+    } else {
+      this.db.prepare(`INSERT INTO demos(id, project_id, product_id, ui_design_id, theme_id, layout_mode, scope, kind, title, entry_path, platform, status, current_version_id, archived_at, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'','',?,?)`)
+        .run(id, projectId, productId, uiDesignId, themeId, layoutMode, scope, kind, title, entryPath, platform, status, now, now)
+    }
+    return this.demoRow(this.db.prepare('SELECT * FROM demos WHERE id = ?').get(id))
+  }
+
+  /** 新建版本并切换 current；seq 自增。 */
+  createDemoVersion(input: any): any {
+    const now = isoDateTimeSeconds()
+    const demoId = str(input?.demoId)
+    const demo = this.db.prepare('SELECT * FROM demos WHERE id = ?').get(demoId) as any
+    if (demo === undefined) throw new Error('DEMO 不存在')
+    const last = this.db.prepare('SELECT MAX(seq) AS s FROM demo_versions WHERE demo_id = ?').get(demoId) as any
+    const seq = Number(last?.s ?? 0) + 1
+    const id = `dv-${randomUUID().slice(0, 12)}`
+    const entryPath = str(input?.entryPath)
+    const pageCount = Math.max(0, Math.round(Number(input?.pageCount) || 0))
+    let bytes = Math.max(0, Math.round(Number(input?.bytes) || 0))
+    if (bytes === 0 && entryPath !== '') { try { bytes = statSync(entryPath).size } catch { bytes = 0 } }
+    this.db.prepare(`INSERT INTO demo_versions(id, demo_id, seq, label, source, target_page, summary, entry_path, bytes, page_count, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, demoId, seq, str(input?.label).slice(0, 120), str(input?.source) || 'manual',
+           str(input?.targetPage), str(input?.summary).slice(0, 2000), entryPath, bytes, pageCount, now)
+    this.db.prepare('UPDATE demos SET current_version_id=?, entry_path=?, updated_at=? WHERE id=?')
+      .run(id, entryPath !== '' ? entryPath : String(demo.entry_path), now, demoId)
+    return this.demoVersionRow(this.db.prepare('SELECT * FROM demo_versions WHERE id = ?').get(id))
+  }
+
+  rollbackDemoVersion(demoId: string, versionId: string): any {
+    const version = this.db.prepare('SELECT * FROM demo_versions WHERE id = ? AND demo_id = ?').get(str(versionId), str(demoId)) as any
+    if (version === undefined) throw new Error('版本不存在')
+    /* 回滚 = 新建一个 restore 版本（历史不丢） */
+    return this.createDemoVersion({
+      demoId, entryPath: String(version.entry_path), pageCount: Number(version.page_count ?? 0),
+      bytes: Number(version.bytes ?? 0), label: `回滚到 v${version.seq}`, source: 'restore',
+      summary: `restore from v${version.seq}`,
+    })
+  }
+
+  deleteDemoVersion(demoId: string, versionId: string): void {
+    const demo = this.db.prepare('SELECT current_version_id FROM demos WHERE id = ?').get(str(demoId)) as any
+    if (demo === undefined) throw new Error('DEMO 不存在')
+    if (String(demo.current_version_id) === str(versionId)) throw new Error('不能删除当前版本')
+    const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM demo_versions WHERE demo_id = ?').get(str(demoId)) as any)?.n ?? 0)
+    if (count <= 1) throw new Error('至少保留 1 个版本')
+    this.db.prepare('DELETE FROM demo_versions WHERE id = ? AND demo_id = ?').run(str(versionId), str(demoId))
+  }
+
+  archiveDemo(id: string, archived: boolean): void {
+    if (this.db.prepare('SELECT id FROM demos WHERE id = ?').get(str(id)) === undefined) throw new Error('DEMO 不存在')
+    this.db.prepare('UPDATE demos SET archived_at=?, updated_at=? WHERE id=?')
+      .run(archived ? isoDateTimeSeconds() : '', isoDateTimeSeconds(), str(id))
+  }
+
+  deleteDemo(id: string): void {
+    const row = this.db.prepare('SELECT * FROM demos WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return
+    this.db.prepare('DELETE FROM demo_files WHERE demo_id = ?').run(str(id))
+    this.db.prepare('DELETE FROM demo_versions WHERE demo_id = ?').run(str(id))
+    this.db.prepare('DELETE FROM demos WHERE id = ?').run(str(id))
+    /* 删产物目录（失败只告警） */
+    try {
+      const dir = dirname(String(row.entry_path))
+      const root = dirname(dir)
+      if (root.includes('.dsh-workbench')) rmSync(root.includes('/demos/') ? root : dir, { recursive: true, force: true })
+    } catch (cause) { console.warn(`[dsh-workbench] 删除 DEMO 目录失败：${String(cause)}`) }
+  }
+
   /* ---------- UI 设计（D1 项目为根；页面清单为 DEMO 契约） ---------- */
 
   /** 页面清单 schema 校验：每页必须有 id/route/blocks[]，id 唯一。 */
@@ -5192,6 +5339,77 @@ export function apply(ctx: any): void {
         }
         if (method === 'DELETE' && path.startsWith('/ui-designs/')) {
           await serialized(() => store.deleteUiDesign(decodeURIComponent(path.slice('/ui-designs/'.length))))
+          send(res, 200, { ok: true })
+          return
+        }
+        /* ---------- DEMO（A4） ---------- */
+        if (method === 'GET' && path === '/demos') {
+          send(res, 200, { demos: store.listDemos(str(url.searchParams.get('projectId')), url.searchParams.get('archived') === '1') })
+          return
+        }
+        if (method === 'POST' && path === '/demos') {
+          const body = await readJson(req)
+          try {
+            send(res, 200, { ok: true, demo: await serialized(() => store.saveDemo(body?.demo ?? body)) })
+          } catch (cause: any) {
+            /* D5：布局模式不可变要给出明确错误码，便于前端展示专用提示 */
+            if (cause?.code === 'layout_mode_immutable') {
+              send(res, 400, { error: 'layout_mode_immutable', message: '布局模式创建后不可更改；要换模式请删除后重新生成' })
+              return
+            }
+            send(res, 400, { error: 'bad_request', message: String(cause?.message ?? cause) })
+          }
+          return
+        }
+        if (method === 'POST' && path === '/demos/versions') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, version: await serialized(() => store.createDemoVersion(body)) })
+          return
+        }
+        if (method === 'POST' && /^\/demos\/[^/]+\/rollback$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const body = await readJson(req)
+          send(res, 200, { ok: true, version: await serialized(() => store.rollbackDemoVersion(decodeURIComponent(parts[1]), str(body?.versionId))) })
+          return
+        }
+        if (method === 'DELETE' && /^\/demos\/[^/]+\/versions\/[^/]+$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          try {
+            await serialized(() => store.deleteDemoVersion(decodeURIComponent(parts[1]), decodeURIComponent(parts[3])))
+            send(res, 200, { ok: true })
+          } catch (cause: any) { send(res, 400, { error: 'version_delete_failed', message: String(cause?.message ?? cause) }) }
+          return
+        }
+        if (method === 'POST' && path === '/demos/archive') {
+          const body = await readJson(req)
+          await serialized(() => store.archiveDemo(str(body?.id), body?.archived !== false))
+          send(res, 200, { ok: true })
+          return
+        }
+        if (method === 'GET' && /^\/demos\/[^/]+\/view$/.test(path)) {
+          const parts = path.split('/').filter(Boolean)
+          const demo = store.getDemo(decodeURIComponent(parts[1]))
+          if (demo === undefined) { send(res, 404, { error: 'demo_not_found' }); return }
+          let file = String(demo.entryPath)
+          const pageId = str(url.searchParams.get('page'))
+          if (demo.layoutMode === 'multi' && pageId !== '') {
+            const dir = dirname(String(demo.entryPath))
+            const candidate = join(dir, 'pages', `${sanitizeFilename(pageId)}.html`)
+            if (existsSync(candidate)) file = candidate
+          }
+          if (!existsSync(file)) { send(res, 404, { error: 'file_not_found' }); return }
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(readFileSync(file, 'utf8'))
+          return
+        }
+        if (method === 'GET' && /^\/demos\/[^/]+$/.test(path)) {
+          const demo = store.getDemo(decodeURIComponent(path.slice('/demos/'.length)))
+          if (demo === undefined) { send(res, 404, { error: 'demo_not_found' }); return }
+          send(res, 200, { demo })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/demos/')) {
+          await serialized(() => store.deleteDemo(decodeURIComponent(path.slice('/demos/'.length))))
           send(res, 200, { ok: true })
           return
         }
