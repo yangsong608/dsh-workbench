@@ -71,6 +71,8 @@ export interface ChatDeps {
   onStop: () => void
   onRetry: () => void
   onOpenSession: () => void
+  /** 1.15 C2：查看该派发的事件时间线。 */
+  onTimeline?: () => void
 }
 
 export interface ChatHandle {
@@ -205,6 +207,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
       <span class="chat-count"></span><span class="grow"></span>
       <button class="btn tiny" data-chat-act="open">在会话中打开</button>
       <button class="btn tiny" data-chat-act="retry">重试</button>
+      <button class="btn tiny" data-chat-act="timeline">时间线</button>
       <button class="btn tiny" data-chat-act="stop">停止</button>
       <button class="icon-btn" data-chat-act="close" title="收起">×</button>
     </div>
@@ -315,6 +318,7 @@ export function createAgentChat(host: HTMLElement, deps: ChatDeps): ChatHandle {
     if (act === 'send') { send() }
     else if (act === 'stop') { deps.onStop() }
     else if (act === 'retry') { deps.onRetry() }
+    else if (act === 'timeline') { deps.onTimeline?.() }
     else if (act === 'open') { deps.onOpenSession() }
     else if (act === 'close') { close() }
   })
