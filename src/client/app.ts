@@ -8,6 +8,7 @@
 import { WORKBENCH_CSS } from './styles'
 import { createIdeaView, type IdeaViewHandle } from './idea'
 import { createUiDesignView, type UiDesignViewHandle } from './ui-design'
+import { createDemoView, type DemoViewHandle } from './demo'
 import { createAgentPanel } from './agent-panel'
 import { createAgentChat, teamStateOf, type ChatHandle } from './agent-chat'
 import {
@@ -1026,9 +1027,35 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return `<div id="wb-demo-host" class="ud-host"></div>`
   }
 
-  /** DEMO 视图（A7 实现；先给占位，避免运行时空引用）。 */
-  let demoView: { render(): void; reload(): Promise<void>; mount(): void; destroy(): void; isMounted(): boolean } | null = null
-  function ensureDemoView(): { render(): void } | null {
+  /** DEMO 视图常驻（自持 DOM），按当前视图显隐。 */
+  let demoView: DemoViewHandle | null = null
+  function ensureDemoView(): DemoViewHandle | null {
+    if (demoView !== null) return demoView
+    const host = $id('wb-demo-host')
+    if (host === null) return null
+    demoView = createDemoView(host, {
+      api: API,
+      esc,
+      toast,
+      confirm: message => window.confirm(message),
+      getProjectId: () => currentProjectId(),
+      getProjectName: () => projectByPath(ui.project)?.name ?? '当前项目',
+      themes: () => themesForRender().map(t => ({ id: t.id, name: t.name, platform: t.platform, hint: t.hint })),
+      designs: async () => {
+        const projectId = currentProjectId()
+        if (projectId === '') return []
+        const res = await fetch(`${API}/ui-designs?projectId=${encodeURIComponent(projectId)}`)
+        if (!res.ok) return []
+        const data = await res.json() as { designs?: Array<{ id: string; name: string; pages: Array<{ id: string; name: string }> }> }
+        return Array.isArray(data.designs) ? data.designs : []
+      },
+      ensureStyles: css => ensureExtraCss(css),
+      seed: () => demoDesignSeed,
+      clearSeed: () => { demoDesignSeed = null },
+      openModal,
+      closeModal,
+    })
+    demoView.mount()
     return demoView
   }
 
