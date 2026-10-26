@@ -2001,6 +2001,101 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM product_inputs WHERE id = ?').run(str(id))
   }
 
+  /* ---------- 主题库（D2/D3：规范 spec + 令牌 tokens 双产物） ---------- */
+
+  private themeRow(row: any): any {
+    return {
+      id: row.id, name: row.name, hint: row.hint ?? '', platform: row.platform ?? 'all',
+      tokens: safeJson(row.tokens, {}), spec: row.spec ?? '',
+      builtin: Number(row.builtin ?? 0) === 1, source: row.source ?? 'builtin',
+      sourceRef: row.source_ref ?? '', projectId: row.project_id ?? '',
+      archivedAt: row.archived_at ?? '', createdAt: row.created_at, updatedAt: row.updated_at,
+    }
+  }
+
+  listThemes(opts: { platform?: string; projectId?: string; includeArchived?: boolean } = {}): any[] {
+    const platform = str(opts.platform)
+    const projectId = str(opts.projectId)
+    const conds: string[] = []
+    const params: any[] = []
+    if (opts.includeArchived !== true) conds.push("archived_at = ''")
+    if (platform !== '' && platform !== 'all') { conds.push("(platform = ? OR platform = 'all')"); params.push(platform) }
+    if (projectId !== '') { conds.push("(project_id = '' OR project_id = ?)"); params.push(projectId) }
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : ''
+    const rows = this.db.prepare(`SELECT * FROM themes ${where} ORDER BY builtin DESC, created_at`).all(...params) as any[]
+    return rows.map(row => this.themeRow(row))
+  }
+
+  getTheme(id: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM themes WHERE id = ?').get(str(id)) as any
+    return row === undefined ? undefined : this.themeRow(row)
+  }
+
+  /** 令牌最小校验（D3：不做白名单，只保证能渲染）。 */
+  private validateThemeTokens(tokens: unknown): { ok: boolean; error?: string; value?: any } {
+    if (tokens === null || typeof tokens !== 'object' || Array.isArray(tokens)) return { ok: false, error: 'tokens 必须是对象' }
+    const t = tokens as Record<string, unknown>
+    const isColor = (v: unknown): boolean => typeof v === 'string' && v.trim() !== ''
+    for (const key of ['bg', 'surface', 'text', 'accent'] as const) {
+      if (!isColor(t[key])) return { ok: false, error: `缺少或非法的颜色：${key}` }
+    }
+    const radius = Number(t.radius)
+    if (!Number.isFinite(radius) || radius < 0 || radius > 48) return { ok: false, error: 'radius 必须是 0–48 的数值' }
+    return { ok: true, value: { ...t, radius } }
+  }
+
+  saveTheme(input: any): any {
+    const now = isoDateTimeSeconds()
+    const id = str(input?.id).trim().slice(0, 48) || `th-${randomUUID().slice(0, 10)}`
+    if (!/^[a-z0-9][a-z0-9-]{1,47}$/i.test(id)) throw new Error('主题 id 只能由字母数字与 - 组成')
+    const name = str(input?.name).trim().slice(0, 40)
+    if (name === '') throw new Error('主题名称不能为空')
+    const tokensRaw = typeof input?.tokens === 'string' ? (() => { try { return JSON.parse(input.tokens) } catch { return null } })() : input?.tokens
+    const checked = this.validateThemeTokens(tokensRaw)
+    if (!checked.ok) throw new Error(checked.error ?? '主题令牌非法')
+    const existing = this.db.prepare('SELECT * FROM themes WHERE id = ?').get(id) as any
+    const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input.platform) : 'all'
+    const source = ['builtin', 'text', 'image', 'url', 'mixed', 'manual'].includes(str(input?.source)) ? str(input.source) : 'manual'
+    const spec = str(input?.spec).slice(0, 20_000)
+    const hint = str(input?.hint).slice(0, 200)
+    const sourceRef = str(input?.sourceRef).slice(0, 500)
+    const projectId = str(input?.projectId)
+    const tokensJson = JSON.stringify(checked.value)
+    if (existing !== undefined) {
+      if (Number(existing.builtin ?? 0) === 1 && str(input?.force) !== '1') {
+        /* 内置主题允许改 hint/spec，但不允许改 tokens（避免预置视觉被污染） */
+        this.db.prepare('UPDATE themes SET hint=?, spec=?, updated_at=? WHERE id=?').run(hint || existing.hint, spec || existing.spec, now, id)
+        return this.themeRow(this.db.prepare('SELECT * FROM themes WHERE id = ?').get(id))
+      }
+      this.db.prepare('UPDATE themes SET name=?, hint=?, platform=?, tokens=?, spec=?, source=?, source_ref=?, project_id=?, updated_at=? WHERE id=?')
+        .run(name, hint, platform, tokensJson, spec, source, sourceRef, projectId, now, id)
+    } else {
+      this.db.prepare(`INSERT INTO themes(id,name,hint,platform,tokens,spec,builtin,source,source_ref,project_id,archived_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,0,?,?,?,'',?,?)`)
+        .run(id, name, hint, platform, tokensJson, spec, source, sourceRef, projectId, now, now)
+    }
+    return this.themeRow(this.db.prepare('SELECT * FROM themes WHERE id = ?').get(id))
+  }
+
+  deleteTheme(id: string): void {
+    const row = this.db.prepare('SELECT builtin FROM themes WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return
+    if (Number(row.builtin ?? 0) === 1) {
+      const error: any = new Error('内置主题不可删除')
+      error.code = 'builtin_locked'
+      throw error
+    }
+    this.db.prepare('DELETE FROM themes WHERE id = ?').run(str(id))
+  }
+
+  archiveTheme(id: string, archived: boolean): void {
+    const row = this.db.prepare('SELECT builtin FROM themes WHERE id = ?').get(str(id)) as any
+    if (row === undefined) throw new Error('主题不存在')
+    if (Number(row.builtin ?? 0) === 1) throw new Error('内置主题不可归档')
+    this.db.prepare('UPDATE themes SET archived_at=?, updated_at=? WHERE id=?')
+      .run(archived ? isoDateTimeSeconds() : '', isoDateTimeSeconds(), str(id))
+  }
+
   /* ---------- 统一模块 / 业务 / 端 ---------- */
   listModules(productId?: string, mapId?: string, includeArchived = false): any[] {
     const map = str(mapId)
@@ -4889,6 +4984,39 @@ export function apply(ctx: any): void {
             if (existing !== undefined) { patch.productId = existing.productId; if (patch.mapId === undefined) patch.mapId = existing.mapId; if (patch.name === undefined) patch.name = existing.name; if (patch.kind === undefined) patch.kind = existing.kind; if (patch.platform === undefined) patch.platform = existing.platform }
           }
           send(res, 200, { ok: true, module: await serialized(() => store.saveModule(patch)) })
+          return
+        }
+        /* ---------- 主题库（A2） ---------- */
+        if (method === 'GET' && path === '/themes') {
+          send(res, 200, {
+            themes: store.listThemes({
+              platform: str(url.searchParams.get('platform')),
+              projectId: str(url.searchParams.get('projectId')),
+              includeArchived: url.searchParams.get('archived') === '1',
+            }),
+          })
+          return
+        }
+        if (method === 'POST' && path === '/themes') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, theme: await serialized(() => store.saveTheme(body?.theme ?? body)) })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/themes/')) {
+          const id = decodeURIComponent(path.slice('/themes/'.length))
+          try {
+            await serialized(() => store.deleteTheme(id))
+            send(res, 200, { ok: true })
+          } catch (cause: any) {
+            if (cause?.code === 'builtin_locked') { send(res, 400, { error: 'builtin_locked', message: '内置主题不可删除' }); return }
+            throw cause
+          }
+          return
+        }
+        if (method === 'POST' && path === '/themes/archive') {
+          const body = await readJson(req)
+          await serialized(() => store.archiveTheme(str(body?.id), body?.archived !== false))
+          send(res, 200, { ok: true })
           return
         }
         /* 统一项目：门户 / Bug / 测试 / 灵感共用一份 */
