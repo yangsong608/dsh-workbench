@@ -458,6 +458,80 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let testProjectSelected: string | null = null
   let testTab: 'plans' | 'cases' | 'run' | 'report' | 'deploy' = 'cases'
   /** 1.14 测试计划与待回归队列。 */
+  /** 1.15 归档中心：所有已归档对象，按表分组。 */
+  let archivedGroups: Record<string, Array<{ id: string; table: string; label: string; title: string; projectId: string; archivedAt: string }>> = {}
+  let archiveCenterOpen = false
+  async function loadArchivedGroups(): Promise<void> {
+    try {
+      const res = await fetch(`${API}/archive`)
+      if (!res.ok) return
+      const data = await res.json() as { groups?: typeof archivedGroups }
+      archivedGroups = data.groups ?? {}
+    } catch { /* 保留旧值 */ }
+  }
+  async function archiveAction(table: string, id: string, archived: boolean): Promise<void> {
+    try {
+      const res = await fetch(`${API}/archive`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ table, id, archived }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      toast(archived ? '已恢复到归档前的位置' : '已归档')
+      await loadArchivedGroups()
+      await loadTests(true)
+      await loadProducts(true)
+      renderContent()
+    } catch (cause) { toast(`操作失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  async function purgeArchived(table: string, id: string): Promise<void> {
+    if (!window.confirm('彻底删除后无法恢复，确定吗？')) return
+    try {
+      const res = await fetch(`${API}/archive`, {
+        method: 'DELETE', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ table, id }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(data.error === 'must_archive_first' ? '需要先归档才能彻底删除' : `HTTP ${res.status}`)
+      }
+      toast('已彻底删除')
+      await loadArchivedGroups()
+      renderContent()
+    } catch (cause) { toast(`删除失败：${String((cause as Error).message ?? cause)}`) }
+  }
+  function openArchiveCenter(): void {
+    void (async () => {
+      archiveCenterOpen = true
+      await loadArchivedGroups()
+      renderArchiveCenter()
+    })()
+  }
+  function renderArchiveCenter(): void {
+    const tables = Object.keys(archivedGroups)
+    const total = tables.reduce((n, t) => n + archivedGroups[t].length, 0)
+    const body = total === 0
+      ? '<div class="notes-empty small">还没有归档的对象。归档是软删除，随时可以恢复。</div>'
+      : tables.map(t => {
+        const rows = archivedGroups[t]
+        const label = rows[0]?.label ?? t
+        return `<div class="mfield"><label>${esc(label)}（${rows.length}）</label>
+          <div style="max-height:180px;overflow:auto">
+          ${rows.map(r => `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1;font-size:11.5px">${esc(r.title)}</span>
+            <span style="font-size:10px;color:var(--text-3)">${esc(String(r.archivedAt).slice(0, 16))}</span>
+            <button class="icon-btn" data-act="archive-restore" data-table="${esc(t)}" data-id="${esc(r.id)}" title="恢复">↩</button>
+            <button class="icon-btn" data-act="archive-purge" data-table="${esc(t)}" data-id="${esc(r.id)}" title="彻底删除">${ic('trash', 12)}</button>
+          </div>`).join('')}
+          </div></div>`
+      }).join('')
+    openModal(`<h3>归档中心（${total}）</h3>
+      <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">
+        归档是软删除：对象从列表消失，但数据保留。点 ↩ 恢复到原位置；点 🗑 彻底删除（不可恢复）。
+      </div>
+      ${body}
+      <div class="modal-foot"><button class="btn" data-act="close-modal">关闭</button></div>`)
+  }
+
   let testPlans: Array<{ id: string; name: string; projectId: string; scopePages: string[]; priority: string; status: string; docNoteId: string; sourceUiDesignId: string }> = []
   let pendingRegression: Array<{ id: string; title: string; pageId: string; bugId: string }> = []
   async function loadTestPlans(): Promise<void> {
@@ -7136,7 +7210,7 @@ ${lines}`
 
   function renderTests(): string {
     const project = testProjectOf(testProjectSelected)
-    const header = `<div class="view-head"><div><div class="eyebrow">测试</div><h1 class="page-title">测试</h1><div class="page-sub">AI 生成用例 → 执行 → 录入 Bug → 回归 → 动画报告</div><div class="head-pills"><span><b>${testCases.length}</b> 用例</span><span><b>${testRuns.length}</b> 运行</span><span><b>${testProjects.length}</b> 项目</span></div></div><div style="display:flex;gap:6px"><button class="btn" data-act="ai-dispatch" data-kind="test">${ic('spark', 13)}AI 协同</button><button class="btn-primary" data-act="test-new">${ic('plus', 14)}新建测试项目</button></div></div>`
+    const header = `<div class="view-head"><div><div class="eyebrow">测试</div><h1 class="page-title">测试</h1><div class="page-sub">AI 生成用例 → 执行 → 录入 Bug → 回归 → 动画报告</div><div class="head-pills"><span><b>${testCases.length}</b> 用例</span><span><b>${testRuns.length}</b> 运行</span><span><b>${testProjects.length}</b> 项目</span></div></div><div style="display:flex;gap:6px"><button class="btn" data-act="ai-dispatch" data-kind="test">${ic('spark', 13)}AI 协同</button><button class="btn" data-act="archive-center">归档中心</button><button class="btn-primary" data-act="test-new">${ic('plus', 14)}新建测试项目</button></div></div>`
     if (testError !== '') return header + `<div class="news-banner"><span>读取失败：${esc(testError)}</span><button class="btn" data-act="test-refresh">重试</button></div>`
     if (testProjects.length === 0) return header + `<div class="notes-empty bug-empty"><div class="ne-icon">${ic('test', 22)}</div><b>还没有测试项目</b><span>创建项目并关联工作区，AI 生成用例后逐条测试。</span><button class="btn-primary" data-act="test-new">${ic('plus', 14)}新建测试项目</button></div>`
     if (!project) return header
@@ -8141,6 +8215,9 @@ ${lines}`
         void setArchivedFlag(target, id, archived)
         return
       }
+      if (act === 'archive-center') { openArchiveCenter(); return }
+      if (act === 'archive-restore') { void archiveAction(actEl.getAttribute('data-table') ?? '', actEl.getAttribute('data-id') ?? '', false); return }
+      if (act === 'archive-purge') { void purgeArchived(actEl.getAttribute('data-table') ?? '', actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-note-new') { openNoteCreator(); return }
       if (act === 'product-note-new-node') { openNoteCreator(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-note-edit') { openNoteEditor(actEl.getAttribute('data-id') ?? ''); return }

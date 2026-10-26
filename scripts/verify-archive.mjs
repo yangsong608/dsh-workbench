@@ -79,5 +79,10 @@ await call('POST', '/archive', { table: 'bugs', id: BUG.id, archived: true })
 const center = (await call('GET', '/archive')).body.groups ?? {}
 check('归档中心按表分组返回', Object.keys(center).length >= 1 && (center.bugs ?? []).some(b => b.id === BUG.id), JSON.stringify(Object.keys(center)))
 
+// 通用归档端点兼容 target 别名（前端传 products）
+const alias = await call('POST', '/archive', { target: 'products', id: P.id, archived: true })
+check('target 别名兼容（products → projects）', alias.status === 200 && alias.body?.ok === true, JSON.stringify(alias.body))
+await call('POST', '/archive', { target: 'products', id: P.id, archived: false })
+
 console.log(`\n${pass}/${pass + fail} 通过`)
 process.exit(fail > 0 ? 1 : 0)

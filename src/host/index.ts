@@ -6301,7 +6301,10 @@ export function apply(ctx: any): void {
         /* ---------- 1.15 通用归档（A1/A2） ---------- */
         if (method === 'POST' && path === '/archive') {
           const body = await readJson(req)
-          const table = str(body?.table)
+          /* 兼容前端的 target 命名（products/modules/notes），映射到真实表名 */
+          const alias: Record<string, string> = { products: 'projects', product: 'projects' }
+          const raw = str(body?.table) || str(body?.target)
+          const table = alias[raw] ?? raw
           const id = str(body?.id)
           const archived = body?.archived !== false
           const hit = await serialized(() => store.archiveRow(table, id, archived))
