@@ -7,6 +7,7 @@
  */
 import { WORKBENCH_CSS } from './styles'
 import { createIdeaView, type IdeaViewHandle } from './idea'
+import { createUiDesignView, type UiDesignViewHandle } from './ui-design'
 import { createAgentPanel } from './agent-panel'
 import { createAgentChat, teamStateOf, type ChatHandle } from './agent-chat'
 import {
@@ -146,7 +147,7 @@ interface DB { spaces: Space[]; tasks: Task[]; focus: FocusSession[]; settings: 
 interface Health { ok: boolean; engine: string; file: string; sqlite?: string; revision: number; tasks: number; spaces: number; focus: number }
 
 interface Ui {
-  view: 'portal' | 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'test' | 'idea'
+  view: 'portal' | 'board' | 'list' | 'timeline' | 'matrix' | 'calendar' | 'focus' | 'stats' | 'news' | 'notes' | 'bugs' | 'product' | 'ui' | 'demo' | 'test' | 'idea'
   /** 当前项目范围：'all' 全部 / 'none' 未归属 / 其余为 DSH 工作区绝对路径。 */
   project: string
   scope: 'today' | 'all'
@@ -191,7 +192,7 @@ const SIDE_DEFAULT_NARROW = 190
  */
 const PORTAL_GROUPS: Array<{ id: string; title: string; hint: string; views: Array<Ui['view']> }> = [
   { id: 'work', title: '工作', hint: '任务、日程与沉淀', views: ['list', 'board', 'calendar', 'stats', 'focus', 'notes', 'news'] },
-  { id: 'rd', title: '研发', hint: '产品设计、缺陷、测试与灵感', views: ['product', 'bugs', 'test', 'idea'] },
+  { id: 'rd', title: '研发', hint: '产品设计、UI 设计、DEMO、缺陷、测试与灵感', views: ['product', 'ui', 'demo', 'bugs', 'test', 'idea'] },
 ]
 
 /* ------------------------------- 时间工具 ------------------------------- */
@@ -963,8 +964,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /* ---------- 内容 ---------- */
   const FILTER_LABEL: Record<Ui['filter'], string> = { all: '筛选', high: '高优先级', sub: '有子待办', attach: '有附件', unscheduled: '未排时间' }
   const SORT_LABEL: Record<Ui['sort'], string> = { time: '按时间', priority: '按优先级', created: '按创建', title: '按标题' }
-  const MODULE_OF: Record<Ui['view'], string> = { portal: '工作台', board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', test: '测试', idea: '研发' }
-  const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试', idea: '灵感' }
+  const MODULE_OF: Record<Ui['view'], string> = { portal: '工作台', board: '任务', list: '任务', timeline: '计划', matrix: '任务', calendar: '计划', focus: '专注', stats: '统计', news: '新闻', notes: '记事本', bugs: 'Bug 管理', product: '产品设计', ui: 'UI 设计', demo: 'DEMO', test: '测试', idea: '研发' }
+  const NAME_OF: Record<Ui['view'], string> = { portal: '项目门户', board: '看板', list: '行动清单', timeline: '时间轴', matrix: '四象限', calendar: '日历', focus: '当前专注', stats: '数据复盘', news: '新闻检索', notes: '笔记', bugs: '质量管理', product: '产品', test: '测试', idea: '灵感', ui: 'UI 设计', demo: 'DEMO' }
 
   function renderContent(): void {
     if (ui.view === 'idea') { syncIdeaView(); return }
@@ -988,6 +989,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     else if (ui.view === 'notes') html = renderNotes()
     else if (ui.view === 'bugs') html = renderBugs()
     else if (ui.view === 'product') html = renderProduct()
+    else if (ui.view === 'ui') html = renderUiDesignShell()
+    else if (ui.view === 'demo') html = renderDemoShell()
     else if (ui.view === 'test') html = renderTests()
     else html = renderStats()
     el.innerHTML = html
@@ -1009,6 +1012,24 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       if (productTab === 'map') void mountProductCanvas()
     }
     if (ui.view === 'test') bindTests()
+    if (ui.view === 'ui') ensureUiDesignView()?.render()
+    if (ui.view === 'demo') ensureDemoView()?.render()
+  }
+
+  /** UI 设计视图外壳：视图模块自持 DOM，这里只提供宿主容器。 */
+  function renderUiDesignShell(): string {
+    return `<div id="wb-ui-design-host" class="ud-host"></div>`
+  }
+
+  /** DEMO 视图外壳。 */
+  function renderDemoShell(): string {
+    return `<div id="wb-demo-host" class="ud-host"></div>`
+  }
+
+  /** DEMO 视图（A7 实现；先给占位，避免运行时空引用）。 */
+  let demoView: { render(): void; reload(): Promise<void>; mount(): void; destroy(): void; isMounted(): boolean } | null = null
+  function ensureDemoView(): { render(): void } | null {
+    return demoView
   }
 
   function bindContentInputs(): void {
@@ -1165,6 +1186,51 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   }
 
   let ideaView: IdeaViewHandle | null = null
+  let uiDesignView: UiDesignViewHandle | null = null
+
+  /** UI 设计视图常驻（自持 DOM），按当前视图显隐。 */
+  function ensureUiDesignView(): UiDesignViewHandle | null {
+    if (uiDesignView !== null) return uiDesignView
+    const host = $id('wb-ui-design-host')
+    if (host === null) return null
+    uiDesignView = createUiDesignView(host, {
+      api: API,
+      esc,
+      toast,
+      confirm: message => window.confirm(message),
+      getProjectId: () => currentProjectId(),
+      getProjectName: () => projectByPath(ui.project)?.name ?? '当前项目',
+      themes: () => themesForRender().map(t => ({ id: t.id, name: t.name, platform: t.platform, hint: t.hint })),
+      ensureStyles: css => ensureExtraCss(css),
+      onBuildDemo: (design, pageId) => {
+        demoDesignSeed = { designId: design.id, pageId: pageId ?? '' }
+        ui.view = 'demo'
+        renderAll()
+      },
+    })
+    uiDesignView.mount()
+    return uiDesignView
+  }
+
+  /** 当前项目 id（provider 缺失时回落到第一个项目）。 */
+  function currentProjectId(): string {
+    const card = projectCards().find(c => c.path === ui.project)
+    return card?.projectId ?? ''
+  }
+
+  /** 额外样式注入（模块自带的 CSS），每个 key 只注一次。 */
+  const extraCssKeys = new Set<string>()
+  function ensureExtraCss(css: string): void {
+    const key = css.slice(0, 60)
+    if (extraCssKeys.has(key)) return
+    extraCssKeys.add(key)
+    const style = document.createElement('style')
+    style.textContent = css
+    shadow.appendChild(style)
+  }
+
+  /** UI 设计 → DEMO 的交接种子。 */
+  let demoDesignSeed: { designId: string; pageId: string } | null = null
 
   /** 灵感视图常驻（编辑器实例不能每次重建），按当前视图显隐。 */
   function ensureIdeaView(): IdeaViewHandle | null {
