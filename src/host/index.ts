@@ -266,12 +266,43 @@ CREATE TABLE IF NOT EXISTS test_cases (
   source TEXT NOT NULL DEFAULT 'manual',
   module_id TEXT NOT NULL DEFAULT '',
   platform TEXT NOT NULL DEFAULT 'all',
+  /* T2 追溯链：用例挂到 UI 设计 / DEMO / 页面 / 区块 */
+  plan_id TEXT NOT NULL DEFAULT '',
+  ui_design_id TEXT NOT NULL DEFAULT '',
+  demo_id TEXT NOT NULL DEFAULT '',
+  page_id TEXT NOT NULL DEFAULT '',
+  block_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  bug_id TEXT NOT NULL DEFAULT '',
+  design_version TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+/* T1 测试计划：计划下挂多轮执行 */
+CREATE TABLE IF NOT EXISTS test_plans (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  product_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  scope_pages TEXT NOT NULL DEFAULT '[]',
+  scope_modules TEXT NOT NULL DEFAULT '[]',
+  priority TEXT NOT NULL DEFAULT 'P2',
+  status TEXT NOT NULL DEFAULT 'planning',
+  source_ui_design_id TEXT NOT NULL DEFAULT '',
+  source_demo_id TEXT NOT NULL DEFAULT '',
+  doc_note_id TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_test_plans_project ON test_plans(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_test_cases_scope ON test_cases(ui_design_id, page_id);
 CREATE TABLE IF NOT EXISTS test_runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'running',
   results TEXT NOT NULL DEFAULT '[]',
@@ -995,6 +1026,30 @@ CREATE TABLE IF NOT EXISTS test_projects (
     addCol('bugs', 'module_id', "TEXT NOT NULL DEFAULT ''"); addCol('bugs', 'platform', "TEXT NOT NULL DEFAULT 'all'")
     addCol('test_projects', 'module_id', "TEXT NOT NULL DEFAULT ''"); addCol('test_projects', 'platform', "TEXT NOT NULL DEFAULT 'all'")
     addCol('test_cases', 'module_id', "TEXT NOT NULL DEFAULT ''"); addCol('test_cases', 'platform', "TEXT NOT NULL DEFAULT 'all'")
+    /* 1.14 测试模块：追溯链 + 回归排队（T2/T9/T10） */
+    for (const [name, sql] of [
+      ['plan_id', "TEXT NOT NULL DEFAULT ''"],
+      ['ui_design_id', "TEXT NOT NULL DEFAULT ''"],
+      ['demo_id', "TEXT NOT NULL DEFAULT ''"],
+      ['page_id', "TEXT NOT NULL DEFAULT ''"],
+      ['block_id', "TEXT NOT NULL DEFAULT ''"],
+      ['role', "TEXT NOT NULL DEFAULT ''"],
+      ['status', "TEXT NOT NULL DEFAULT 'active'"],
+      ['bug_id', "TEXT NOT NULL DEFAULT ''"],
+      ['design_version', "TEXT NOT NULL DEFAULT ''"],
+    ] as Array<[string, string]>) addCol('test_cases', name, sql)
+    addCol('test_runs', 'plan_id', "TEXT NOT NULL DEFAULT ''")
+    /* 测试计划表（旧库补建） */
+    this.db.exec(`CREATE TABLE IF NOT EXISTS test_plans (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, product_id TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      scope_pages TEXT NOT NULL DEFAULT '[]', scope_modules TEXT NOT NULL DEFAULT '[]',
+      priority TEXT NOT NULL DEFAULT 'P2', status TEXT NOT NULL DEFAULT 'planning',
+      source_ui_design_id TEXT NOT NULL DEFAULT '', source_demo_id TEXT NOT NULL DEFAULT '',
+      doc_note_id TEXT NOT NULL DEFAULT '', archived_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`)
+    try { this.db.exec('CREATE INDEX IF NOT EXISTS idx_test_plans_project ON test_plans(project_id, updated_at)') } catch { /* ignore */ }
   }
 
   private ensureProducts(): void {
@@ -1447,6 +1502,122 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
         .run(`bugp-${randomUUID().slice(0, 12)}`, String(project.name), String(project.workspace_path), basename(String(project.workspace_path)), String(project.id), ts, ts)
     }
+  }
+
+  /* ---------- 测试计划（T1：计划下挂多轮执行） ---------- */
+
+  private testPlanRow(row: any): any {
+    return {
+      id: row.id, projectId: row.project_id, productId: row.product_id ?? '',
+      name: row.name, description: row.description ?? '',
+      scopePages: jsonList(row.scope_pages), scopeModules: jsonList(row.scope_modules),
+      priority: row.priority ?? 'P2', status: row.status ?? 'planning',
+      sourceUiDesignId: row.source_ui_design_id ?? '', sourceDemoId: row.source_demo_id ?? '',
+      docNoteId: row.doc_note_id ?? '', archivedAt: row.archived_at ?? '',
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }
+  }
+
+  listTestPlans(projectId: string, includeArchived = false): any[] {
+    const conds: string[] = []
+    const params: any[] = []
+    if (str(projectId) !== '') { conds.push('project_id = ?'); params.push(str(projectId)) }
+    if (!includeArchived) conds.push("archived_at = ''")
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : ''
+    return (this.db.prepare(`SELECT * FROM test_plans ${where} ORDER BY updated_at DESC`).all(...params) as any[])
+      .map(row => this.testPlanRow(row))
+  }
+
+  getTestPlan(id: string): any | undefined {
+    const row = this.db.prepare('SELECT * FROM test_plans WHERE id = ?').get(str(id)) as any
+    if (row === undefined) return undefined
+    const plan = this.testPlanRow(row)
+    plan.cases = this.listTestCases('').filter(c => c.planId === plan.id)
+    plan.runs = (this.db.prepare('SELECT * FROM test_runs WHERE plan_id = ? ORDER BY created_at DESC').all(plan.id) as any[]).map(r => ({ id: r.id, name: r.name, status: r.status, createdAt: r.created_at, finishedAt: r.finished_at ?? '' }))
+    return plan
+  }
+
+  saveTestPlan(input: any): any {
+    const now = isoDateTimeSeconds()
+    const id = str(input?.id) || `tp-${randomUUID().slice(0, 12)}`
+    const name = str(input?.name).trim().slice(0, 120)
+    if (name === '') throw new Error('测试计划名称不能为空')
+    const projectId = str(input?.projectId)
+    if (projectId === '' || !this.db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) throw new Error('项目不存在')
+    const existing = this.db.prepare('SELECT * FROM test_plans WHERE id = ?').get(id) as any
+    const status = ['planning', 'ready', 'running', 'done', 'archived'].includes(str(input?.status))
+      ? str(input.status) : (existing?.status ?? 'planning')
+    const pages = JSON.stringify(asArray(input?.scopePages).map(String).slice(0, 200))
+    const modules = JSON.stringify(asArray(input?.scopeModules).map(String).slice(0, 200))
+    if (existing !== undefined) {
+      this.db.prepare(`UPDATE test_plans SET name=?, description=?, scope_pages=?, scope_modules=?, priority=?, status=?,
+        source_ui_design_id=?, source_demo_id=?, doc_note_id=?, updated_at=? WHERE id=?`)
+        .run(name, str(input?.description).slice(0, 5000), pages, modules,
+             ['P0','P1','P2','P3'].includes(str(input?.priority)) ? str(input.priority) : String(existing.priority ?? 'P2'),
+             status, str(input?.sourceUiDesignId) || String(existing.source_ui_design_id ?? ''),
+             str(input?.sourceDemoId) || String(existing.source_demo_id ?? ''),
+             str(input?.docNoteId) || String(existing.doc_note_id ?? ''), now, id)
+    } else {
+      this.db.prepare(`INSERT INTO test_plans(id, project_id, product_id, name, description, scope_pages, scope_modules,
+        priority, status, source_ui_design_id, source_demo_id, doc_note_id, archived_at, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'',?,?)`)
+        .run(id, projectId, str(input?.productId), name, str(input?.description).slice(0, 5000), pages, modules,
+             ['P0','P1','P2','P3'].includes(str(input?.priority)) ? str(input.priority) : 'P2',
+             status, str(input?.sourceUiDesignId), str(input?.sourceDemoId), str(input?.docNoteId), now, now)
+    }
+    return this.testPlanRow(this.db.prepare('SELECT * FROM test_plans WHERE id = ?').get(id))
+  }
+
+  deleteTestPlan(id: string): void {
+    /* 删计划：把其下用例解绑（不删用例），执行记录保留但失去 plan 关联 */
+    this.db.prepare("UPDATE test_cases SET plan_id = '' WHERE plan_id = ?").run(str(id))
+    this.db.prepare("UPDATE test_runs SET plan_id = '' WHERE plan_id = ?").run(str(id))
+    this.db.prepare('DELETE FROM test_plans WHERE id = ?').run(str(id))
+  }
+
+  /**
+   * T4/T5：UI 设计或 DEMO 出新版本时，**硬删除**基于旧版本生成的用例（含已执行）。
+   * 返回删除条数。
+   */
+  purgeStaleTestCases(scope: { uiDesignId?: string; demoId?: string; keepVersion?: string }): number {
+    const uiDesignId = str(scope?.uiDesignId)
+    const demoId = str(scope?.demoId)
+    const keep = str(scope?.keepVersion)
+    if (uiDesignId === '' && demoId === '') return 0
+    const conds: string[] = []
+    const params: any[] = []
+    if (uiDesignId !== '') { conds.push('ui_design_id = ?'); params.push(uiDesignId) }
+    if (demoId !== '') { conds.push('demo_id = ?'); params.push(demoId) }
+    const where = conds.join(uiDesignId !== '' && demoId !== '' ? ' OR ' : '')
+    const rows = this.db.prepare(`SELECT id, design_version FROM test_cases WHERE ${where}`).all(...params) as any[]
+    const stale = keep === '' ? rows : rows.filter(r => String(r.design_version ?? '') !== keep)
+    if (stale.length === 0) return 0
+    const del = this.db.prepare('DELETE FROM test_cases WHERE id = ?')
+    for (const row of stale) del.run(String(row.id))
+    return stale.length
+  }
+
+  /**
+   * T10：Bug 变 resolved 时，把关联用例置为 pending-regression。
+   * 返回置为待回归的条数。
+   */
+  markCasesForRegression(bugId: string): number {
+    const id = str(bugId)
+    if (id === '') return 0
+    const rows = this.db.prepare("SELECT id FROM test_cases WHERE bug_id = ?").all(id) as any[]
+    const upd = this.db.prepare("UPDATE test_cases SET status = 'pending-regression', updated_at = ? WHERE id = ?")
+    const now = isoDateTimeSeconds()
+    for (const row of rows) upd.run(now, String(row.id))
+    return rows.length
+  }
+
+  /** 列出待回归用例。 */
+  listPendingRegression(projectId = ''): any[] {
+    const conds = ["status = 'pending-regression'"]
+    const params: any[] = []
+    if (str(projectId) !== '') { conds.push('project_id = ?'); params.push(str(projectId)) }
+    return (this.db.prepare(`SELECT * FROM test_cases WHERE ${conds.join(' AND ')} ORDER BY updated_at DESC`).all(...params) as any[])
+      .map(row => toTestCase(row))
   }
 
   /* ---------- 统一项目 CRUD ---------- */
@@ -2876,12 +3047,35 @@ CREATE TABLE IF NOT EXISTS products (
     }
     const existing = this.db.prepare('SELECT id, created_at FROM test_cases WHERE id = ?').get(id) as any
     const priority = ['P0', 'P1', 'P2', 'P3'].includes(str(input?.priority)) ? str(input?.priority) : 'P2'
+    const platform = ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input.platform) : 'all'
+    /* 1.14 新增字段（T2 追溯链 / T9 计划 / T10 回归） */
+    const planId = str(input?.planId)
+    const uiDesignId = str(input?.uiDesignId)
+    const demoId = str(input?.demoId)
+    const pageId = str(input?.pageId)
+    const blockId = str(input?.blockId)
+    const role = str(input?.role).slice(0, 40)
+    const bugId = str(input?.bugId)
+    const designVersion = str(input?.designVersion).slice(0, 80)
+    const status = ['active', 'pending-regression', 'archived'].includes(str(input?.status)) ? str(input.status) : 'active'
     if (existing) {
-      this.db.prepare('UPDATE test_cases SET project_id=?, title=?, precondition=?, steps=?, expected=?, priority=?, type=?, source=?, module_id=?, platform=?, updated_at=? WHERE id=?')
-        .run(projectId, title, str(input?.precondition), JSON.stringify(steps), str(input?.expected), priority, str(input?.type) || 'functional', str(input?.source) || 'manual', str(input?.moduleId), ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input?.platform) : 'all', now, id)
+      const prev = this.db.prepare('SELECT plan_id, ui_design_id, demo_id, page_id, block_id, role, status, bug_id, design_version FROM test_cases WHERE id = ?').get(id) as any
+      this.db.prepare(`UPDATE test_cases SET project_id=?, title=?, precondition=?, steps=?, expected=?, priority=?, type=?, source=?,
+        module_id=?, platform=?, plan_id=?, ui_design_id=?, demo_id=?, page_id=?, block_id=?, role=?, bug_id=?, design_version=?, status=?, updated_at=? WHERE id=?`)
+        .run(projectId, title, str(input?.precondition), JSON.stringify(steps), str(input?.expected), priority,
+             str(input?.type) || 'functional', str(input?.source) || 'manual', str(input?.moduleId), platform,
+             planId || String(prev?.plan_id ?? ''), uiDesignId || String(prev?.ui_design_id ?? ''),
+             demoId || String(prev?.demo_id ?? ''), pageId || String(prev?.page_id ?? ''),
+             blockId || String(prev?.block_id ?? ''), role || String(prev?.role ?? ''),
+             bugId || String(prev?.bug_id ?? ''), designVersion || String(prev?.design_version ?? ''),
+             status || String(prev?.status ?? 'active'), now, id)
     } else {
-      this.db.prepare('INSERT INTO test_cases(id, project_id, title, precondition, steps, expected, priority, type, source, module_id, platform, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, projectId, title, str(input?.precondition), JSON.stringify(steps), str(input?.expected), priority, str(input?.type) || 'functional', str(input?.source) || 'manual', str(input?.moduleId), ['pc', 'mobile', 'tablet', 'all'].includes(str(input?.platform)) ? str(input?.platform) : 'all', existing?.created_at ?? now, now)
+      this.db.prepare(`INSERT INTO test_cases(id, project_id, title, precondition, steps, expected, priority, type, source,
+        module_id, platform, plan_id, ui_design_id, demo_id, page_id, block_id, role, status, bug_id, design_version, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, projectId, title, str(input?.precondition), JSON.stringify(steps), str(input?.expected), priority,
+             str(input?.type) || 'functional', str(input?.source) || 'manual', str(input?.moduleId), platform,
+             planId, uiDesignId, demoId, pageId, blockId, role, status, bugId, designVersion, now, now)
     }
     const result = toTestCase(this.db.prepare('SELECT * FROM test_cases WHERE id = ?').get(id))
     const project = this.db.prepare('SELECT * FROM test_projects WHERE id = ?').get(projectId) as any
@@ -3008,6 +3202,13 @@ CREATE TABLE IF NOT EXISTS products (
     } else {
       this.db.prepare(`INSERT INTO bugs(id, project_id, code, title, description, status, severity, priority, planned_date, tags, verification, ai_thread_id, module_id, platform, assignee, created_at, updated_at, resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, projectId, code, title, str(input?.description).slice(0, 50_000), status, severity, priority, plannedDate, JSON.stringify(tags), verification, aiThreadId, moduleId, platform, assignee, existing?.created_at ?? now, now, resolvedAt)
+    }
+    /* T10 闭环：Bug 变 resolved 时，把关联用例排队回归（状态 → pending-regression） */
+    if (status === 'resolved') {
+      try {
+        const queued = this.markCasesForRegression(id)
+        if (queued > 0) console.log(`[dsh-workbench] Bug ${id} 已解决，${queued} 条用例排队回归`)
+      } catch (cause) { console.warn(`[dsh-workbench] 回归排队失败：${String(cause)}`) }
     }
     return toBug(this.db.prepare('SELECT * FROM bugs WHERE id = ?').get(id))
   }
@@ -4536,13 +4737,18 @@ function toTestCase(row: any): any {
   return {
     id: row.id, projectId: row.project_id, title: row.title, precondition: row.precondition ?? '',
     steps: safeJson(row.steps, []), expected: row.expected ?? '', priority: row.priority ?? 'P2',
-    type: row.type ?? 'functional', source: row.source ?? 'manual', moduleId: row.module_id ?? '', platform: row.platform ?? 'all', createdAt: row.created_at, updatedAt: row.updated_at,
+    type: row.type ?? 'functional', source: row.source ?? 'manual', moduleId: row.module_id ?? '', platform: row.platform ?? 'all',
+    /* 1.14 追溯链 + 回归排队 */
+    planId: row.plan_id ?? '', uiDesignId: row.ui_design_id ?? '', demoId: row.demo_id ?? '',
+    pageId: row.page_id ?? '', blockId: row.block_id ?? '', role: row.role ?? '',
+    status: row.status ?? 'active', bugId: row.bug_id ?? '', designVersion: row.design_version ?? '',
+    createdAt: row.created_at, updatedAt: row.updated_at,
   }
 }
 
 function toTestRun(row: any): any {
   return {
-    id: row.id, projectId: row.project_id, name: row.name, status: row.status ?? 'running',
+    id: row.id, projectId: row.project_id, planId: row.plan_id ?? '', name: row.name, status: row.status ?? 'running',
     results: safeJson(row.results, []), summary: safeJson(row.summary, {}), deployLog: row.deploy_log ?? '',
     createdAt: row.created_at, finishedAt: row.finished_at ?? null,
   }
@@ -5734,6 +5940,48 @@ export function apply(ctx: any): void {
         if (method === 'DELETE' && path.startsWith('/ui-designs/')) {
           await serialized(() => store.deleteUiDesign(decodeURIComponent(path.slice('/ui-designs/'.length))))
           send(res, 200, { ok: true })
+          return
+        }
+        /* ---------- 测试计划（1.14 T1） ---------- */
+        if (method === 'GET' && path === '/tests/plans') {
+          send(res, 200, { plans: store.listTestPlans(str(url.searchParams.get('projectId')), url.searchParams.get('archived') === '1') })
+          return
+        }
+        if (method === 'POST' && path === '/tests/plans') {
+          const body = await readJson(req)
+          send(res, 200, { ok: true, plan: await serialized(() => store.saveTestPlan(body?.plan ?? body)) })
+          return
+        }
+        if (method === 'POST' && path === '/tests/plans/archive') {
+          const body = await readJson(req)
+          const id = str(body?.id)
+          if (id !== '') await serialized(() => store.saveTestPlan({ id, name: str(body?.name) || '归档计划', projectId: str(body?.projectId), status: 'archived' }))
+          send(res, 200, { ok: true })
+          return
+        }
+        if (method === 'GET' && /^\/tests\/plans\/[^/]+$/.test(path)) {
+          const plan = store.getTestPlan(decodeURIComponent(path.slice('/tests/plans/'.length)))
+          if (plan === undefined) { send(res, 404, { error: 'plan_not_found' }); return }
+          send(res, 200, { plan })
+          return
+        }
+        if (method === 'DELETE' && path.startsWith('/tests/plans/')) {
+          await serialized(() => store.deleteTestPlan(decodeURIComponent(path.slice('/tests/plans/'.length))))
+          send(res, 200, { ok: true })
+          return
+        }
+        /* 待回归队列（T10） */
+        if (method === 'GET' && path === '/tests/pending-regression') {
+          send(res, 200, { cases: store.listPendingRegression(str(url.searchParams.get('projectId'))) })
+          return
+        }
+        /* 清理旧版本用例（T4/T5，硬删除） */
+        if (method === 'POST' && path === '/tests/purge-stale') {
+          const body = await readJson(req)
+          const removed = await serialized(() => store.purgeStaleTestCases({
+            uiDesignId: str(body?.uiDesignId), demoId: str(body?.demoId), keepVersion: str(body?.keepVersion),
+          }))
+          send(res, 200, { ok: true, removed })
           return
         }
         /* ---------- DEMO（A4） ---------- */
