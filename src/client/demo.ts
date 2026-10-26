@@ -354,7 +354,10 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
   }
 
   function mount(): void {
-    if (mounted) { render(); return }
+    /* 视图切换时 #wb-generic 的 innerHTML 会被整体重建，缓存下来的 root 会脱离文档。
+       所以每次 mount 都要确认 DOM 仍挂在宿主里，否则重建。 */
+    if (mounted && root !== null && root.isConnected) { render(); return }
+    root?.remove()
     root = document.createElement('div')
     root.className = 'ud-root'
     host.appendChild(root)

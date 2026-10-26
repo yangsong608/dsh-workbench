@@ -1017,8 +1017,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
       if (productTab === 'map') void mountProductCanvas()
     }
     if (ui.view === 'test') bindTests()
-    if (ui.view === 'ui') ensureUiDesignView()?.render()
-    if (ui.view === 'demo') ensureDemoView()?.render()
+    if (ui.view === 'ui') ensureUiDesignView()
+    if (ui.view === 'demo') ensureDemoView()
   }
 
   /** UI 设计视图外壳：视图模块自持 DOM，这里只提供宿主容器。 */
@@ -1034,9 +1034,14 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   /** DEMO 视图常驻（自持 DOM），按当前视图显隐。 */
   let demoView: DemoViewHandle | null = null
   function ensureDemoView(): DemoViewHandle | null {
-    if (demoView !== null) return demoView
     const host = $id('wb-demo-host')
     if (host === null) return null
+    /* 关键：视图切换会重建 #wb-generic 的 innerHTML，旧宿主 DOM 已被销毁。
+       此时缓存的视图实例虽然还在，但它的 root 已脱离文档，必须重新 mount。 */
+    if (demoView !== null) {
+      if (host.childElementCount > 0) { demoView.render(); return demoView }
+      demoView = null
+    }
     demoView = createDemoView(host, {
       api: API,
       esc,
@@ -1223,9 +1228,14 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
 
   /** UI 设计视图常驻（自持 DOM），按当前视图显隐。 */
   function ensureUiDesignView(): UiDesignViewHandle | null {
-    if (uiDesignView !== null) return uiDesignView
     const host = $id('wb-ui-design-host')
     if (host === null) return null
+    /* 关键：视图切换会重建 #wb-generic 的 innerHTML，旧宿主 DOM 已被销毁。
+       此时缓存的视图实例虽然还在，但它的 root 已脱离文档，必须重新 mount。 */
+    if (uiDesignView !== null) {
+      if (host.childElementCount > 0) { uiDesignView.render(); return uiDesignView }
+      uiDesignView = null
+    }
     uiDesignView = createUiDesignView(host, {
       api: API,
       esc,
