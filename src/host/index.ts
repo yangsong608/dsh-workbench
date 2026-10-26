@@ -426,6 +426,7 @@ class SqliteStore {
     this.ensureTests()
     this.migrateUnifiedProjects()
     this.migrateUiAndDemo()
+    this.migrateDemoCleanup()
     this.seedNotes()
     this.revision = Number(this.readMeta('revision') ?? 0)
     const seeded = Number(this.readMeta('seeded') ?? 0) === 1
@@ -1249,6 +1250,82 @@ CREATE TABLE IF NOT EXISTS products (
    * - 这里只做「内置主题入库」：12 套预置主题写入 themes（builtin=1），幂等（已存在则跳过）；
    * - 主题的 spec 由 tokens 推导出一段简短规范说明，供 AI 后续读取。
    */
+  /**
+   * C1 旧 Demo 清理（D6，不可逆）。
+   * 严格顺序：导出备份 → 校验备份 → 事务删库 → 删文件 → 写标记。
+   * 备份或校验失败一律中止，不删任何东西。
+   */
+  private migrateDemoCleanup(): void {
+    if (this.readMeta('demo_cleanup_done') === '1') return
+    const countRow = this.db.prepare('SELECT COUNT(*) AS n FROM product_demos').get() as any
+    const total = Number(countRow?.n ?? 0)
+    if (total === 0) { this.writeMeta('demo_cleanup_done', '1'); return }
+    const stamp = isoDateTimeSeconds().replace(/[: ]/g, '-')
+    let backupDir = join(dirname(this.file), 'backup', `demo-${stamp}`)
+    try {
+      mkdirSync(backupDir, { recursive: true })
+      /* 1) 导出元数据 */
+      const demos = this.db.prepare('SELECT * FROM product_demos').all()
+      const progress = this.db.prepare('SELECT * FROM product_demo_progress').all()
+      writeFileSync(join(backupDir, 'demos.json'), JSON.stringify({ demos, progress, exportedAt: isoDateTimeSeconds() }, null, 2), 'utf8')
+      /* 2) 备份产物文件（复制到备份目录，保留相对路径） */
+      const productsRows = this.db.prepare('SELECT id, workspace_path FROM products').all() as any[]
+      let copied = 0
+      for (const row of productsRows) {
+        const workspace = str(row.workspace_path)
+        if (workspace === '') continue
+        const demoDir = join(workspace, '.dsh-workbench', 'products', String(row.id), 'demo')
+        if (!existsSync(demoDir)) continue
+        const target = join(backupDir, 'files', String(row.id))
+        mkdirSync(target, { recursive: true })
+        for (const name of readdirSync(demoDir)) {
+          const from = join(demoDir, name)
+          try {
+            if (statSync(from).isDirectory()) {
+              const sub = join(target, name)
+              mkdirSync(sub, { recursive: true })
+              for (const inner of readdirSync(from)) {
+                const src = join(from, inner)
+                if (statSync(src).isFile()) { writeFileSync(join(sub, inner), readFileSync(src)); copied++ }
+              }
+            } else { writeFileSync(join(target, name), readFileSync(from)); copied++ }
+          } catch (cause) { console.warn(`[dsh-workbench] 备份文件失败 ${from}：${String(cause)}`) }
+        }
+      }
+      /* 3) 校验备份：demos.json 可解析且条目数一致 */
+      const raw = readFileSync(join(backupDir, 'demos.json'), 'utf8')
+      const parsed = JSON.parse(raw) as { demos?: unknown[] }
+      if (!Array.isArray(parsed.demos) || parsed.demos.length !== total) {
+        throw new Error(`备份校验失败：期望 ${total} 条，实际 ${parsed.demos?.length ?? 0} 条`)
+      }
+      writeFileSync(join(backupDir, 'MANIFEST.txt'), `旧 Demo 备份\n时间：${isoDateTimeSeconds()}\n记录数：${total}\n文件数：${copied}\n`, 'utf8')
+      console.log(`[dsh-workbench] 旧 Demo 已备份到 ${backupDir}（${total} 条记录 / ${copied} 个文件）`)
+    } catch (cause) {
+      console.warn(`[dsh-workbench] 旧 Demo 清理中止（备份未通过）：${String(cause)}`)
+      return  /* 不写标记，下次启动重试 */
+    }
+    /* 4) 事务删库（保留空表，避免旧引用崩） */
+    try {
+      this.db.exec('BEGIN')
+      this.db.prepare('DELETE FROM product_demos').run()
+      this.db.prepare('DELETE FROM product_demo_progress').run()
+      this.db.exec('COMMIT')
+    } catch (cause) {
+      try { this.db.exec('ROLLBACK') } catch { /* ignore */ }
+      console.warn(`[dsh-workbench] 旧 Demo 清理中止（删库失败）：${String(cause)}`)
+      return
+    }
+    /* 5) 删文件（失败只告警） */
+    for (const row of this.db.prepare('SELECT id, workspace_path FROM products').all() as any[]) {
+      const workspace = str(row.workspace_path)
+      if (workspace === '') continue
+      try { rmSync(join(workspace, '.dsh-workbench', 'products', String(row.id), 'demo'), { recursive: true, force: true }) }
+      catch (cause) { console.warn(`[dsh-workbench] 删除旧 Demo 文件失败：${String(cause)}`) }
+    }
+    this.writeMeta('demo_cleanup_done', '1')
+    console.log(`[dsh-workbench] 旧 Demo 清理完成（${total} 条记录）`)
+  }
+
   private migrateUiAndDemo(): void {
     const now = isoDateTimeSeconds()
     const builtin: Array<{ id: string; name: string; hint: string; platform: string; tokens: Record<string, unknown>; spec: string }> = [
@@ -5298,63 +5375,12 @@ function registerProductTools(ctx: any, store: SqliteStore | JsonStore): void {
       } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
     },
   }
-  const demoTool = {
-    name: 'workbench_product_demo_publish',
-    description: '把产品设计笔记/灵感生成的自包含 HTML Demo 写入工作区并登记，供工作台预览。支持单页（kind=page）与多页产品系统（kind=system，单文件内用导航切页）。style 取值见工作台主题库（clean/editorial/neo/glass/dashboard/bento/tech/cream/aurora/clay/brutal 等）。',
-    parameters: {
-      type: 'object', additionalProperties: false,
-      properties: {
-        productId: { type: 'string' },
-        mapId: { type: 'string', description: '导图 id（不传则归到该产品第一张导图）。' },
-        scope: { type: 'string', enum: ['feature', 'all'] },
-        kind: { type: 'string', enum: ['page', 'system'], description: 'page=单页面原型；system=带导航的多页产品系统。' },
-        platform: { type: 'string', enum: ['pc', 'mobile', 'tablet', 'all'], description: '目标端，影响布局与主题。' },
-        style: { type: 'string', description: '主题 id：clean | editorial | neo | glass | dashboard | bento | tech | cream | aurora | clay | brutal | padflow' },
-        featureId: { type: 'string', description: 'scope=feature 时的导图节点 id。' },
-        title: { type: 'string' },
-        html: { type: 'string', description: '完整单文件 HTML（内联 CSS/JS，无外部依赖）。' },
-      },
-      required: ['productId', 'scope', 'style', 'html'],
-    },
-    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `已生成 Demo「${v.demo?.title ?? ''}」` : `生成失败：${String(v?.error ?? '')}` }] },
-    async execute(args: any): Promise<any> {
-      try {
-        const demo = await serialized(() => store.saveProductDemo(args))
-        return { ok: true, demo }
-      } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
-    },
-  }
-  const progressTool = {
-    name: 'workbench_demo_progress_publish',
-    description: 'Demo 生成过程中的进度上报。开始时 step=0 status=running；每个里程碑调用一次；结束时 status=done；失败时 status=failed 并说明原因。工作台 Demo 页会实时展示。',
-    parameters: {
-      type: 'object', additionalProperties: false,
-      properties: {
-        productId: { type: 'string' },
-        demoId: { type: 'string', description: 'Demo id（若已有）。' },
-        step: { type: 'number', description: '当前步（从 1 开始）。' },
-        total: { type: 'number', description: '总步数。' },
-        status: { type: 'string', enum: ['running', 'done', 'failed'] },
-        message: { type: 'string', description: '当前步骤说明（做了什么/正在做什么）。' },
-      },
-      required: ['productId', 'step', 'total', 'status', 'message'],
-    },
-    output: { schema: {}, render: (_a: unknown, v: any) => [{ type: 'text', text: v?.ok ? `进度 ${v.progress?.step ?? 0}/${v.progress?.total ?? 0} 已记录` : `上报失败：${String(v?.error ?? '')}` }] },
-    async execute(args: any): Promise<any> {
-      try {
-        const progress = await serialized(() => store.saveDemoProgress(args))
-        return { ok: true, progress }
-      } catch (cause) { return { ok: false, error: String((cause as Error)?.message ?? cause) } }
-    },
-  }
   const register = (tool: any, label: string): void => {
     if (typeof ctx.effect === 'function') ctx.effect(() => ctx.tools.register(tool), `workbench: ${label}`)
     else ctx.tools.register(tool)
     console.log(`[dsh-workbench] 已注册工具 ${tool.name}`)
   }
   register(noteTool, 'product note tool')
-  register(demoTool, 'product demo tool')
-  register(progressTool, 'demo progress tool')
 }
 
 export const name = 'dsh-workbench' 

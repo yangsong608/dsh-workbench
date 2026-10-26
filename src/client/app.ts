@@ -3508,7 +3508,7 @@ ${lines}
         ${productMaps.map(map => `<option value="${map.id}"${!productMapScopeAll && map.id === productMapSelected ? ' selected' : ''}>${esc(map.name)}</option>`).join('')}
       </select>`
     const tabs = `<div class="product-tabs">
-      ${(['map', 'notes', 'modules', 'demo'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
+      ${(['map', 'notes', 'modules'] as const).map(tab => `<button class="${productTab === tab ? 'active' : ''}" data-act="product-tab" data-tab="${tab}">${tab === 'map' ? `思维导图（${productMaps.length}）` : tab === 'notes' ? `设计笔记（${productNoteList(product).length}）` : tab === 'modules' ? `模块（${productModuleList(product).length}）` : `Demo（${productDemoList(product).length}）`}</button>`).join('')}
       ${scopeSelect}
     </div>`
     let body = ''
@@ -3654,22 +3654,13 @@ ${lines}
           : `<div class="module-grid">${filtered.map(m => `<div class="module-card ${m.kind}" data-act="product-module-detail" data-id="${m.id}" title="${esc(m.name)}"><div><span class="module-kind">${kindName(m.kind)}</span><b>${esc(m.name)}</b><i class="platform ${m.platform}">${m.platform.toUpperCase()}</i></div><p>${esc(m.description || '待补充模块说明')}</p><small>${esc(m.status)}${m.noteId ? ' · 已关联笔记' : ''}</small></div>`).join('')}</div>`)}
       <div id="product-chat" class="product-chat"></div>`
     } else {
-      const demos = productDemoList(product)
-      const current = demos.find(d => d.id === productDemoSelected) ?? demos[0]
-      const themeOptions = (group: 'pc' | 'mobile' | 'tablet' | 'all'): string =>
-        themesForRender().filter(t => group === 'all' ? t.platform === 'all' : t.platform === group || t.platform === 'all')
-          .map(t => `<option value="${t.id}" ${productStyle === t.id ? 'selected' : ''}>${esc(t.name)}${t.popular ? ' · 流行' : ''}</option>`).join('')
-      const prog = demoProgress && demoProgress.productId === product.id && demoProgress.updatedAt !== demoProgressDismissedAt ? demoProgress : null
-      body = `<div class="product-panel-head"><div><b>产品 Demo</b><span>来源：设计笔记 + 灵感 · 单页 / 产品系统 · ${platformLabel(productPlatform)} · ${themeOf(productStyle).name}</span></div><div class="product-actions">
-        <select id="wb-product-platform" class="notes-nb-select" title="目标端"><option value="all" ${productPlatform === 'all' ? 'selected' : ''}>自适应</option><option value="pc" ${productPlatform === 'pc' ? 'selected' : ''}>PC</option><option value="mobile" ${productPlatform === 'mobile' ? 'selected' : ''}>移动端</option><option value="tablet" ${productPlatform === 'tablet' ? 'selected' : ''}>平板</option></select>
-        <select id="wb-product-kind" class="notes-nb-select" title="Demo 形态"><option value="page" ${productDemoKind === 'page' ? 'selected' : ''}>单页面</option><option value="system" ${productDemoKind === 'system' ? 'selected' : ''}>产品系统（多页）</option></select>
-        <select id="wb-product-style" class="notes-nb-select" title="UI 主题"><optgroup label="通用">${themeOptions('all')}</optgroup><optgroup label="PC 主题">${themeOptions('pc')}</optgroup><optgroup label="移动端主题">${themeOptions('mobile')}</optgroup><optgroup label="平板主题">${themeOptions('tablet')}</optgroup></select>
-        <button class="btn" data-act="product-gen-demo-ai">${ic('spark', 12)}AI 深度生成</button>
-        <button class="btn-primary" data-act="product-gen-demo" data-scope="all">${ic('play', 12)}快速渲染</button>
-        ${productSelectedFeatures(product).length > 0 ? `<button class="btn" data-act="product-gen-demo" data-scope="feature" title="为每个勾选的功能/需求各生成一个 Demo">${ic('play', 12)}按勾选渲染（${productSelectedFeatures(product).length}）</button>` : ''}
-      </div></div>
-      ${prog ? `<div class="demo-progress ${prog.status}"><div class="demo-progress-head"><b>生成进度</b><span>${prog.status === 'running' ? `${prog.step}/${prog.total} · ${esc(prog.message)}` : prog.status === 'done' ? `已完成 · ${esc(prog.message)}` : `失败 · ${esc(prog.message)}`}</span><button class="icon-btn" data-act="demo-progress-clear" title="关闭">✕</button></div><div class="demo-progress-bar"><i style="width:${prog.total > 0 ? Math.min(100, Math.round(prog.step / prog.total * 100)) : prog.status === 'done' ? 100 : 8}%"></i></div>${prog.log.length > 0 ? `<div class="demo-progress-log">${prog.log.slice(-5).map(l => `<div><i>${(l.at ?? '').slice(11, 16)}</i>${esc(l.message)}</div>`).join('')}</div>` : ''}</div>` : ''}
-        <div class="product-demo-layout"><div class="product-demo-list">${demos.map(d => `<div class="product-demo-row${current?.id === d.id ? ' active' : ''}" data-product-demo="${d.id}"><b>${esc(d.title)}</b><span>${themeOf(d.style).name} · ${d.kind === 'system' ? '产品系统' : '单页'} · ${platformLabel(d.platform ?? 'all')} · ${d.createdAt.slice(5, 16)}</span><button class="icon-btn" data-act="product-demo-delete" data-id="${d.id}" title="删除 Demo">${ic('trash', 11)}</button></div>`).join('') || '<div class="notes-empty small">还没有 Demo：「快速渲染」本地即时生成，或「AI 深度生成」结合灵感做出可交互原型。</div>'}</div><div class="product-demo-preview">${current ? `<div class="demo-viewport-bar">${(['pc', 'tablet', 'mobile'] as const).map(v => `<button class="${demoViewport === v ? 'on' : ''}" data-act="demo-viewport" data-v="${v}">${v === 'pc' ? 'PC' : v === 'tablet' ? '平板' : '移动'}</button>`).join('')}<span>${esc(themeOf(current.style).hint)}</span></div><iframe class="demo-frame demo-frame-${demoViewport}" sandbox="allow-scripts allow-forms allow-modals" src="${API}/products/demo?id=${encodeURIComponent(current.id)}&v=${encodeURIComponent(current.createdAt)}" title="产品 Demo"></iframe>` : '<div class="notes-empty small">生成后在这里预览</div>'}</div></div>`
+      /* Demo Tab 已移除（D6）：产品→DEMO 改走独立视图，这里给跳转入口 */
+      body = `<div class="notes-empty"><div class="ne-icon">${ic('play', 22)}</div><b>Demo 已独立成页</b>
+        <span>旧的产品内 Demo 已清理。现在请到「UI 设计」生成页面级设计，再到「DEMO」产出可交互原型（支持版本、按页优化、归档）。</span>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn-primary" data-act="goto-ui">${ic('layout', 14)}去 UI 设计</button>
+          <button class="btn" data-act="goto-demo">${ic('play', 14)}去 DEMO</button>
+        </div></div>`
     }
     return header + toolbar + tabs + body
   }
@@ -7495,7 +7486,9 @@ ${lines}`
       if (act === 'product-edit') { openProductEdit(productSelected ?? undefined); return }
       if (act === 'product-save') { void saveProduct(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'product-delete') { void deleteProduct(actEl.getAttribute('data-id') ?? ''); return }
-      if (act === 'product-tab') { productTab = (actEl.getAttribute('data-tab') as 'map' | 'notes' | 'modules' | 'demo') ?? 'map'; renderContent(); return }
+      if (act === 'product-tab') { productTab = (actEl.getAttribute('data-tab') as 'map' | 'notes' | 'modules') ?? 'map'; renderContent(); return }
+      if (act === 'goto-ui') { ui.view = 'ui'; renderAll(); return }
+      if (act === 'goto-demo') { ui.view = 'demo'; renderAll(); return }
       if (act === 'product-refresh') { void loadProducts(); return }
       if (act === 'product-node-new') { openNodeQuickAdd('child', (actEl.getAttribute('data-type') as ProductNodeKind) ?? 'feature'); return }
       if (act === 'product-node-child') { openNodeQuickAdd('child'); return }
