@@ -461,7 +461,20 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let testPlans: Array<{ id: string; name: string; projectId: string; scopePages: string[]; priority: string; status: string; docNoteId: string; sourceUiDesignId: string }> = []
   let pendingRegression: Array<{ id: string; title: string; pageId: string; bugId: string }> = []
   async function loadTestPlans(): Promise<void> {
-    const projectId = currentProjectId()
+    /* 兜底：projects 可能还没加载完（测试页可直接从侧栏进入），先补一次再取 id */
+    if (projects.length === 0) await loadProjectsList()
+    let projectId = currentProjectId()
+    if (projectId === '') {
+      /* 最后一次兜底：直接问 API 要第一个项目 */
+      try {
+        const res = await fetch(`${API}/projects`)
+        if (res.ok) {
+          const data = await res.json() as { projects?: typeof projects }
+          projects = Array.isArray(data.projects) ? data.projects : []
+          projectId = projects[0]?.id ?? ''
+        }
+      } catch { /* ignore */ }
+    }
     if (projectId === '') { testPlans = []; pendingRegression = []; return }
     try {
       const [pRes, rRes] = await Promise.all([
@@ -7888,7 +7901,16 @@ ${lines}`
       if (act === 'test-save') { void saveTestProject(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'test-delete') { void deleteTestProject(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'test-refresh') { void loadTests(); return }
-      if (act === 'test-tab') { testTab = (actEl.getAttribute('data-tab') as 'cases' | 'run' | 'report' | 'deploy') ?? 'cases'; renderContent(); return }
+      if (act === 'test-tab') {
+        testTab = (actEl.getAttribute('data-tab') as 'plans' | 'cases' | 'run' | 'report' | 'deploy') ?? 'cases'
+        /* 1.14：切到计划 Tab 时必须重新拉计划与待回归队列 */
+        if (testTab === 'plans') { void loadTestPlans().then(() => { if (ui.view === 'test') renderContent() }); return }
+        renderContent(); return
+      }
+      if (act === 'test-plan-new') { void createTestPlan(); return }
+      if (act === 'test-gen-doc') { void generateTestDesignDoc(); return }
+      if (act === 'test-run-pending') { void runPendingRegression(); return }
+      if (act === 'test-plan-open') { void openTestPlan(actEl.getAttribute('data-id') ?? ''); return }
       if (act === 'test-gen') { openTestGen(); return }
       if (act === 'test-exec') { openTestExecDispatch(); return }
       if (act === 'test-exec-run') {
