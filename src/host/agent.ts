@@ -244,8 +244,21 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
             let teamId = String(body?.teamId ?? '')
             /* 未显式指定团队时，按功能绑定自动选团队（门户里配置，灵感页不再选）。 */
             if (teamId === '') {
-              const bound = store.listTeams().find(row => Array.isArray((row.bindings ?? {})[feature]) && (row.bindings ?? {})[feature].length > 0)
+              const teams = store.listTeams()
+              /* 1) 优先：该 feature 有成员绑定的团队 */
+              const bound = teams.find(row => Array.isArray((row.bindings ?? {})[feature]) && (row.bindings ?? {})[feature].length > 0)
               if (bound !== undefined) teamId = String(bound.id)
+              else {
+                /* 2) 兜底：没有团队绑定该 feature 时，回退到第一个有主理人的启用人团队。
+                   否则 getTeam('') 会返回 null → 404「团队不存在」，而真实原因是「未绑定」，
+                   这个报错极易误导（ui.design / demo.build 等新 feature 首次使用时常踩）。 */
+                const fallback = teams.find(row => Array.isArray(row.members)
+                  && (row.members as AgentMember[]).some(m => m.role === 'lead' && m.enabled))
+                if (fallback !== undefined) {
+                  teamId = String(fallback.id)
+                  console.warn(`[dsh-workbench] feature「${feature}」无团队绑定，回退到团队「${String((fallback as any).name ?? fallback.id)}」`)
+                }
+              }
             }
             if (ideaId === '' && body?.allowNoIdea !== true) { fail(res, 400, 'ideaId 不能为空'); return true }
             const team = store.getTeam(teamId)

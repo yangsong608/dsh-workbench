@@ -3488,7 +3488,7 @@ ${lines}
     const product = productOf(productSelected)
     const header = `<div class="view-head"><div><div class="eyebrow">产品设计</div><h1 class="page-title">产品</h1>
       <div class="page-sub">导图记录功能，AI 生成设计笔记与多风格 Demo；产物保存到关联工作区</div><div class="head-pills"><span><b>${products.length}</b> 产品</span><span><b>${productModules.length}</b> 模块</span><span><b>${productDemos.length}</b> Demo</span></div></div>
-      <div style="display:flex;gap:6px"><button class="btn" data-act="ai-dispatch" data-kind="product">${ic('spark', 13)}AI 协同</button><button class="btn-primary" data-act="product-new">${ic('plus', 14)}新建产品</button></div></div>`
+      <div style="display:flex;gap:6px"><button class="btn" data-act="goto-ui">${ic('layout', 13)}UI 设计</button><button class="btn" data-act="goto-demo">${ic('play', 13)}DEMO</button><button class="btn" data-act="ai-dispatch" data-kind="product">${ic('spark', 13)}AI 协同</button><button class="btn-primary" data-act="product-new">${ic('plus', 14)}新建产品</button></div></div>`
     if (productError !== '') {
       return header + `<div class="news-banner">${ic('flag', 13)}<span>产品读取失败：${esc(productError)}</span><button class="btn" data-act="product-refresh">重试</button></div>`
     }
