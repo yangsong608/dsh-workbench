@@ -4645,7 +4645,21 @@ ${common}
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { versions?: Array<{ id: string; seq: number; label: string; nodeCount?: number; createdAt?: string }> }
       const versions = Array.isArray(data.versions) ? data.versions : []
-      if (versions.length === 0) { toast('该灵感还没有版本（先生成或存档一版）'); return }
+      /* 无版本时不能静默 return —— 用户点了「下一步」什么都看不到会以为按钮坏了。
+         改成在弹窗里明确说明并给出跳转入口。 */
+      if (versions.length === 0) {
+        const ideaTitle = $id<HTMLSelectElement>('wb-idea-pick')?.selectedOptions?.[0]?.textContent?.trim() ?? '该灵感'
+        openModal(`<h3>从灵感导入 · 无法继续</h3>
+          <div class="mfield" style="background:var(--amber-soft);border:1px solid color-mix(in srgb,var(--amber) 35%,var(--line));border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.7;color:#8a5a08">
+            「${esc(ideaTitle)}」还没有任何版本，因此没有可导入的图结构。<br/>
+            请先到「灵感」页打开它，点「✦ 生成」做一次发散（或「存档版本」保存当前画布），然后再回来导入。
+          </div>
+          <div class="mfield" style="color:var(--text-3);font-size:10.5px;line-height:1.6">
+            导入依赖灵感的历史版本：方向节点会映射为模块/业务，点子映射为功能，问题与风险映射为需求。
+          </div>
+          <div class="modal-foot"><button class="btn" data-act="close-modal">知道了</button><button class="btn solid" data-act="goto-idea-from-import">去灵感页</button></div>`)
+        return
+      }
       openModal(`<h3>从灵感导入 · 选择版本</h3>
         <div class="mfield"><label>版本</label><select id="wb-idea-version">${versions.map(v => `<option value="${v.id}">v${v.seq} · ${esc(v.label)}（${v.nodeCount ?? 0} 节点 · ${(v.createdAt ?? '').slice(5, 16)}）</option>`).join('')}</select></div>
         <div class="mfield"><label>导入范围</label><select id="wb-idea-scope"><option value="all">整张灵感图</option><option value="branch">某个方向的子树</option></select></div>
@@ -7546,6 +7560,7 @@ ${lines}`
       if (act === 'pm-ai-pick') { $id<HTMLInputElement>('wb-ai-file')?.click(); return }
       if (act === 'pm-ai-remove') { removeAiInput(Number(actEl.getAttribute('data-index') ?? '-1')); return }
       if (act === 'idea-import-next') { void openIdeaVersionPick(); return }
+      if (act === 'goto-idea-from-import') { closeModal(); ui.view = 'idea'; renderAll(); return }
       if (act === 'idea-import-run') { void runIdeaImport(actEl.getAttribute('data-idea') ?? '', actEl.getAttribute('data-name') ?? ''); return }
       if (act === 'pm-version-archive') { void archiveMapVersion(); return }
       if (act === 'pm-version-preview') { void previewMapVersion(actEl.getAttribute('data-id') ?? ''); return }
