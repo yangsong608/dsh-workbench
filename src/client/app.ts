@@ -1031,11 +1031,68 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return `<div id="wb-demo-host" class="ud-host"></div>`
   }
 
+  /** UI 设计 → 派发团队生成（feature=ui.design；走 startAgentDispatch + 页内会话）。 */
+  async function generateUiDesign(design: { id: string; name: string; pages: Array<{ id: string; name: string }> }): Promise<void> {
+    const projectId = currentProjectId()
+    if (projectId === '') { toast('先选择一个项目'); return }
+    const product = productOf(productSelected)
+    const map = productMaps.find(m => m.id === productMapSelected)
+    if (!window.confirm(`AI 将按${map ? `导图「${map.name}」` : '当前产品设计'}规划页面清单并生成设计规范（可能消耗额度）。继续？`)) return
+    const nodeLines = map !== undefined && Array.isArray((map.graph as any)?.nodes)
+      ? ((map.graph as any).nodes as any[]).filter(n => n.kind !== 'root').slice(0, 60)
+          .map(n => `- ${String(n.label ?? '')}（${String(n.kind ?? '')}）`).join('\n')
+      : ''
+    const prompt = [
+      `请为产品「${product?.name ?? design.name}」生成一份页面级 UI 设计文档。`,
+      product?.description ? `产品说明：${product.description}` : '',
+      nodeLines !== '' ? `§ 导图结构（已存在的分组/功能）\n${nodeLines}` : '',
+      `§ 输出要求`,
+      `用工具 workbench_ui_doc_publish 一次写完，参数：`,
+      `- projectId: "${projectId}"`,
+      product?.id ? `- productId: "${product.id}"` : '',
+      map ? `- mapId: "${map.id}"` : '',
+      `- name: "${design.name}"`,
+      `- themeId: "glass"`,
+      `- platform: "all"`,
+      `- spec: 设计规范 Markdown，包含 6 节（色彩体系 / 字体层级 / 间距与圆角 / 组件变体 / 密度与动效 / 无障碍）`,
+      `- pages: 页面数组，每项 { id, name, route, platform, goal, blocks:[{id,role,desc}], states:[], interactions:[], dataNeeds:[] }`,
+      ``,
+      `硬约束：`,
+      `1. 每页必须有 id（形如 page-home）、route（形如 /home）、至少 1 个 block；`,
+      `2. block 的 role 用 header/nav/list/form/card/table/footer/empty；`,
+      `3. 页面数量按导图结构合理规划（一般 3–6 页），不要为凑数拆分；`,
+      `4. 只写页面结构与交互，不写代码。`,
+    ].filter(line => line !== '').join('\n')
+    try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
+    const started = await startAgentDispatch({
+      ideaId: '', runId: '', teamId: '', feature: 'ui.design',
+      goal: prompt, ideaTitle: design.name, ideaBrief: product?.description ?? '',
+      workspacePath: product?.workspacePath ?? '', timeoutMs: 20 * 60 * 1000,
+      allowNoIdea: true,
+    } as any, {
+      status: (status: string, note?: string) => {
+        if (status === 'done') { toast('UI 设计已生成'); uiDesignView?.reload() }
+        else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
+      },
+    } as any)
+    if (started === null) { toast('派发失败：提示词已复制，可粘贴到新会话'); return }
+    uiDesignDispatch = { dispatchId: started.dispatchId, sessionId: started.sessionId, teamName: started.teamName }
+    toast(`已派发给「${started.teamName}」生成 UI 设计（进度可在页内会话查看）`)
+    /* 轮询 UI 设计是否出现（工具写入后会新增记录） */
+    const t0 = Date.now()
+    const timer = window.setInterval(() => {
+      if (Date.now() - t0 > 20 * 60 * 1000) { window.clearInterval(timer); return }
+      void uiDesignView?.reload()
+    }, 15000)
+  }
+  let uiDesignDispatch: { dispatchId: string; sessionId: string; teamName: string } | null = null
+
   /** DEMO 视图常驻（自持 DOM），按当前视图显隐。 */
   let demoView: DemoViewHandle | null = null
   function ensureDemoView(): DemoViewHandle | null {
     const host = $id('wb-demo-host')
     if (host === null) return null
+    if (projects.length === 0) void loadProjectsList()
     /* 关键：视图切换会重建 #wb-generic 的 innerHTML，旧宿主 DOM 已被销毁。
        此时缓存的视图实例虽然还在，但它的 root 已脱离文档，必须重新 mount。 */
     if (demoView !== null) {
@@ -1230,6 +1287,8 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   function ensureUiDesignView(): UiDesignViewHandle | null {
     const host = $id('wb-ui-design-host')
     if (host === null) return null
+    /* 首次进入时确保统一项目清单已加载（currentProjectId 的兜底依赖它） */
+    if (projects.length === 0) void loadProjectsList()
     /* 关键：视图切换会重建 #wb-generic 的 innerHTML，旧宿主 DOM 已被销毁。
        此时缓存的视图实例虽然还在，但它的 root 已脱离文档，必须重新 mount。 */
     if (uiDesignView !== null) {
@@ -1250,6 +1309,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
         ui.view = 'demo'
         renderAll()
       },
+      onGenerate: design => { void generateUiDesign(design) },
     })
     uiDesignView.mount()
     return uiDesignView
@@ -1260,10 +1320,30 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     const cards = projectCards()
     const hit = cards.find(c => c.path === ui.project)
     if (hit?.projectId !== undefined && hit.projectId !== '') return hit.projectId
-    /* 兜底：当前选择不是统一项目（如 all/none/任务路径）时，取第一个有统一项目的卡片，
-       避免「项目存在但 UI 设计页显示未选项目」的死角。 */
+    /* 兜底 1：产品页已选中某个产品时，用该产品的工作区去匹配项目，
+       这样「产品页 → UI 设计」跳转后不会误报「未选项目」。 */
+    const product = productOf(productSelected)
+    if (product !== undefined) {
+      if (product.projectId !== undefined && product.projectId !== '') return product.projectId
+      const byProductWs = cards.find(c => c.path === product.workspacePath && c.projectId !== undefined && c.projectId !== '')
+      if (byProductWs?.projectId !== undefined) return byProductWs.projectId
+    }
+    /* 兜底 2：当前选择不是统一项目（all/none/任务路径）时，取第一个有项目的卡片 */
     const first = cards.find(c => c.projectId !== undefined && c.projectId !== '')
-    return first?.projectId ?? ''
+    if (first?.projectId !== undefined && first.projectId !== '') return first.projectId
+    /* 兜底 3：projectCards 依赖产品/Bug/测试都已加载；在 UI 设计/DEMO 视图下这些可能还没拉，
+       直接用已加载的统一项目清单 projects 取第一个，避免「明明有项目却报未选项目」。 */
+    return projects[0]?.id ?? ''
+  }
+
+  /** 统一项目清单（UI 设计/DEMO 的 projectId 兜底依赖它）。 */
+  async function loadProjectsList(): Promise<void> {
+    try {
+      const res = await fetch(`${API}/projects`)
+      if (!res.ok) return
+      const data = await res.json() as { projects?: typeof projects }
+      projects = Array.isArray(data.projects) ? data.projects : []
+    } catch { /* 保留旧值 */ }
   }
 
   /** 额外样式注入（模块自带的 CSS），每个 key 只注一次。 */

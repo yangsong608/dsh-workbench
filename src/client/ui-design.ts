@@ -62,10 +62,13 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
     return data
   }
 
+  let reloadQueued = false
   async function reload(): Promise<void> {
     const projectId = deps.getProjectId()
     if (projectId === '') { designs = []; render(); return }
-    if (loading) return
+    /* 并发调用时不能直接 return —— 否则「建完空壳 → reload」会被正在进行的请求吞掉，
+       表现为页面停在空态不刷新。改为置标记，本轮结束后再补一次。 */
+    if (loading) { reloadQueued = true; return }
     loading = true
     render()
     try {
@@ -79,6 +82,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
     }
     loading = false
     render()
+    if (reloadQueued) { reloadQueued = false; void reload() }
   }
 
   /** 主题下拉选项。 */
@@ -194,6 +198,7 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
     </div>`
     if (design === undefined) {
       root.innerHTML = `<div class="ud-view">${head}<div class="ud-empty">这个项目还没有 UI 设计。点「＋ 新建 UI 设计」手工创建，或「✦ AI 生成 UI 设计」由产品设计文档自动规划页面。</div></div>`
+      bind()   /* 空态也要绑定：否则顶部「＋ 新建 UI 设计 / ✦ AI 生成」按钮没有处理器 */
       return
     }
     const tabs = `<div class="ud-tabs">
@@ -232,7 +237,26 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
         if (act === 'tab') { tab = (el.getAttribute('data-tab') ?? 'pages') as Tab; render(); return }
         if (act === 'reload') { void reload(); return }
         if (act === 'new') { openCreateModal(); return }
-        if (act === 'generate') { if (design) void runGenerate(design); else deps.toast('先创建一个 UI 设计'); return }
+        if (act === 'generate') {
+          void (async () => {
+            /* 空态也能生成：先落一个空壳（pages=[]），再派发；工具写入时按 doc_key 幂等更新它。 */
+            let target = design
+            if (target === undefined) {
+              try {
+                const data = await api('/ui-designs', {
+                  method: 'POST', headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ design: { projectId: deps.getProjectId(), name: '页面 UI 设计', themeId: 'glass', platform: 'all', status: 'draft', pages: [] } }),
+                })
+                target = data.design as UiDesign
+                activeId = target?.id ?? ''
+                designs = Array.isArray(data.design) ? designs : [...designs.filter(d => d.id !== target?.id), target].filter(Boolean) as UiDesign[]
+                render()
+              } catch (cause) { deps.toast(`创建失败：${String((cause as Error).message ?? cause)}`); return }
+            }
+            if (target !== undefined) await runGenerate(target)
+          })()
+          return
+        }
         if (act === 'new-theme') { deps.toast('新建主题请在 DEMO 页或主题库操作（A8 后开放）'); return }
         if (act === 'page-new') { if (design) openPageModal(design); return }
         if (act === 'page-edit') { if (design) openPageModal(design, el.getAttribute('data-page') ?? ''); return }
@@ -334,8 +358,11 @@ export function createUiDesignView(host: HTMLElement, deps: UiDesignDeps): UiDes
   }
 
   async function runGenerate(design: UiDesign): Promise<void> {
-    deps.toast('AI 生成需要提示词与工具（A8）；当前可手工新增页面后生成 DEMO')
-    deps.onGenerate?.(design)
+    if (deps.onGenerate === undefined) {
+      deps.toast('生成通道未接入（deps.onGenerate 缺失）')
+      return
+    }
+    deps.onGenerate(design)
   }
 
   function mount(): void {

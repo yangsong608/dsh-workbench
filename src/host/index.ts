@@ -4573,6 +4573,9 @@ function toProduct(row: any): any {
     id: row.id,
     name: row.name,
     description: row.description ?? '',
+    /* 1.13：统一项目归属（建产品时已回填 products.project_id，但此前没往外暴露，
+       导致 UI 设计/DEMO 拿不到「当前产品属于哪个项目」） */
+    projectId: row.project_id ?? '',
     workspacePath: row.workspace_path ?? '',
     notebookId: row.notebook_id ?? '',
     mindmap: row.mindmap ?? '{"nodes":[]}',

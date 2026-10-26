@@ -70,6 +70,12 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
 
   const current = (): DemoItem | undefined => demos.find(d => d.id === activeId) ?? demos[0]
 
+  /** 弹窗在 Shadow DOM 内，document.getElementById 取不到——必须从宿主 shadowRoot 查。 */
+  function $el<T extends HTMLElement = HTMLElement>(id: string): T | null {
+    const shadow = root?.getRootNode() instanceof ShadowRoot ? (root.getRootNode() as ShadowRoot) : null
+    return (shadow?.getElementById(id) ?? document.getElementById(id)) as T | null
+  }
+
   async function api(path: string, init?: RequestInit): Promise<any> {
     const res = await fetch(`${deps.api}${path}`, init)
     const data = await res.json().catch(() => ({}))
@@ -201,6 +207,7 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
     </div>`
     if (demo === undefined) {
       root.innerHTML = `<div class="ud-view">${head}<div class="ud-empty">这个项目还没有 DEMO。点「＋ 新建 DEMO」按 UI 设计生成，或直接用描述生成。</div></div>`
+      bind()   /* 空态也要绑定：否则「＋ 新建 DEMO」按钮没有处理器（onclick===null） */
       return
     }
     const list = `<div class="ud-demo-list"><div class="ud-panel-head"><div><b>DEMO</b><span>${demos.filter(d => (d.archivedAt ?? '') === '').length} 个</span></div></div>
@@ -295,15 +302,16 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
       <div class="mfield" style="background:var(--amber-soft);border:1px solid color-mix(in srgb,var(--amber) 35%,var(--line));border-radius:8px;padding:7px 10px;font-size:10px;color:#8a5a08;line-height:1.6">
         只重写「${esc(page)}」这一页；其它页面字节级不变，校验通过才落库，并自动生成新版本。</div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" id="wb-demo-opt-go">开始优化</button></div>`)
-    document.querySelectorAll<HTMLElement>('[data-demo-chip]').forEach(chip => {
+    const shadow = root?.getRootNode() instanceof ShadowRoot ? (root.getRootNode() as ShadowRoot) : null
+    ;(shadow ?? document).querySelectorAll<HTMLElement>('[data-demo-chip]').forEach(chip => {
       chip.onclick = () => {
-        const target = document.getElementById('wb-demo-opt') as HTMLTextAreaElement | null
+        const target = $el('wb-demo-opt') as HTMLTextAreaElement | null
         if (target === null) return
         const value = chip.getAttribute('data-demo-chip') ?? ''
         target.value = target.value.trim() === '' ? value : `${target.value}；${value}`
       }
     })
-    const go = document.getElementById('wb-demo-opt-go')
+    const go = $el('wb-demo-opt-go')
     if (go !== null) {
       go.onclick = () => {
         deps.closeModal()
@@ -315,7 +323,7 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
   function openGenerateModal(): void {
     void (async () => {
       let designs: Array<{ id: string; name: string; pages: Array<{ id: string; name: string }> }> = []
-      try { designs = await deps.designs() } catch { designs = [] }
+      try { designs = await deps.designs() } catch (e) { designs = []; deps.toast('读取 UI 设计失败：' + String(e).slice(0,60)) }
       const designOptions = designs.length > 0
         ? designs.map(d => `<option value="${esc(d.id)}">${esc(d.name)}（${d.pages.length} 页）</option>`).join('')
         : '<option value="">（暂无 UI 设计，可直接描述生成）</option>'
@@ -329,13 +337,13 @@ export function createDemoView(host: HTMLElement, deps: DemoDeps): DemoViewHandl
         <div class="mfield"><label>主题</label><select id="wb-demo-theme">${themeOptions('glass')}</select></div>
         <div class="mfield"><label>名称</label><input id="wb-demo-title" placeholder="例如：收银台 Demo"></div>
         <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn solid" id="wb-demo-create">创建</button></div>`)
-      const create = document.getElementById('wb-demo-create')
+      const create = $el('wb-demo-create')
       if (create !== null) {
         create.onclick = () => {
-          const designId = (document.getElementById('wb-demo-design') as HTMLSelectElement | null)?.value ?? ''
-          const layoutMode = (document.getElementById('wb-demo-layout') as HTMLSelectElement | null)?.value ?? 'single'
-          const themeId = (document.getElementById('wb-demo-theme') as HTMLSelectElement | null)?.value ?? 'clean'
-          const title = ((document.getElementById('wb-demo-title') as HTMLInputElement | null)?.value ?? '').trim() || '新 DEMO'
+          const designId = $el<HTMLSelectElement>('wb-demo-design')?.value ?? ''
+          const layoutMode = $el<HTMLSelectElement>('wb-demo-layout')?.value ?? 'single'
+          const themeId = $el<HTMLSelectElement>('wb-demo-theme')?.value ?? 'clean'
+          const title = ($el<HTMLInputElement>('wb-demo-title')?.value ?? '').trim() || '新 DEMO'
           void (async () => {
             try {
               const data = await api('/demos', {
