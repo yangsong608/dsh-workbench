@@ -29,7 +29,8 @@ check('中止系统行', aborted?.kind === 'system')
 check('未知事件忽略', chatItemOf({ type: 'step/start', data: {} }) === null)
 
 const team = teamStateOf({ members: [{ role: 'lead' }, { role: 'teammate' }, { role: 'teammate', phase: 'failed' }], tasks: [{ status: 'completed' }, { status: 'pending' }, { status: 'deleted' }] })
-check('投影提取成员/任务计数', team !== null && team.members === 3 && team.tasksDone === 1 && team.tasksTotal === 2)
+/* 1.15 C1：members 现在排除主理人（3 个成员里 1 个 lead → 2 个执行成员） */
+check('投影提取成员/任务计数（排除 lead）', team !== null && team.members === 2 && team.tasksDone === 1 && team.tasksTotal === 2, `members=${team?.members}`)
 check('无投影返回 null', teamStateOf(null) === null && teamStateOf({}) !== null)
 
 const md = renderMarkdown('# 标题\n- 列表 `code`\n```\nconst a = 1\n```\n<b>x</b>', esc)
