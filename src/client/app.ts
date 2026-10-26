@@ -648,7 +648,7 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
     return `<select id="wb-project" class="wb-project-select" title="按项目筛选">${options.join('')}</select>`
   }
   async function refreshPortal(): Promise<void> {
-    await Promise.all([loadProducts(true), loadBugs(true), loadTests(true)])
+    await Promise.all([loadProducts(true), loadBugs(true), loadTests(true), loadThemes(true)])
     restoreProject()
     if (ui.view === 'portal' || ui.view === 'bugs' || ui.view === 'test') renderAll()
   }
@@ -3024,6 +3024,42 @@ ${lines}
 
   /* ---------- 产品设计（导图 → 笔记 → Demo） ---------- */
   /* Demo 主题库：按目标端分组，★ 为当前流行风格 */
+  /** 主题库（来自 /themes；接口失败时回落到下方常量，保证旧 Demo 预览不崩）。 */
+  interface ThemeItem { id: string; name: string; hint: string; platform: string; tokens: Record<string, unknown>; spec?: string; builtin?: boolean; popular?: boolean }
+  let themes: ThemeItem[] = []
+  let themesLoaded = false
+  /** 后端主题 → 前端展示项（补 popular 星标，来自常量）。 */
+  function themesForRender(): ThemeItem[] {
+    const POPULAR = new Set(PRODUCT_STYLES.filter(t => t.popular).map(t => t.id))
+    if (themes.length === 0) return PRODUCT_STYLES.map(t => ({ ...t, tokens: {} }))
+    return themes.map(t => ({
+      id: t.id, name: t.name + (POPULAR.has(t.id) ? ' ★' : ''), hint: t.hint,
+      platform: t.platform, tokens: t.tokens, spec: t.spec, builtin: t.builtin, popular: POPULAR.has(t.id),
+    }))
+  }
+  async function loadThemes(force = false): Promise<void> {
+    if (themesLoaded && !force) return
+    try {
+      const res = await fetch(`${API}/themes`)
+      if (!res.ok) return
+      const data = await res.json() as { themes?: ThemeItem[] }
+      if (Array.isArray(data.themes) && data.themes.length > 0) { themes = data.themes; themesLoaded = true }
+    } catch { /* 保留常量兜底 */ }
+  }
+  /** 主题令牌：优先用库里的 tokens（JSON → 文本描述），否则回落到内置文案。 */
+  function themeTokenText(id: string): string {
+    const hit = themes.find(t => t.id === id)
+    if (hit !== undefined && hit.tokens !== null && typeof hit.tokens === 'object') {
+      const t = hit.tokens as Record<string, unknown>
+      const parts: string[] = []
+      for (const key of ['bg', 'surface', 'text', 'muted', 'line', 'accent', 'accentInk', 'font', 'density', 'shadow', 'motion']) {
+        if (t[key] !== undefined) parts.push(`${key}:${String(t[key])}`)
+      }
+      if (t.radius !== undefined) parts.push(`radius:${String(t.radius)}px`)
+      return parts.join(' ')
+    }
+    return themeTokens(id)
+  }
   const PRODUCT_STYLES: { id: string; name: string; hint: string; platform: 'pc' | 'mobile' | 'tablet' | 'all'; popular?: boolean }[] = [
     { id: 'clean', name: '极简白', hint: '白底 / 蓝色主色 / 轻阴影 · 通用', platform: 'all' },
     { id: 'glass', name: '玻璃拟态 ★', hint: '深色渐变 / 半透明卡片 / 模糊 · 2024-26 主流', platform: 'all', popular: true },
@@ -3038,8 +3074,11 @@ ${lines}
     { id: 'brutal', name: '新粗野', hint: '高对比 / 硬边框 / 鲜艳色块 · 移动端潮牌风', platform: 'mobile' },
     { id: 'padflow', name: '平板双栏', hint: '侧栏 + 内容 / 大触控目标 · 平板优先', platform: 'tablet' },
   ]
-  const themeOf = (id: string): { id: string; name: string; hint: string; platform: string; popular?: boolean } =>
-    PRODUCT_STYLES.find(t => t.id === id) ?? PRODUCT_STYLES[0]
+  const themeOf = (id: string): { id: string; name: string; hint: string; platform: string; popular?: boolean } => {
+    const fromDb = themes.find(t => t.id === id)
+    if (fromDb !== undefined) return { id: fromDb.id, name: fromDb.name, hint: fromDb.hint, platform: fromDb.platform, popular: PRODUCT_STYLES.find(t => t.id === id)?.popular }
+    return PRODUCT_STYLES.find(t => t.id === id) ?? PRODUCT_STYLES[0]
+  }
   /** 主题设计令牌：写进提示词，约束 AI 产出与本地渲染一致的视觉 */
   function themeTokens(id: string): string {
     const tokens: Record<string, string> = {
@@ -3525,8 +3564,8 @@ ${lines}
       const demos = productDemoList(product)
       const current = demos.find(d => d.id === productDemoSelected) ?? demos[0]
       const themeOptions = (group: 'pc' | 'mobile' | 'tablet' | 'all'): string =>
-        PRODUCT_STYLES.filter(t => group === 'all' ? t.platform === 'all' : t.platform === group || t.platform === 'all')
-          .map(t => `<option value="${t.id}" ${productStyle === t.id ? 'selected' : ''}>${t.name}${t.popular ? ' · 流行' : ''}</option>`).join('')
+        themesForRender().filter(t => group === 'all' ? t.platform === 'all' : t.platform === group || t.platform === 'all')
+          .map(t => `<option value="${t.id}" ${productStyle === t.id ? 'selected' : ''}>${esc(t.name)}${t.popular ? ' · 流行' : ''}</option>`).join('')
       const prog = demoProgress && demoProgress.productId === product.id && demoProgress.updatedAt !== demoProgressDismissedAt ? demoProgress : null
       body = `<div class="product-panel-head"><div><b>产品 Demo</b><span>来源：设计笔记 + 灵感 · 单页 / 产品系统 · ${platformLabel(productPlatform)} · ${themeOf(productStyle).name}</span></div><div class="product-actions">
         <select id="wb-product-platform" class="notes-nb-select" title="目标端"><option value="all" ${productPlatform === 'all' ? 'selected' : ''}>自适应</option><option value="pc" ${productPlatform === 'pc' ? 'selected' : ''}>PC</option><option value="mobile" ${productPlatform === 'mobile' ? 'selected' : ''}>移动端</option><option value="tablet" ${productPlatform === 'tablet' ? 'selected' : ''}>平板</option></select>
@@ -3719,7 +3758,7 @@ ${common}
 - 形态：${kind === 'system' ? '产品系统（多页）：单文件 HTML 内用左侧/顶部导航切换页面，每页是完整界面（含列表/表单/详情等真实布局），页面间可跳转' : '单页面：一个完整界面或长页分区锚点'}
 - 目标端：${platformLabelMap[platform] ?? platformLabelMap.all}
 - UI 主题：${theme.name}（${theme.id}）— ${theme.hint}
-  设计令牌：${themeTokens(theme.id)}
+  设计令牌：${themeTokenText(theme.id)}
 - 覆盖范围：${scope === 'feature' ? '按勾选功能逐个生成' : '整个产品'}
 
 【进度上报（硬性要求）】
