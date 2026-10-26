@@ -1061,6 +1061,19 @@ CREATE TABLE IF NOT EXISTS test_projects (
     try { this.db.exec('CREATE INDEX IF NOT EXISTS idx_test_plans_project ON test_plans(project_id, updated_at)') } catch { /* ignore */ }
     /* 索引必须在补列之后建：旧库 SCHEMA 执行时还没有 ui_design_id/page_id 列 */
     try { this.db.exec('CREATE INDEX IF NOT EXISTS idx_test_cases_scope ON test_cases(ui_design_id, page_id)') } catch { /* ignore */ }
+
+    /* 1.15 归档统一化（A1）：6 类对象补 archived_at */
+    for (const table of ['notes', 'modules', 'bugs', 'test_cases', 'test_projects', 'agent_teams']) {
+      try { addCol(table, 'archived_at', "TEXT NOT NULL DEFAULT ''") } catch { /* 表可能不存在 */ }
+    }
+    /* 索引最后统一建（必须在补列之后） */
+    for (const [idx, table] of [
+      ['idx_notes_archived', 'notes'], ['idx_bugs_archived', 'bugs'],
+      ['idx_test_cases_archived', 'test_cases'], ['idx_modules_archived', 'modules'],
+      ['idx_test_projects_archived', 'test_projects'], ['idx_agent_teams_archived', 'agent_teams'],
+    ] as Array<[string, string]>) {
+      try { this.db.exec(`CREATE INDEX IF NOT EXISTS ${idx} ON ${table}(archived_at)`) } catch { /* 表不存在就跳过 */ }
+    }
   }
 
   private ensureProducts(): void {
@@ -1534,6 +1547,75 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
         .run(`bugp-${randomUUID().slice(0, 12)}`, String(project.name), String(project.workspace_path), basename(String(project.workspace_path)), String(project.id), ts, ts)
     }
+  }
+
+  /* ---------- 1.15 通用归档（A1：11 类对象统一软删除） ---------- */
+
+  /** 允许归档的表白名单（防 SQL 注入）。 */
+  private static readonly ARCHIVABLE = new Set([
+    'notes', 'modules', 'bugs', 'test_cases', 'test_projects', 'agent_teams',
+    'projects', 'demos', 'ui_designs', 'themes', 'test_plans',
+  ])
+
+  private static readonly TABLE_LABEL: Record<string, string> = {
+    notes: '笔记', modules: '模块', bugs: 'Bug', test_cases: '测试用例', test_projects: '测试项目',
+    agent_teams: '智能体团队', projects: '项目', demos: 'DEMO', ui_designs: 'UI 设计',
+    themes: '主题', test_plans: '测试计划',
+  }
+
+  /** 通用归档/恢复。返回是否命中。 */
+  archiveRow(table: string, id: string, archived: boolean): boolean {
+    const t = str(table)
+    const key = str(id)
+    if (!SqliteStore.ARCHIVABLE.has(t)) throw new Error(`不支持归档的表：${t}`)
+    if (key === '') throw new Error('id 不能为空')
+    const row = this.db.prepare(`SELECT id FROM ${t} WHERE id = ?`).get(key) as any
+    if (row === undefined) return false
+    this.db.prepare(`UPDATE ${t} SET archived_at = ? WHERE id = ?`)
+      .run(archived ? isoDateTimeSeconds() : '', key)
+    return true
+  }
+
+  /** 只对已归档对象开放彻底删除（未归档返回 must_archive_first）。 */
+  purgeArchivedRow(table: string, id: string): { ok: boolean; error?: string } {
+    const t = str(table)
+    const key = str(id)
+    if (!SqliteStore.ARCHIVABLE.has(t)) return { ok: false, error: `不支持的表：${t}` }
+    const row = this.db.prepare(`SELECT id, archived_at FROM ${t} WHERE id = ?`).get(key) as any
+    if (row === undefined) return { ok: false, error: '不存在' }
+    if (str(row.archived_at) === '') return { ok: false, error: 'must_archive_first' }
+    /* 用例删除要连带清 run.results 里的孤儿结果 */
+    if (t === 'test_cases') {
+      try { this.db.prepare("DELETE FROM test_cases WHERE id = ?").run(key) } catch { /* ignore */ }
+    } else {
+      this.db.prepare(`DELETE FROM ${t} WHERE id = ?`).run(key)
+    }
+    return { ok: true }
+  }
+
+  /** 列出某表已归档的条目（给归档视图用）。 */
+  listArchived(table: string, projectId = ''): any[] {
+    const t = str(table)
+    if (!SqliteStore.ARCHIVABLE.has(t)) throw new Error(`不支持的表：${t}`)
+    const cols = (this.db.prepare(`PRAGMA table_info(${t})`).all() as any[]).map(c => String(c.name))
+    const conds = ["archived_at != ''"]
+    const params: any[] = []
+    if (str(projectId) !== '' && cols.includes('project_id')) { conds.push('project_id = ?'); params.push(str(projectId)) }
+    const rows = this.db.prepare(`SELECT * FROM ${t} WHERE ${conds.join(' AND ')} ORDER BY archived_at DESC LIMIT 500`).all(...params) as any[]
+    return rows.map(row => ({
+      id: row.id, table: t, label: SqliteStore.TABLE_LABEL[t] ?? t,
+      title: String(row.title ?? row.name ?? row.content?.slice?.(0, 40) ?? row.id),
+      projectId: row.project_id ?? '', archivedAt: row.archived_at ?? '',
+    }))
+  }
+
+  /** 一次拿全部已归档（归档中心用）。 */
+  listAllArchived(projectId = ''): Record<string, any[]> {
+    const out: Record<string, any[]> = {}
+    for (const t of SqliteStore.ARCHIVABLE) {
+      try { const rows = this.listArchived(t, projectId); if (rows.length > 0) out[t] = rows } catch { /* 表不存在 */ }
+    }
+    return out
   }
 
   /* ---------- 测试计划（T1：计划下挂多轮执行） ---------- */
@@ -3151,11 +3233,12 @@ CREATE TABLE IF NOT EXISTS products (
   }
 
   /* ---------- 测试 ---------- */
-  listTestProjects(): any[] {
+  listTestProjects(includeArchived = false): any[] {
+    const arch = includeArchived ? '' : " WHERE p.archived_at = ''"
     const rows = this.db.prepare(`SELECT p.*,
-      (SELECT COUNT(*) FROM test_cases c WHERE c.project_id = p.id) AS case_count,
+      (SELECT COUNT(*) FROM test_cases c WHERE c.project_id = p.id AND c.archived_at = '') AS case_count,
       (SELECT COUNT(*) FROM test_runs r WHERE r.project_id = p.id) AS run_count
-      FROM test_projects p ORDER BY p.updated_at DESC, p.id`).all() as any[]
+      FROM test_projects p${arch} ORDER BY p.updated_at DESC, p.id`).all() as any[]
     return rows.map(row => ({ ...toTestProject(row), caseCount: Number(row.case_count ?? 0), runCount: Number(row.run_count ?? 0) }))
   }
 
@@ -3212,10 +3295,11 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM test_projects WHERE id = ?').run(id)
   }
 
-  listTestCases(projectId?: string): any[] {
+  listTestCases(projectId?: string, includeArchived = false): any[] {
+    const arch = includeArchived ? '' : " AND archived_at = ''"
     const rows = projectId
-      ? this.db.prepare('SELECT * FROM test_cases WHERE project_id = ? ORDER BY created_at, id').all(projectId)
-      : this.db.prepare('SELECT * FROM test_cases ORDER BY created_at, id').all()
+      ? this.db.prepare(`SELECT * FROM test_cases WHERE project_id = ?${arch} ORDER BY created_at, id`).all(projectId)
+      : this.db.prepare(`SELECT * FROM test_cases WHERE 1=1${arch} ORDER BY created_at, id`).all()
     return rows.map(toTestCase)
   }
 
@@ -3358,8 +3442,9 @@ CREATE TABLE IF NOT EXISTS products (
     this.db.prepare('DELETE FROM bug_projects WHERE id = ?').run(id)
   }
 
-  listBugs(): any[] {
-    return this.db.prepare('SELECT * FROM bugs ORDER BY updated_at DESC').all().map(toBug)
+  listBugs(includeArchived = false): any[] {
+    const arch = includeArchived ? '' : " WHERE archived_at = ''"
+    return this.db.prepare(`SELECT * FROM bugs${arch} ORDER BY updated_at DESC`).all().map(toBug)
   }
 
   saveBug(input: any): any {
@@ -6211,6 +6296,34 @@ export function apply(ctx: any): void {
             uiDesignId: str(body?.uiDesignId), demoId: str(body?.demoId), keepVersion: str(body?.keepVersion),
           }))
           send(res, 200, { ok: true, removed })
+          return
+        }
+        /* ---------- 1.15 通用归档（A1/A2） ---------- */
+        if (method === 'POST' && path === '/archive') {
+          const body = await readJson(req)
+          const table = str(body?.table)
+          const id = str(body?.id)
+          const archived = body?.archived !== false
+          const hit = await serialized(() => store.archiveRow(table, id, archived))
+          if (!hit) { send(res, 404, { ok: false, error: 'not_found' }); return }
+          send(res, 200, { ok: true, archived })
+          return
+        }
+        if (method === 'GET' && path === '/archive') {
+          const projectId = str(url.searchParams.get('projectId'))
+          const table = str(url.searchParams.get('table'))
+          if (table !== '') { send(res, 200, { ok: true, table, rows: store.listArchived(table, projectId) }); return }
+          send(res, 200, { ok: true, groups: store.listAllArchived(projectId) })
+          return
+        }
+        if (method === 'DELETE' && path === '/archive') {
+          const body = await readJson(req)
+          const r = store.purgeArchivedRow(str(body?.table), str(body?.id))
+          if (!r.ok) {
+            send(res, r.error === 'must_archive_first' ? 409 : 404, { ok: false, error: r.error })
+            return
+          }
+          send(res, 200, { ok: true })
           return
         }
         /* UI 设计版本（1.14） */
