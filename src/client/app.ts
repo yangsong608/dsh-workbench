@@ -75,10 +75,14 @@ interface TestProject {
 interface TestCase {
   id: string; projectId: string; title: string; precondition: string; steps: string[]; expected: string
   priority: string; type: string; source: string; moduleId: string; platform: string; createdAt: string; updatedAt: string
+  /* 1.14 T2/T9/T10：追溯链 + 计划 + 回归 */
+  planId?: string; uiDesignId?: string; demoId?: string
+  pageId?: string; blockId?: string; role?: string
+  status?: string; bugId?: string; designVersion?: string
 }
 interface TestResult { caseId: string; status: 'pending' | 'pass' | 'fail' | 'blocked'; note: string; bugId: string }
 interface TestRun {
-  id: string; projectId: string; name: string; status: 'running' | 'passed' | 'failed' | 'blocked'
+  id: string; projectId: string; planId?: string; name: string; status: 'running' | 'passed' | 'failed' | 'blocked'
   results: TestResult[]; summary: Record<string, number>; deployLog: string; createdAt: string; finishedAt: string | null
 }
 /** 导图节点（v2 图模型，kind 对齐模块四级；见 shared/product-graph-model）。 */
@@ -452,7 +456,22 @@ export function mountWorkbench(hostEl: HTMLElement, dshCtx?: DshClientContext): 
   let testCases: TestCase[] = []
   let testRuns: TestRun[] = []
   let testProjectSelected: string | null = null
-  let testTab: 'cases' | 'run' | 'report' | 'deploy' = 'cases'
+  let testTab: 'plans' | 'cases' | 'run' | 'report' | 'deploy' = 'cases'
+  /** 1.14 测试计划与待回归队列。 */
+  let testPlans: Array<{ id: string; name: string; projectId: string; scopePages: string[]; priority: string; status: string; docNoteId: string; sourceUiDesignId: string }> = []
+  let pendingRegression: Array<{ id: string; title: string; pageId: string; bugId: string }> = []
+  async function loadTestPlans(): Promise<void> {
+    const projectId = currentProjectId()
+    if (projectId === '') { testPlans = []; pendingRegression = []; return }
+    try {
+      const [pRes, rRes] = await Promise.all([
+        fetch(`${API}/tests/plans?projectId=${encodeURIComponent(projectId)}`),
+        fetch(`${API}/tests/pending-regression?projectId=${encodeURIComponent(projectId)}`),
+      ])
+      if (pRes.ok) { const d = await pRes.json() as { plans?: typeof testPlans }; testPlans = Array.isArray(d.plans) ? d.plans : [] }
+      if (rRes.ok) { const d = await rRes.json() as { cases?: typeof pendingRegression }; pendingRegression = Array.isArray(d.cases) ? d.cases : [] }
+    } catch { /* 保留旧值 */ }
+  }
   let testRunSelected: string | null = null
   let testLoading = false
   let testError = ''
@@ -6859,18 +6878,178 @@ ${lines}`
       <div class="test-report-cards">${cards || '<div class="notes-empty small">没有用例</div>'}</div>
       <div class="test-timeline"><span>生成用例</span><i></i><span>执行</span><i></i><span>失败录入</span><i></i><span>回归</span><i></i><span>${run.status === 'running' ? '进行中' : run.status === 'passed' ? '通过' : '已完成'}</span></div></div>`
   }
+  /* ---------- 1.14 测试计划相关动作 ---------- */
+
+  async function createTestPlan(): Promise<void> {
+    const projectId = currentProjectId()
+    if (projectId === '') { toast('先选择一个项目'); return }
+    const name = window.prompt('测试计划名称', 'v1.0 回归')
+    if (name === null || name.trim() === '') return
+    /* 范围：默认取当前项目下所有 UI 设计的页面（用户可在计划详情里调整） */
+    let scopePages: string[] = []
+    let uiDesignId = ''
+    try {
+      const res = await fetch(`${API}/ui-designs?projectId=${encodeURIComponent(projectId)}`)
+      if (res.ok) {
+        const data = await res.json() as { designs?: Array<{ id: string; pages?: Array<{ id: string }> }> }
+        const design = (data.designs ?? []).find(d => (d.pages ?? []).length > 0)
+        if (design !== undefined) {
+          uiDesignId = design.id
+          scopePages = (design.pages ?? []).map(p => String(p.id))
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      const res = await fetch(`${API}/tests/plans`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ plan: { projectId, name: name.trim(), scopePages, sourceUiDesignId: uiDesignId, priority: 'P1', status: 'ready' } }),
+      })
+      const data = await res.json().catch(() => ({})) as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      await loadTestPlans()
+      renderContent()
+      toast(`已创建计划「${name.trim()}」，覆盖 ${scopePages.length} 个页面`)
+    } catch (cause) { toast(`创建失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
+  /** AI 生成测试设计文档（按角色）→ 派发 test.design。 */
+  async function generateTestDesignDoc(): Promise<void> {
+    const projectId = currentProjectId()
+    if (projectId === '') { toast('先选择一个项目'); return }
+    const project = testProjectOf(testProjectSelected)
+    if (project === undefined) { toast('先创建或选择一个测试项目'); return }
+    const plan = testPlans[0]
+    if (!window.confirm('AI 将按角色分组写测试设计文档（可能消耗额度）。继续？')) return
+    /* 取 UI 设计页面清单作为上下文 */
+    let pageLines = ''
+    let uiDesignId = ''
+    let uiVersion = ''
+    try {
+      const res = await fetch(`${API}/ui-designs?projectId=${encodeURIComponent(projectId)}`)
+      if (res.ok) {
+        const data = await res.json() as { designs?: Array<{ id: string; name: string; pages?: Array<{ id: string; name: string; route: string; goal?: string; blocks?: Array<{ id: string; role: string; desc: string }>; states?: string[]; interactions?: string[] }> }> }
+        const design = (data.designs ?? []).find(d => (d.pages ?? []).length > 0)
+        if (design !== undefined) {
+          uiDesignId = design.id
+          uiVersion = 'v1'
+          pageLines = (design.pages ?? []).map(p => {
+            const blocks = (p.blocks ?? []).map(b => `${b.id}(${b.role})`).join(' ')
+            return `- ${p.id}｜${p.name}｜${p.route}${p.goal ? `｜目标：${p.goal}` : ''}\n  区块：${blocks}${(p.states ?? []).length ? `｜状态：${(p.states ?? []).join('、')}` : ''}`
+          }).join('\n')
+        }
+      }
+    } catch { /* ignore */ }
+    const prompt = [
+      `【测试设计文档】${project.name}`,
+      '',
+      '你是资深 QA 架构师。请写一份**按角色分组**的测试设计文档。',
+      '',
+      `统一项目 id：${projectId}`,
+      plan !== undefined ? `测试计划 id：${plan.id}（可留空）` : '测试计划：无（planId 留空）',
+      uiDesignId !== '' ? `UI 设计 id：${uiDesignId}（版本基线 ${uiVersion}）` : '',
+      '',
+      pageLines !== '' ? `§ UI 设计页面清单（测试场景必须引用这些真实 id）\n${pageLines}` : '§ 页面清单：暂无 UI 设计，请按产品名自行规划',
+      '',
+      '§ 交付方式',
+      '用工具 **workbench_test_doc_publish** 写入，参数：',
+      `{ projectId:"${projectId}", planId:"${plan?.id ?? ''}", name:"${project.name} · 测试设计", content:"完整 Markdown" }`,
+      '',
+      '§ 文档结构（必须 6 节）',
+      '# 测试设计',
+      '## 1. 测试范围（覆盖页面 / 不在范围 / 版本基线）',
+      '## 2. 角色清单（表格：角色 | 说明 | 主要关注点；3–6 个角色）',
+      '## 3. 按角色的测试场景（每场景写：关注点 / 前置条件 / 预期方向 / 涉及页面与区块）',
+      '## 4. 跨角色与异常（弱网、超时、权限、并发、空数据）',
+      '## 5. 优先级与风险（P0/P1/P2 及理由）',
+      '## 6. 未覆盖与待确认',
+      '',
+      '硬约束：每个场景必须写「涉及页面/区块」，用上面清单里的真实 id；只写测试设计，不写用例步骤。',
+    ].filter(l => l !== '').join('\n')
+    try { await navigator.clipboard.writeText(prompt) } catch { /* ignore */ }
+    const started = await startAgentDispatch({
+      ideaId: '', runId: '', teamId: '', feature: 'test.design',
+      goal: prompt, ideaTitle: project.name, ideaBrief: '',
+      workspacePath: project.workspacePath, timeoutMs: 20 * 60 * 1000, allowNoIdea: true,
+    } as any, {
+      status: (status: string, note?: string) => {
+        if (status === 'done') { toast('测试设计文档已生成'); void loadTestPlans().then(() => renderContent()) }
+        else if (status === 'failed') toast(`生成失败：${note ?? '未知原因'}`)
+      },
+    } as any)
+    if (started === null) { toast('派发失败：提示词已复制'); return }
+    toast(`已派发给「${started.teamName}」写测试设计文档`)
+  }
+
+  /** 回归待回归队列。 */
+  async function runPendingRegression(): Promise<void> {
+    if (pendingRegression.length === 0) { toast('没有待回归用例'); return }
+    if (!window.confirm(`将回归 ${pendingRegression.length} 条用例（AI 逐条复核）。继续？`)) return
+    toast(`开始回归 ${pendingRegression.length} 条用例（需人工或 AI 执行后回写结果）`)
+    /* 真正执行依赖 test_result_publish；这里先给出队列与提示 */
+  }
+
+  async function openTestPlan(id: string): Promise<void> {
+    if (id === '') return
+    try {
+      const res = await fetch(`${API}/tests/plans/${encodeURIComponent(id)}`)
+      const data = await res.json() as any
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      const plan = data.plan
+      const cases = (plan.cases ?? []) as Array<{ id: string; title: string; pageId?: string; role?: string; status?: string }>
+      openModal(`<h3>${esc(plan.name)}</h3>
+        <div class="mfield"><label>状态</label><div>${esc(plan.status)} · ${esc(plan.priority)}</div></div>
+        <div class="mfield"><label>覆盖页面（${(plan.scopePages ?? []).length}）</label><div style="font-size:11px;color:var(--text-3)">${(plan.scopePages ?? []).map((p: string) => esc(p)).join('、') || '（未指定）'}</div></div>
+        <div class="mfield"><label>测试设计文档</label><div>${plan.docNoteId ? `已关联（${esc(String(plan.docNoteId).slice(0, 16))}）` : '尚未生成'}</div></div>
+        <div class="mfield"><label>用例（${cases.length}）</label>
+          <div style="max-height:200px;overflow:auto;font-size:11px">${cases.length === 0 ? '（还没有用例）' : cases.map(c => `<div style="padding:3px 0;border-bottom:1px solid var(--line)">${esc(c.title)}${c.pageId ? ` <span class="note-kind">${esc(c.pageId)}</span>` : ''}${c.status === 'pending-regression' ? ' <span class="note-kind" style="color:var(--amber)">待回归</span>' : ''}</div>`).join('')}</div>
+        </div>
+        <div class="mfield"><label>执行轮次（${(plan.runs ?? []).length}）</label><div style="font-size:11px;color:var(--text-3)">${(plan.runs ?? []).length === 0 ? '（还没有执行）' : (plan.runs ?? []).map((r: any) => `${esc(r.name)} · ${esc(r.status)}`).join('<br/>')}</div></div>
+        <div class="modal-foot"><button class="btn" data-act="close-modal">关闭</button></div>`)
+    } catch (cause) { toast(`读取计划失败：${String((cause as Error).message ?? cause)}`) }
+  }
+
   function renderTests(): string {
     const project = testProjectOf(testProjectSelected)
     const header = `<div class="view-head"><div><div class="eyebrow">测试</div><h1 class="page-title">测试</h1><div class="page-sub">AI 生成用例 → 执行 → 录入 Bug → 回归 → 动画报告</div><div class="head-pills"><span><b>${testCases.length}</b> 用例</span><span><b>${testRuns.length}</b> 运行</span><span><b>${testProjects.length}</b> 项目</span></div></div><div style="display:flex;gap:6px"><button class="btn" data-act="ai-dispatch" data-kind="test">${ic('spark', 13)}AI 协同</button><button class="btn-primary" data-act="test-new">${ic('plus', 14)}新建测试项目</button></div></div>`
     if (testError !== '') return header + `<div class="news-banner"><span>读取失败：${esc(testError)}</span><button class="btn" data-act="test-refresh">重试</button></div>`
     if (testProjects.length === 0) return header + `<div class="notes-empty bug-empty"><div class="ne-icon">${ic('test', 22)}</div><b>还没有测试项目</b><span>创建项目并关联工作区，AI 生成用例后逐条测试。</span><button class="btn-primary" data-act="test-new">${ic('plus', 14)}新建测试项目</button></div>`
     if (!project) return header
-    const tabs = `<div class="product-tabs">${(['cases', 'run', 'report', 'deploy'] as const).map(t => `<button class="${testTab === t ? 'active' : ''}" data-act="test-tab" data-tab="${t}">${t === 'cases' ? '用例' : t === 'run' ? '执行' : t === 'report' ? '报告' : '部署'}</button>`).join('')}</div>`
+    const tabLabel = (t: string): string => t === 'plans' ? `计划${testPlans.length > 0 ? `（${testPlans.length}）` : ''}`
+      : t === 'cases' ? `用例${pendingRegression.length > 0 ? ` · 待回归 ${pendingRegression.length}` : ''}`
+      : t === 'run' ? '执行' : t === 'report' ? '报告' : '部署'
+    const tabs = `<div class="product-tabs">${(['plans', 'cases', 'run', 'report', 'deploy'] as const).map(t => `<button class="${testTab === t ? 'active' : ''}" data-act="test-tab" data-tab="${t}">${tabLabel(t)}</button>`).join('')}</div>`
     const toolbar = `<div class="product-toolbar"><select id="wb-test-select" class="bug-project-select"><option value="">选择测试项目…</option>${testProjects.map(p => `<option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select><button class="icon-btn" data-act="test-edit" title="编辑">${ic('edit', 14)}</button><span class="product-ws">${ic('folder', 12)}${esc(project.workspacePath || '未关联工作区')}</span><button class="icon-btn" data-act="test-refresh" title="刷新">${ic('refresh', 14)}</button></div>`
     let body = ''
-    if (testTab === 'cases') {
+    if (testTab === 'plans') {
+      const cards = testPlans.length === 0
+        ? '<div class="notes-empty small">还没有测试计划。计划用于定义「这一轮测哪些页面」，其下可挂多轮执行。</div>'
+        : testPlans.map(p => {
+          const pages = (p.scopePages ?? []).length
+          const docBadge = p.docNoteId !== '' ? '<span class="note-kind">测试设计文档 ✓</span>' : '<span class="note-kind" style="opacity:.6">无文档</span>'
+          return `<div class="note-card" data-act="test-plan-open" data-id="${p.id}" style="cursor:pointer">
+            <b>${esc(p.name)}</b>
+            <span class="note-owner">${esc(p.status)} · ${esc(p.priority)}</span>${docBadge}
+            <div class="note-meta">覆盖 ${pages} 个页面${p.sourceUiDesignId !== '' ? ` · 来源 UI 设计 ${esc(p.sourceUiDesignId.slice(0, 12))}` : ''}</div>
+          </div>`
+        }).join('')
+      const pendingBar = pendingRegression.length > 0
+        ? `<div class="coverage" style="border-color:color-mix(in srgb,var(--amber) 40%,var(--line))">
+            <b>${pendingRegression.length}</b> 条用例待回归（对应 Bug 已修复）
+            <button class="btn tiny" data-act="test-run-pending" style="margin-left:auto">回归这批</button>
+          </div>` : ''
+      body = `<div class="product-panel-head"><div><b>测试计划（${testPlans.length}）</b><span>计划定义范围；每轮执行挂在计划下</span></div>
+        <div class="product-actions"><button class="btn" data-act="test-plan-new">${ic('plus', 12)}新建计划</button>
+        <button class="btn-primary" data-act="test-gen-doc">${ic('spark', 12)}AI 生成测试设计文档</button></div></div>
+        ${pendingBar}<div class="note-grid">${cards}</div>`
+    } else if (testTab === 'cases') {
       const cases = testCasesOf(project)
-      body = `<div class="product-panel-head"><div><b>测试用例（${cases.length}）</b><span>AI 按需求 / 产品笔记 / Demo 生成</span></div><div class="product-actions"><button class="btn-primary" data-act="test-gen">${ic('spark', 12)}AI 生成用例</button></div></div><div class="test-case-list">${cases.map(c => `<div class="test-case"><div class="test-case-head"><span class="test-prio p${c.priority.slice(1)}">${c.priority}</span><b>${esc(c.title)}</b><i>${esc(c.source)}</i><span class="platform ${c.platform || 'all'}">${platformLabel(c.platform || 'all')}</span><button class="icon-btn" data-act="test-case-delete" data-id="${c.id}" title="删除">${ic('trash', 12)}</button></div><div class="test-case-meta">${c.precondition ? `前置：${esc(c.precondition)}` : ''}</div><ol>${c.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol><div class="test-expected">预期：${esc(c.expected)}</div></div>`).join('') || '<div class="notes-empty small">还没有用例，点「AI 生成用例」。</div>'}</div>`
+      body = `<div class="product-panel-head"><div><b>测试用例（${cases.length}）</b><span>AI 按需求 / 产品笔记 / Demo 生成</span></div><div class="product-actions"><button class="btn-primary" data-act="test-gen">${ic('spark', 12)}AI 生成用例</button></div></div><div class="test-case-list">${cases.map(c => `<div class="test-case"><div class="test-case-head"><span class="test-prio p${c.priority.slice(1)}">${c.priority}</span><b>${esc(c.title)}</b><i>${esc(c.source)}</i><span class="platform ${c.platform || 'all'}">${platformLabel(c.platform || 'all')}</span><button class="icon-btn" data-act="test-case-delete" data-id="${c.id}" title="删除">${ic('trash', 12)}</button></div><div class="test-case-meta">${c.precondition ? `前置：${esc(c.precondition)}` : ''}</div>
+          ${(c.pageId !== undefined && c.pageId !== '') || (c.role !== undefined && c.role !== '') || c.status === 'pending-regression' || (c.bugId !== undefined && c.bugId !== '') ? `<div class="test-case-meta" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
+            ${c.role ? `<span class="note-kind">${esc(c.role)}</span>` : ''}
+            ${c.pageId ? `<span class="note-kind">▸ ${esc(c.pageId)}${c.blockId ? ` / ${esc(c.blockId)}` : ''}</span>` : ''}
+            ${c.status === 'pending-regression' ? `<span class="note-kind" style="color:var(--amber);border-color:var(--amber)">待回归</span>` : ''}
+            ${c.bugId ? `<span class="note-kind">Bug ${esc(String(c.bugId).slice(0, 10))}</span>` : ''}
+          </div>` : ''}<ol>${c.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol><div class="test-expected">预期：${esc(c.expected)}</div></div>`).join('') || '<div class="notes-empty small">还没有用例，点「AI 生成用例」。</div>'}</div>`
     } else if (testTab === 'run') {
       const runs = testRunsOf(project)
       const run = testRunOf(testRunSelected) ?? runs[0]
