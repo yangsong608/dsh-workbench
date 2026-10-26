@@ -359,6 +359,49 @@ CREATE INDEX IF NOT EXISTS idx_logs_task ON logs(task_id);
 CREATE INDEX IF NOT EXISTS idx_news_items_topic ON news_items(topic_id, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(pinned DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tombstones_time ON tombstones(deleted_at);
+/* ---------- 1.13 UI 设计 / DEMO（D1：以项目为根） ---------- */
+CREATE TABLE IF NOT EXISTS themes (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, hint TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT 'all',
+  tokens TEXT NOT NULL DEFAULT '{}', spec TEXT NOT NULL DEFAULT '',
+  builtin INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'builtin',
+  source_ref TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ui_designs (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, product_id TEXT NOT NULL DEFAULT '',
+  map_id TEXT NOT NULL DEFAULT '', note_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+  theme_id TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT 'all',
+  pages TEXT NOT NULL DEFAULT '[]', doc_key TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft', archived_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS demos (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, product_id TEXT NOT NULL DEFAULT '',
+  ui_design_id TEXT NOT NULL DEFAULT '', theme_id TEXT NOT NULL,
+  layout_mode TEXT NOT NULL DEFAULT 'single', scope TEXT NOT NULL DEFAULT 'all',
+  kind TEXT NOT NULL DEFAULT 'page', title TEXT NOT NULL, entry_path TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'all', status TEXT NOT NULL DEFAULT 'ready',
+  current_version_id TEXT NOT NULL DEFAULT '', archived_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS demo_versions (
+  id TEXT PRIMARY KEY, demo_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual',
+  target_page TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+  entry_path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0,
+  page_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS demo_files (
+  id TEXT PRIMARY KEY, demo_id TEXT NOT NULL, version_id TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'asset', page_id TEXT NOT NULL DEFAULT '',
+  bytes INTEGER NOT NULL DEFAULT 0, sha TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ui_designs_project ON ui_designs(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_demos_project ON demos(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_demo_versions ON demo_versions(demo_id, seq);
+CREATE INDEX IF NOT EXISTS idx_demo_files ON demo_files(demo_id, version_id);
+CREATE INDEX IF NOT EXISTS idx_themes_project ON themes(project_id, builtin);
 `
 
 class SqliteStore {
@@ -382,6 +425,7 @@ class SqliteStore {
     this.ensureProducts()
     this.ensureTests()
     this.migrateUnifiedProjects()
+    this.migrateUiAndDemo()
     this.seedNotes()
     this.revision = Number(this.readMeta('revision') ?? 0)
     const seeded = Number(this.readMeta('seeded') ?? 0) === 1
@@ -1199,6 +1243,65 @@ CREATE TABLE IF NOT EXISTS products (
    *  - 老数据迁移时按 workspace_path + name 归并，保证同一个工作区只对应一个统一项目；
    *  - 门户、Bug、测试、灵感的「项目」列表都从 `projects` 读，只有一份。
    */
+  /**
+   * 1.13 迁移：UI 设计 / DEMO / 主题。
+   * - 建表由 SCHEMA 负责（CREATE IF NOT EXISTS）；
+   * - 这里只做「内置主题入库」：12 套预置主题写入 themes（builtin=1），幂等（已存在则跳过）；
+   * - 主题的 spec 由 tokens 推导出一段简短规范说明，供 AI 后续读取。
+   */
+  private migrateUiAndDemo(): void {
+    const now = isoDateTimeSeconds()
+    const builtin: Array<{ id: string; name: string; hint: string; platform: string; tokens: Record<string, unknown>; spec: string }> = [
+      { id: 'clean', name: '极简白', hint: '白底 / 蓝色主色 / 轻阴影 · 通用', platform: 'all',
+        tokens: { bg: '#f7f9fc', surface: '#ffffff', text: '#111827', muted: '#5b6577', line: '#e4e9f2', accent: '#2563eb', accentInk: '#ffffff', radius: 10, font: 'system', density: 'comfortable', shadow: 'soft', motion: 'subtle' },
+        spec: '极简白：白底、单一蓝色强调、轻阴影、10px 圆角；信息密度舒适，适合大多数 B 端与工具型产品。' },
+      { id: 'glass', name: '玻璃拟态', hint: '深色渐变 / 半透明卡片 / 模糊 · 2024-26 主流', platform: 'all',
+        tokens: { bg: '#0c1222', surface: 'rgba(255,255,255,0.06)', text: '#eef4ff', muted: '#a8b6d4', line: 'rgba(255,255,255,0.14)', accent: '#7aa2ff', accentInk: '#0a1020', radius: 14, font: 'system', density: 'comfortable', shadow: 'soft', motion: 'subtle' },
+        spec: '玻璃拟态：深色底 + 半透明卡片 + 背景模糊（backdrop-blur 14px）；强调色仅用于可操作元素，卡片细边框 1px。' },
+      { id: 'neo', name: '新拟态', hint: '灰底 / 双层阴影 / 柔和圆角 · 通用', platform: 'all',
+        tokens: { bg: '#e8ebf0', surface: '#eef1f6', text: '#2b3340', muted: '#6a7485', line: '#d5dbe5', accent: '#4f6bed', accentInk: '#ffffff', radius: 16, font: 'system', density: 'comfortable', shadow: 'soft', motion: 'subtle' },
+        spec: '新拟态：灰底、双层柔和阴影（外深内亮）、16px 圆角、无硬边框；强调色用于主按钮与选中态。' },
+      { id: 'editorial', name: '编辑杂志', hint: '米白 / 衬线标题 / 强网格 · PC 内容型', platform: 'pc',
+        tokens: { bg: '#f6f1e7', surface: '#fbf7ef', text: '#1f1b16', muted: '#6b6156', line: '#ded4c4', accent: '#c2410c', accentInk: '#ffffff', radius: 8, font: 'serif', density: 'spacious', shadow: 'none', motion: 'subtle' },
+        spec: '编辑杂志：米白纸感底、衬线标题（Georgia/宋体）、强网格与留白、无阴影；适合内容型 PC 站点。' },
+      { id: 'dashboard', name: '暗色仪表盘', hint: '深色 / 数据卡片 / 霓虹强调 · PC 后台标配', platform: 'pc',
+        tokens: { bg: '#0f172a', surface: '#1e293b', text: '#e2e8f0', muted: '#94a3b8', line: '#334155', accent: '#38bdf8', accentInk: '#04121f', radius: 12, font: 'system', density: 'compact', shadow: 'soft', motion: 'subtle' },
+        spec: '暗色仪表盘：深蓝底 + 分层卡片、细边框、霓虹青强调；密度紧凑，适合数据密集型后台。' },
+      { id: 'bento', name: 'Bento 网格', hint: '拼色卡片 / 大圆角 / 非对称栅格 · 当下流行', platform: 'pc',
+        tokens: { bg: '#ffffff', surface: '#f8fafc', text: '#111827', muted: '#6b7280', line: '#e5e7eb', accent: '#4f46e5', accentInk: '#ffffff', radius: 20, font: 'system', density: 'spacious', shadow: 'soft', motion: 'subtle' },
+        spec: 'Bento 网格：多色卡片块交错（白/淡黄/淡蓝/淡绿）、20px 大圆角、非对称栅格、强留白与大标题。' },
+      { id: 'tech', name: '科技终端', hint: '深蓝黑 / 等宽字 / 网格线 · 工具型产品', platform: 'pc',
+        tokens: { bg: '#0a0f1a', surface: '#111827', text: '#d1fae5', muted: '#6b8f80', line: '#1f2937', accent: '#22d3ee', accentInk: '#04121a', radius: 6, font: 'mono', density: 'compact', shadow: 'none', motion: 'none' },
+        spec: '科技终端：深蓝黑底、等宽字体点缀、网格线背景、细线描边、6px 小圆角、无动效。' },
+      { id: 'aurora', name: '流光渐变', hint: '极光紫蓝 / 大渐变 / 毛玻璃 · 移动端流行', platform: 'mobile',
+        tokens: { bg: 'linear-gradient(135deg,#667eea,#764ba2,#f093fb)', surface: 'rgba(255,255,255,0.14)', text: '#ffffff', muted: 'rgba(255,255,255,0.78)', line: 'rgba(255,255,255,0.22)', accent: '#f472b6', accentInk: '#2a0d1e', radius: 20, font: 'rounded', density: 'comfortable', shadow: 'soft', motion: 'expressive' },
+        spec: '流光渐变：极光紫蓝 135° 渐变底、毛玻璃卡片、白色文字、20px 大圆角；移动端优先，动效可略强。' },
+      { id: 'cream', name: '温暖奶油', hint: '奶油色 / 大字重 / 软阴影 · 移动端流行', platform: 'mobile',
+        tokens: { bg: '#faf6f1', surface: '#ffffff', text: '#3d3128', muted: '#8b7d70', line: '#efe6db', accent: '#e07a5f', accentInk: '#ffffff', radius: 18, font: 'rounded', density: 'comfortable', shadow: 'soft', motion: 'subtle' },
+        spec: '温暖奶油：奶油底、白色卡片、软阴影（0 8px 24px rgba(0,0,0,.06)）、18px 圆角、大字重标题。' },
+      { id: 'clay', name: '黏土拟态', hint: '3D 软塑 / 饱和色 / 厚圆角 · 移动端', platform: 'mobile',
+        tokens: { bg: '#f0f4ff', surface: '#ffffff', text: '#1d2b53', muted: '#6b7ba8', line: '#dde5f7', accent: '#4cc9f0', accentInk: '#062a3a', radius: 24, font: 'rounded', density: 'comfortable', shadow: 'strong', motion: 'expressive' },
+        spec: '黏土拟态：浅蓝底、饱和色块（黄/绿/蓝）、24px 厚圆角、内外阴影组合形成软塑感。' },
+      { id: 'brutal', name: '新粗野', hint: '高对比 / 硬边框 / 鲜艳色块 · 移动端潮牌风', platform: 'mobile',
+        tokens: { bg: '#ffffff', surface: '#ffffff', text: '#000000', muted: '#4b5563', line: '#000000', accent: '#ff6b6b', accentInk: '#000000', radius: 0, font: 'system', density: 'compact', shadow: 'none', motion: 'none' },
+        spec: '新粗野：纯白底、3px 纯黑硬边框、offset 阴影（4px 4px 0 #000）、鲜艳色块、粗体无衬线、0 圆角。' },
+      { id: 'padflow', name: '平板双栏', hint: '侧栏 + 内容 / 大触控目标 · 平板优先', platform: 'tablet',
+        tokens: { bg: '#f8fafc', surface: '#ffffff', text: '#0f172a', muted: '#64748b', line: '#e2e8f0', accent: '#0ea5e9', accentInk: '#ffffff', radius: 12, font: 'system', density: 'comfortable', shadow: 'soft', motion: 'subtle' },
+        spec: '平板双栏：左侧 280px 侧栏 + 右内容区，12px 圆角，按钮高度 ≥44px 满足触控目标。' },
+    ]
+    const insert = this.db.prepare(
+      `INSERT INTO themes(id, name, hint, platform, tokens, spec, builtin, source, source_ref, project_id, archived_at, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,1,'builtin','','','',?,?)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    for (const theme of builtin) {
+      try { insert.run(theme.id, theme.name, theme.hint, theme.platform, JSON.stringify(theme.tokens), theme.spec, now, now) }
+      catch (cause) { console.warn(`[dsh-workbench] 内置主题写入失败 ${theme.id}：${String(cause)}`) }
+    }
+    /* 旧 Demo 清理标记（由 migrateDemoCleanup 使用；此处仅确保 meta 表存在语义清晰） */
+    void now
+  }
+
   private migrateUnifiedProjects(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
@@ -2251,6 +2354,11 @@ class JsonStore {
   private productProgress: any[] = []
   private productInputs: any[] = []
   private unifiedProjects: any[] = []
+  private themes: any[] = []
+  private uiDesigns: any[] = []
+  private demos: any[] = []
+  private demoVersions: any[] = []
+  private demoFiles: any[] = []
   private testProjects: any[] = []
   private testCases: any[] = []
   private testRuns: any[] = []
@@ -2278,6 +2386,11 @@ class JsonStore {
         this.productProgress = list(parsed.productProgress)
         this.productInputs = list(parsed.productInputs)
         this.unifiedProjects = list(parsed.unifiedProjects)
+        this.themes = list(parsed.themes)
+        this.uiDesigns = list(parsed.uiDesigns)
+        this.demos = list(parsed.demos)
+        this.demoVersions = list(parsed.demoVersions)
+        this.demoFiles = list(parsed.demoFiles)
         this.demoProgress = list(parsed.demoProgress)
         this.modules = list(parsed.modules)
         this.testProjects = list(parsed.testProjects)
@@ -2326,7 +2439,7 @@ class JsonStore {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     this.state = { spaces: list(state.spaces), tasks: list(state.tasks), focus: list(state.focus), settings: state.settings ?? {} }
     this.revision += 1
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, themes: this.themes, uiDesigns: this.uiDesigns, demos: this.demos, demoVersions: this.demoVersions, demoFiles: this.demoFiles, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
     return this.revision
   }
 
@@ -2396,7 +2509,7 @@ class JsonStore {
 
   private persistNews(): void {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
+    writeFileSync(this.file, JSON.stringify({ ...this.state, revision: this.revision, newsTopics: this.newsTopics, newsItems: this.newsItems, notes: this.notes, notebooks: this.notebooks, notesSeeded: this.notesSeeded, exportDir: this.exportDir, bugProjects: this.bugProjects, bugs: this.bugs, products: this.products, productDemos: this.productDemos, productMaps: this.productMaps, productMapVersions: this.productMapVersions, demoProgress: this.demoProgress, productProgress: this.productProgress, productInputs: this.productInputs, unifiedProjects: this.unifiedProjects, themes: this.themes, uiDesigns: this.uiDesigns, demos: this.demos, demoVersions: this.demoVersions, demoFiles: this.demoFiles, modules: this.modules, testProjects: this.testProjects, testCases: this.testCases, testRuns: this.testRuns }, null, 2))
   }
 
   /** 记事本（JSON 降级）。 */
