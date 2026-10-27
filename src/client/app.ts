@@ -4153,7 +4153,18 @@ ${lines}
       productModules = Array.isArray(pData.modules) ? pData.modules : []
       notes = Array.isArray(nData.notes) ? nData.notes : notes
       notebooks = Array.isArray(nData.notebooks) ? nData.notebooks : notebooks
-      if (productSelected === null || productOf(productSelected) === undefined) productSelected = products[0]?.id ?? null
+      if (productSelected === null || productOf(productSelected) === undefined) {
+        /* 1.16：默认产品必须跟随「当前项目」的工作区，不能取 products[0]。
+           products 按 updated_at 倒序，products[0] 往往是最近改过的那个，
+           与用户在门户选中的项目无关——会导致「界面显示 A 项目，实际派发给 B 产品」。
+           实测：默认安捷邻却派发给「宠物上门喂养」（其工作区在 测试产物/ai-e2e）。 */
+        const curProjectId = currentProjectId()
+        const curProject = projects.find(p => p.id === curProjectId)
+        const byWorkspace = curProject === undefined
+          ? undefined
+          : products.find(p => String(p.workspacePath ?? '') === String(curProject.workspacePath ?? ''))
+        productSelected = byWorkspace?.id ?? products[0]?.id ?? null
+      }
       await loadProductMaps()
       const product = productOf(productSelected)
       if (product && productPicked.size === 0) productPicked = productDefaultPicked(product)

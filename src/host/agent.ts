@@ -370,8 +370,10 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
               const agentsSvc = getSvc('agents')
               const agent = agentsSvc?.get?.(sid)
               if (agent !== undefined) {
-                if (typeof agent.cancel === 'function') { agent.cancel({ kind: 'user' }); interrupted = true }
-                else if (typeof agent.interrupt === 'function') { agent.interrupt({ kind: 'user' }); interrupted = true }
+                /* ACP 的 session/cancel 通知要求 { sessionId }（schema: zCancelNotification），
+                   传 { kind:'user' } 会校验失败、中断无效——实测事件数仍从 135 涨到 167。 */
+                if (typeof agent.cancel === 'function') { await agent.cancel({ sessionId: sid }); interrupted = true }
+                else if (typeof agent.interrupt === 'function') { await agent.interrupt({ sessionId: sid }); interrupted = true }
                 else {
                   /* 最后兜底：直接 abort 会话上的 pendingPrompt */
                   const prompt = agent?.session?.pendingPrompt

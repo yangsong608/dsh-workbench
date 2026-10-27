@@ -67,6 +67,7 @@ check('测试客户端用例/执行/报告', client.includes('test-case-list') &
 check('测试 Bug 录入/回归', client.includes('createBugFromTest') && client.includes('regressionRun') && host.includes('/bugs/status'))
 check('AI 会话统一走 sessions（无刷新）', client.includes('dispatchToNewSession') && client.includes('createSessionIn') && client.includes('sendToSession') && !client.includes('location.reload'))
 check('AI 发送走公开 retain（ready 可 resolve）', client.includes('.retain(') && client.includes('gateway') && client.includes('会话打开超时'))
+check('默认产品跟随当前项目（非 products[0]）', read('src/client/app.ts').includes('const byWorkspace = curProject === undefined') && read('src/client/app.ts').includes('productSelected = byWorkspace?.id ?? products[0]?.id ?? null'))
 check('测试页计划 Tab + 待回归徽标', client.includes('待回归') && client.includes('test-gen-doc') && client.includes('test-run-pending') && client.includes('pending-regression') && client.includes('test-plan-open'))
 check('流水线 8 阶段（含 UI/DEMO/测试文档/测试用例）', client.includes('测试设计文档（按角色）') && client.includes('测试用例') && client.includes('ui_design') && client.includes('test_cases') && client.includes('data-pipeline-stage='))
 check('测试计划与追溯链（T1/T2）', host.includes('CREATE TABLE IF NOT EXISTS test_plans') && host.includes('purgeStaleTestCases') && host.includes('markCasesForRegression') && host.includes('publishTestDoc'))

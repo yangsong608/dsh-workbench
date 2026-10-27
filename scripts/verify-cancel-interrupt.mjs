@@ -38,7 +38,13 @@ let pass=0, fail=0
 const check=(n,ok,d='')=>{if(ok){pass++;console.log('  ✓',n)}else{fail++;console.log('  ✗',n,d)}}
 check('interrupted = true', r.body?.interrupted === true, String(r.body?.interrupted))
 check('note 说明已中断 AI', String(r.body?.note ?? '').includes('已中断'), String(r.body?.note))
-check('agent.cancel({kind:user}) 被调用', captured !== null && captured.args?.kind === 'user', JSON.stringify(captured))
+/* 关键：ACP 的 zCancelNotification 要求 { sessionId }。
+   上一轮传 { kind:'user' } 参数校验失败，中断静默失效（实测事件数 135→185）。
+   本断言必须验「参数形态」，不能只验「方法被调过」。 */
+check('agent.cancel 收到 sessionId 参数', captured !== null && typeof captured.args?.sessionId === 'string' && captured.args.sessionId !== '',
+  JSON.stringify(captured))
+check('参数不是错误的 kind 形态', captured === null || captured.args?.kind === undefined, JSON.stringify(captured))
+check('sessionId 与派发记录一致', captured?.args?.sessionId === 'session-abc123', String(captured?.args?.sessionId))
 
 
 console.log(`\n${pass}/${pass+fail} 通过`)
