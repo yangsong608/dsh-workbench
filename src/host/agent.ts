@@ -357,7 +357,18 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           const sid = String((dispatch as AnyMap).sessionId ?? '')
           if (sid !== '') {
             try {
-              const agent = options.ctx?.get?.('agents')?.get?.(sid) ?? options.ctx?.agents?.get?.(sid)
+              /* 插件 inject 只声明了 webServer/tools，访问 ctx.agents 会抛
+                 'cannot get property "agents" without inject'。
+                 ctx.reflect.get(prop, false) 是 cordis 的非抛错获取方式（第二参数 false = 不抛错）。 */
+              const getSvc = (name: string): any => {
+                try {
+                  const reflected = options.ctx?.reflect?.get?.(name, false)
+                  if (reflected !== undefined && reflected !== null) return reflected
+                } catch { /* 忽略 */ }
+                try { return options.ctx?.get?.(name) } catch { return undefined }
+              }
+              const agentsSvc = getSvc('agents')
+              const agent = agentsSvc?.get?.(sid)
               if (agent !== undefined) {
                 if (typeof agent.cancel === 'function') { agent.cancel({ kind: 'user' }); interrupted = true }
                 else if (typeof agent.interrupt === 'function') { agent.interrupt({ kind: 'user' }); interrupted = true }
