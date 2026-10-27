@@ -1487,6 +1487,11 @@ CREATE TABLE IF NOT EXISTS products (
           '由旧数据补建', JSON.stringify(pages), pages.length, blocks, now)
       }
     } catch (cause) { console.warn(`[dsh-workbench] UI 设计版本表迁移失败：${String(cause)}`) }
+    /* 1.15：旧 design_version（时间戳/v1）→ 版本 id，避免首轮清理误删历史用例 */
+    try {
+      const n = this.migrateDesignVersionToId()
+      if (n > 0) console.log(`[dsh-workbench] 已把 ${n} 条用例的 design_version 迁移到版本 id`)
+    } catch (cause) { console.warn(`[dsh-workbench] design_version 迁移失败：${String(cause)}`) }
     /* 旧 Demo 清理标记（由 migrateDemoCleanup 使用；此处仅确保 meta 表存在语义清晰） */
     void now
   }
@@ -1559,6 +1564,29 @@ CREATE TABLE IF NOT EXISTS products (
       this.db.prepare('INSERT INTO bug_projects(id, name, workspace_path, workspace_name, project_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)')
         .run(`bugp-${randomUUID().slice(0, 12)}`, String(project.name), String(project.workspace_path), basename(String(project.workspace_path)), String(project.id), ts, ts)
     }
+  }
+
+  /**
+   * 1.15 数据迁移：把 test_cases.design_version 里的旧值（时间戳/v1）映射到真实版本 id。
+   * 旧值无法反推具体版本，策略：映射到该设计「最早的版本 id」（通常是 v1），
+   * 这样这些用例不会被首轮清理误删，用户仍可手动在测试页看到它们。
+   */
+  migrateDesignVersionToId(): number {
+    const cases = this.db.prepare("SELECT id, ui_design_id, design_version FROM test_cases WHERE ui_design_id != ''").all() as any[]
+    let fixed = 0
+    const upd = this.db.prepare('UPDATE test_cases SET design_version = ?, updated_at = ? WHERE id = ?')
+    const now = isoDateTimeSeconds()
+    for (const c of cases) {
+      const cur = String(c.design_version ?? '')
+      if (cur.startsWith('uidv-')) continue   /* 已是版本 id */
+      const vers = this.listUiDesignVersions(String(c.ui_design_id))
+      if (vers.length === 0) continue
+      /* 取最早的版本（seq 最小）——旧数据大概率是基于初版生成的 */
+      const oldest = vers[vers.length - 1]
+      upd.run(String(oldest.id), now, String(c.id))
+      fixed++
+    }
+    return fixed
   }
 
   /* ---------- 1.15 C3 笔记/设计文档版本 ---------- */

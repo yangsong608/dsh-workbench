@@ -349,15 +349,38 @@ export function createAgentModule(options: AgentModuleOptions): AgentModule {
           const hasOutput = Number((dispatch as AnyMap).tokens ?? 0) > 0
             || store.listEvents(b).some((e: AnyMap) => String(e.type ?? '').includes('tool/result'))
           const body = await readJson(req).catch(() => ({})) as AnyMap
+          /* 真正中断 AI：宿主 agents.get(sessionId) 上有 cancel({kind}) —— 实测签名见宿主
+             app.asar 里 `agent.cancel({ kind: "user" })` 与 ACP 的 session/cancel 映射。
+             拿不到 agent（会话已释放）时降级为只置状态。 */
+          let interrupted = false
+          let interruptError = ''
+          const sid = String((dispatch as AnyMap).sessionId ?? '')
+          if (sid !== '') {
+            try {
+              const agent = options.ctx?.get?.('agents')?.get?.(sid) ?? options.ctx?.agents?.get?.(sid)
+              if (agent !== undefined) {
+                if (typeof agent.cancel === 'function') { agent.cancel({ kind: 'user' }); interrupted = true }
+                else if (typeof agent.interrupt === 'function') { agent.interrupt({ kind: 'user' }); interrupted = true }
+                else {
+                  /* 最后兜底：直接 abort 会话上的 pendingPrompt */
+                  const prompt = agent?.session?.pendingPrompt
+                  if (prompt !== undefined && typeof prompt.abort === 'function') { prompt.abort(); interrupted = true }
+                }
+              }
+              if (!interrupted) interruptError = '会话已释放，无法中断（仅置状态）'
+            } catch (cause) { interruptError = String((cause as Error)?.message ?? cause).slice(0, 120) }
+          } else {
+            interruptError = '该派发没有关联会话'
+          }
           const next = store.updateDispatch(b, {
             status: hasOutput ? 'partial' : 'cancelled',
             error: String(body?.reason ?? (hasOutput ? '用户手动停止（已保留部分结果）' : '用户手动停止')),
           })
           send(res, 200, {
-            ok: true, dispatch: next,
-            note: hasOutput
-              ? '已标记停止，已产生的部分结果保留。注意：AI 可能仍在跑完当前步，但后续不再计入本次任务。'
-              : '已停止。',
+            ok: true, dispatch: next, interrupted,
+            note: interrupted
+              ? (hasOutput ? '已中断 AI，已产生的部分结果保留。' : '已中断 AI。')
+              : `已标记停止${interruptError !== '' ? `（${interruptError}）` : ''}${hasOutput ? '，部分结果保留' : ''}。`,
           })
           return true
         }

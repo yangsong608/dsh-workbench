@@ -48,5 +48,14 @@ check('不存在返回 404', c3.status === 404, `status=${c3.status}`)
 const c4 = await call('GET', `/agents/dispatches/${d1.id}/cancel`)
 check('GET /cancel 返回 405', c4.status === 405, `status=${c4.status}`)
 
+// 5) 真正中断：宿主 agent.cancel 被调用（用假 ctx 注入探测）
+const { readFileSync } = await import('node:fs')
+const src = readFileSync(join(root, 'src/host/agent.ts'), 'utf8')
+check('实现调用 agent.cancel（宿主中断 API）', /agent\.cancel\(\{ kind: 'user' \}\)/.test(src))
+check('兜底 agent.interrupt', src.includes('agent.interrupt({ kind: \'user\' })') || src.includes("agent.interrupt({ kind: 'user' })"))
+check('最后兜底 pendingPrompt.abort', src.includes('pendingPrompt') && src.includes('.abort()'))
+check('返回 interrupted 标志', src.includes('interrupted,') || src.includes('interrupted:'))
+check('无会话时给出明确原因', src.includes('该派发没有关联会话') && src.includes('会话已释放'))
+
 console.log(`\n${pass}/${pass + fail} 通过`)
 process.exit(fail > 0 ? 1 : 0)
